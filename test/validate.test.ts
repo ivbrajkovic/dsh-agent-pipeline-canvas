@@ -1,25 +1,24 @@
 // validateGraph smoke test — plain Node script (no framework). Run with:
-//   node test/validate.test.mjs
-// Imports the canonical pure implementation from lib/graph.js (the Host / future
-// runner imports the same module; the browser mirrors it in lib/client.js).
-
+//   tsx test/validate.test.ts
+// Imports the canonical pure implementation from lib/graph.js (the built output
+// of src/graph.ts; the Host and the browser bundle use the same implementation).
 import { validateGraph } from "../lib/graph.js";
 import { deepStrictEqual } from "node:assert";
 
 let passed = 0;
 let failed = 0;
 
-function check(name, graph, expectOk, expectCodes) {
-	let result;
+function check(name: string, graph: unknown, expectOk: boolean, expectCodes: string[]) {
+	let result: { ok: boolean; errors: Array<{ code: string }> };
 	try {
 		result = validateGraph(graph);
 	} catch (error) {
 		failed++;
-		console.error(`FAIL  ${name} — threw: ${error && error.message}`);
+		console.error(`FAIL  ${name} — threw: ${error && (error as Error).message}`);
 		return;
 	}
 	const codes = result.errors.map((e) => e.code).filter((c) => expectCodes.includes(c));
-	const all = (a, b) => a.every((x) => b.includes(x));
+	const all = (a: string[], b: string[]) => a.every((x) => b.includes(x));
 	if (result.ok !== expectOk || !all(expectCodes, result.errors.map((e) => e.code))) {
 		failed++;
 		console.error(`FAIL  ${name}`);
@@ -32,8 +31,8 @@ function check(name, graph, expectOk, expectCodes) {
 	console.log(`ok    ${name}`);
 }
 
-const agent = (id) => ({ id, name: id, description: "", instructions: "", x: 0, y: 0, input: id + ":in", output: id + ":out" });
-const conn = (id, source, target) => ({ id, source, target, sourcePort: source + ":out", targetPort: target + ":in" });
+const agent = (id: string) => ({ id, name: id, description: "", instructions: "", x: 0, y: 0, input: id + ":in", output: id + ":out" });
+const conn = (id: string, source: string, target: string) => ({ id, source, target, sourcePort: source + ":out", targetPort: target + ":in" });
 
 // --- valid / degenerate ---------------------------------------------
 check("null pipeline", null, true, []);

@@ -1,16 +1,16 @@
 // Execution-contract smoke test — plain Node script (no framework). Run with:
-//   node test/execution.test.mjs
-// Imports the canonical pure implementation from lib/execution.js (the Host /
-// future runner imports the same module). This exercises the runtime
-// input/output shapes, NOT scheduling/invocation — those are out of scope.
-
+//   tsx test/execution.test.ts
+// Imports the canonical pure implementation from lib/execution.js (the built
+// output of src/execution.ts; the Host and the runner import the same module).
+// This exercises the runtime input/output shapes, NOT scheduling/invocation —
+// those are out of scope.
 import { classifyGraph, agentInput, agentPrompt, pipelineResult, topoOrder, INPUT_KEY } from "../lib/execution.js";
 import { deepStrictEqual } from "node:assert";
 
 let passed = 0;
 let failed = 0;
 
-function eq(name, actual, expected) {
+function eq(name: string, actual: unknown, expected: unknown) {
 	try {
 		deepStrictEqual(actual, expected);
 		passed++;
@@ -23,9 +23,9 @@ function eq(name, actual, expected) {
 	}
 }
 
-const agent = (id, name) => ({ id, name: name ?? id, description: "", instructions: "", x: 0, y: 0, input: id + ":in", output: id + ":out" });
-const conn = (id, source, target) => ({ id, source, target, sourcePort: source + ":out", targetPort: target + ":in" });
-const graph = (agents, connections) => ({ agents, connections });
+const agent = (id: string, name?: string) => ({ id, name: name ?? id, description: "", instructions: "", x: 0, y: 0, input: id + ":in", output: id + ":out" });
+const conn = (id: string, source: string, target: string) => ({ id, source, target, sourcePort: source + ":out", targetPort: target + ":in" });
+const graph = (agents: unknown[], connections: unknown[]) => ({ agents, connections });
 
 // --- classifyGraph ------------------------------------------------------
 {
