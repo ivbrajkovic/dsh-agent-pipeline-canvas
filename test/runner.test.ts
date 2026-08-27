@@ -1,5 +1,5 @@
 // runPipeline orchestration smoke test — plain Node script (no framework). Run:
-//   node test/runner.test.mjs
+//   tsx test/runner.test.ts
 // It exercises the runner's sequencing against a SCRIPTED subagent provider (the
 // same idea as the harness's own ScriptedSubagentProvider): it records the order
 // and prompt of every agent it starts and returns a deterministic output per
@@ -7,32 +7,31 @@
 // the terminal-output shape WITHOUT a live model. The real harness subagent
 // service satisfies the same `start(name, { prompt, parent, label, signal })`
 // contract.
-
 import { runPipeline } from "../lib/runner.js";
 import { deepStrictEqual, ok } from "node:assert";
 
 let passed = 0;
 let failed = 0;
 
-function okCheck(name, cond) {
+function okCheck(name: string, cond: boolean) {
 	if (cond) { passed++; console.log(`ok    ${name}`); }
 	else { failed++; console.error(`FAIL  ${name}`); }
 }
 
-const agent = (id, name, instructions) => ({
+const agent = (id: string, name: string, instructions?: string) => ({
 	id, name, description: "", instructions: instructions || "",
 	x: 0, y: 0, input: id + ":in", output: id + ":out",
 });
-const conn = (id, source, target) => ({
+const conn = (id: string, source: string, target: string) => ({
 	id, source, target, sourcePort: source + ":out", targetPort: target + ":in",
 });
-const graph = (agents, connections) => ({ agents, connections });
+const graph = (agents: unknown[], connections: unknown[]) => ({ agents, connections });
 
-function makeCtx(providerNames) {
-	const invocations = [];
+function makeCtx(providerNames?: string[]) {
+	const invocations: Array<{ name: string; label: string | undefined; prompt: string; parent: unknown; signal: unknown }> = [];
 	const subagents = {
 		list: () => providerNames ?? ["spawn"],
-		start: (name, request) => {
+		start: (name: string, request: { label?: string; prompt: Array<{ text: string }>; parent: unknown; signal?: unknown }) => {
 			invocations.push({ name, label: request.label, prompt: request.prompt[0].text, parent: request.parent, signal: request.signal });
 			return {
 				id: "child-" + invocations.length,
@@ -41,7 +40,7 @@ function makeCtx(providerNames) {
 			};
 		},
 	};
-	const agents = { get: (id) => (id === "sess" ? { id: "sess", ctx: {} } : undefined) };
+	const agents = { get: (id: string) => (id === "sess" ? { id: "sess", ctx: {} } : undefined) };
 	const logger = { warn: () => {} };
 	return { ctx: { subagents, agents, logger }, invocations };
 }
@@ -60,8 +59,10 @@ function makeCtx(providerNames) {
 	okCheck("root gets pipeline input", invocations[0].prompt.includes("## Input\nhello"));
 	// Single-upstream b receives a's output, labelled by source name.
 	okCheck("downstream gets upstream output", invocations[1].prompt.includes("## Alpha\n<out:Alpha>"));
-	deepStrictEqual(result.outputs, { b: "<out:Beta>" });
-	deepStrictEqual(result.runs.map((r) => r.status), ["completed", "completed"]);
+	if (result.ok) {
+		deepStrictEqual(result.outputs, { b: "<out:Beta>" });
+		deepStrictEqual(result.runs.map((r) => r.status), ["completed", "completed"]);
+	}
 }
 
 // --- fan-in A -> C, B -> C ---------------------------------------------
@@ -78,7 +79,7 @@ function makeCtx(providerNames) {
 	okCheck("fan-in ok", result.ok === true);
 	okCheck("fan-in waits for all upstreams", invocations.map((i) => i.label).join(",") === "Alpha,Beta,Gamma");
 	okCheck("fan-in prompt has both upstream outputs", invocations[2].prompt.includes("## Alpha\n<out:Alpha>") && invocations[2].prompt.includes("## Beta\n<out:Beta>"));
-	deepStrictEqual(result.outputs, { c: "<out:Gamma>" });
+	if (result.ok) deepStrictEqual(result.outputs, { c: "<out:Gamma>" });
 }
 
 // --- orphan runs as root+terminal, included in outputs ------------------
@@ -92,7 +93,7 @@ function makeCtx(providerNames) {
 	okCheck("orphan ok", result.ok === true);
 	okCheck("orphan ran once", invocations.length === 1 && invocations[0].label === "Delta");
 	okCheck("orphan received pipeline input", invocations[0].prompt.includes("## Input\nsolo"));
-	deepStrictEqual(result.outputs, { d: "<out:Delta>" });
+	if (result.ok) deepStrictEqual(result.outputs, { d: "<out:Delta>" });
 }
 
 // --- multiple terminals --------------------------------------------------
@@ -108,7 +109,7 @@ function makeCtx(providerNames) {
 	});
 	okCheck("multi-terminal ok", result.ok === true);
 	// a is a root+terminal (no upstream, no downstream? actually a has downstream c). Let's use a clear graph:
-	deepStrictEqual(Object.keys(result.outputs).sort(), ["b", "c"]);
+	if (result.ok) deepStrictEqual(Object.keys(result.outputs).sort(), ["b", "c"]);
 }
 
 // --- invalid graph (cycle) ----------------------------------------------
@@ -126,14 +127,14 @@ function makeCtx(providerNames) {
 {
 	const { ctx } = makeCtx();
 	const result = await runPipeline(ctx, { graph: graph([], []), input: "", sessionId: "nope" });
-	okCheck("parent unavailable rejected", result.ok === false && /no live agent/.test(result.error));
+	okCheck("parent unavailable rejected", result.ok === false && /no live agent/.test(result.error ?? ""));
 }
 
 // --- no registered provider --------------------------------------------
 {
 	const { ctx } = makeCtx([]);
 	const result = await runPipeline(ctx, { graph: graph([agent("a", "A", "")], []), input: "", sessionId: "sess" });
-	okCheck("no provider rejected", result.ok === false && /no subagent provider/.test(result.error));
+	okCheck("no provider rejected", result.ok === false && /no subagent provider/.test(result.error ?? ""));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
