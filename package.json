@@ -1,0 +1,26 @@
+{
+  "name": "dsh-agent-pipeline-canvas",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local DSH Web composition plugin: a visual agent-pipeline canvas as a persistent 'Pipelines' view tab in every session. Drag an Agent from a palette onto the canvas, reposition nodes, and connect outputs to inputs with directed edges. Holds the graph as structured data and validates it as a DAG (cycles, self/duplicate/malformed connections, missing agents or ports). A minimal sequential runner runs the snapshot by delegating each agent to the harness's subagents service in topological order, passing outputs downstream and returning the { outputs } result. Parallel execution, retries, conditions, loops, cancellation, and live visualization are not implemented yet.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./graph": "./lib/graph.js",
+    "./execution": "./lib/execution.js",
+    "./runner": "./lib/runner.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.17"
+  }
+}
