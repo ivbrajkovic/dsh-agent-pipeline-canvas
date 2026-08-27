@@ -31,31 +31,50 @@ same graph, including each agent's `name`/`description`/`instructions`. The
 browser loads/saves through a same-origin Host route (`/dsh-agent-pipeline`);
 the Host half resolves the file under the project root and writes it atomically.
 Because the storage path is the session's workspace directory, different
-repositories get independent pipelines. See `lib/index.js` (Host route) and
-`lib/client.js` (load/save in the view).
+repositories get independent pipelines. See `src/index.ts` (Host route) and
+`src/client.ts` (load/save in the view).
 
 ## Layout
 
+The plugin is TypeScript: the source lives under `src/` and the shipped
+artifacts under `lib/` are produced by the standard build
+(`pnpm run build` → `tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts`),
+matching the DSH plugin convention (as the published `dsh-better-sidebar` does).
+`src/client.ts` is bundled into `lib/client.js` by tsdown in the
+`window.__ModuleLoader__.load({ id, factory })` format the browser module system
+consumes; the node half (`lib/index.js`, `lib/graph.js`, `lib/execution.js`,
+`lib/runner.js`, `lib/types.js` + `.d.ts`) is emitted by tsc.
+
 ```
 dsh-agent-pipeline-canvas/
-  package.json       dual-face metadata (dsh.client → browser roster), zero deps
-  lib/index.js       Host half: Cordis plugin row — registers the `/dsh-agent-pipeline`
-                     route (load/save + atomically write pipeline.json) and, now,
-                     returns the graph's DAG `validation` on GET/POST.
-  lib/client.js      Browser half: the Pipelines view tab in conversation.view
-                     (canvas, config panel, load/save, and live DAG validation UI).
-  lib/graph.js       Canonical graph-semantics module: pure `validateGraph(graph)`.
-                     Imported by the Host; the future executor will import it too.
-  lib/execution.js   Canonical execution-contract module (pure): classification
-                     (root/terminal/orphan), the per-agent input shape, the default
-                     prompt framing, the deterministic run order (`topoOrder`), and
-                     the final-result shape.
-  lib/runner.js      Host-side minimal sequential runner: validates the snapshot,
-                     resolves the session's live Agent as parent, and runs each
-                     pipeline agent as a fresh `spawn` subagent in topological order.
-  test/validate.test.mjs  Plain Node smoke test for validateGraph (node test/validate.test.mjs).
-  test/execution.test.mjs Plain Node smoke test for the execution contract (node test/execution.test.mjs).
-  test/runner.test.mjs    Plain Node smoke test for the runner orchestration (node test/runner.test.mjs).
+  package.json          dual-face metadata (dsh.client → browser roster), zero
+                        runtime deps; build/test scripts + devDeps
+  tsconfig.build.json   node-half emit: src/*.ts -> lib/*.js + lib/*.d.ts (excl. client)
+  tsconfig.json         whole-tree noEmit typecheck facade (incl. the browser client)
+  tsdown.config.ts      browser bundle: src/client.ts -> lib/client.js (module-loader format)
+  src/index.ts          Host half: Cordis plugin row — registers the `/dsh-agent-pipeline`
+                        route (load/save + atomically write pipeline.json) and returns the
+                        graph's DAG `validation` on GET/POST.
+  src/client.ts         Browser half: the Pipelines view tab in conversation.view
+                        (canvas, config panel, load/save, and live DAG validation UI).
+                        Bundled by tsdown; it imports the shared validateGraph.
+  src/graph.ts          Canonical graph-semantics module: pure `validateGraph(graph)` /
+                        `findCycle`. Imported by the Host, the runner, AND the browser
+                        bundle (inlined by tsdown) — one implementation, no duplication.
+  src/execution.ts      Canonical execution-contract module (pure): classification
+                        (root/terminal/orphan), the per-agent input shape, the default
+                        prompt framing, the deterministic run order (`topoOrder`), and
+                        the final-result shape.
+  src/runner.ts         Host-side minimal sequential runner: validates the snapshot,
+                        resolves the session's live Agent as parent, and runs each
+                        pipeline agent as a fresh `spawn` subagent in topological order.
+  src/types.ts          Shared contract types (PipelineGraph / Agent / Connection, validation
+                        errors+results, agent execution input, pipeline execution result,
+                        runner request/result) — imported by both halves.
+  test/validate.test.ts   Smoke test for validateGraph (tsx test/validate.test.ts).
+  test/execution.test.ts  Smoke test for the execution contract (tsx test/execution.test.ts).
+  test/runner.test.ts     Smoke test for the runner orchestration (tsx test/runner.test.ts).
+  lib/                  Build output (committed, like dsh-better-sidebar).
 ```
 
 ## Graph semantics & validation
@@ -87,12 +106,13 @@ and **invalid source / target ports** (`connection-source-port-mismatch` /
 ids and non-array `agents`/`connections` are also caught. An absent/empty graph
 is valid (nothing to run).
 
-`validateGraph` is duplicated in `lib/client.js` because a client bundle
-resolves `require()` against the platform seed / module table, not relative
-files, so it cannot import the Host's `./graph.js`; the two copies are kept in
-sync. The Host returns its own authoritative `validation` alongside `pipeline`
-on GET and on the POST acknowledgement, so any consumer (e.g. a future runner)
-gets the on-disk graph checked without changing the write behaviour.
+`validateGraph` is shared between the Host and the browser: the browser bundle
+is built by tsdown from `src/client.ts`, which imports `validateGraph` from
+`src/graph.ts`, so tsdown inlines a single implementation rather than a second
+hand-written copy. The Host returns its own authoritative `validation` alongside
+`pipeline` on GET and on the POST acknowledgement, so any consumer (e.g. a
+future runner) gets the on-disk graph checked without changing the write
+behaviour.
 
 ## Execution contract
 
