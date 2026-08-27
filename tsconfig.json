@@ -1,0 +1,20 @@
+{
+  // Whole-tree NO-EMIT typecheck facade: every src module (including the
+  // browser client, which needs DOM + React types). Editors and
+  // `pnpm run typecheck` use this; the build uses tsconfig.build.json, and the
+  // tests run through tsx (transpile-only) in test/.
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

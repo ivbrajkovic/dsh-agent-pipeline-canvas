@@ -1,0 +1,26 @@
+{
+  // Node-half build: compiles src/*.ts -> lib/*.js + lib/*.d.ts (the pure
+  // semantics + Host plugin), excluding the browser client bundle, which
+  // tsdown builds separately into lib/client.js (see tsdown.config.ts).
+  // Mirrors the harness convention (moduleResolution bundler +
+  // allowImportingTsExtensions + rewriteRelativeImportExtensions) so imports
+  // are spelled as ".ts" in source and rewritten to ".js" on emit.
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "lib",
+    "rootDir": "src",
+    "strict": true,
+    "skipLibCheck": true,
+    "lib": ["ES2024"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/client.ts"]
+}

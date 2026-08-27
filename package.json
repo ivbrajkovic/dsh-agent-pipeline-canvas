@@ -13,6 +13,11 @@
     "./runner": "./lib/runner.js",
     "./package.json": "./package.json"
   },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "tsx test/validate.test.ts && tsx test/execution.test.ts && tsx test/runner.test.ts"
+  },
   "dsh": {
     "client": {
       "platform": "web",
@@ -22,5 +27,12 @@
   "license": "MIT",
   "engines": {
     "node": ">=18.17"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "tsdown": "^0.22.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
   }
 }
