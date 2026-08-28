@@ -6,8 +6,10 @@ of agents run by delegating each one to the harness's own `subagents` service;
 it persists per repository at `<workspace>/.agent-pipeline/pipeline.json`.
 `README.md` is the full human-facing doc.
 
-Open verification: a real end-to-end run in the browser (confirming
-`agents.get(sessionId)` resolves a live parent from route context).
+Verified end-to-end in the browser (2026-08-28): `agents.get(sessionId)`
+resolves a live parent from route context; a two-agent pipeline ran
+sequentially, agent-1's output reached agent-2 under its source label, and the
+route returned the contract shape `{ ok, outputs, runs, order }`.
 
 ## Architecture
 
