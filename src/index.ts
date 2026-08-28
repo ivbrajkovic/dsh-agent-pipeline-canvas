@@ -1,67 +1,92 @@
 // dsh-agent-pipeline-canvas — Host half.
 //
 // The canvas is a browser-side feature (see ./client.tsx); the Host half exists
-// so the graph can be made durable per repository. It registers two exact
-// routes on the existing `webServer` service (the browser HTTP carrier, row
-// `webserver`), and the browser half fetch()es them same-origin to load and
-// save the project's pipeline:
+// so the graph can be made durable per repository and pipelines can RUN
+// durably. It registers exact routes on the existing `webServer` service (the
+// browser HTTP carrier, row `webserver`); the browser half fetch()es them
+// same-origin:
 //
 //   GET  /dsh-agent-pipeline?cwd=<absolute project root>
-//        -> { ok: true, pipeline: <graph> | null }   (no file yet => null)
+//        -> { ok, pipeline: <graph> | null, validation, run: <active record|null> }
+//        (no file yet => null; `run` carries the workspace's active run record
+//        — running or paused — so a reload discovers it without a list route)
 //   POST /dsh-agent-pipeline   body { cwd, graph }
-//        -> { ok: true }                             (writes the file)
-//   POST /dsh-agent-pipeline/run  body { sessionId, graph, input }
-//        -> { ok, outputs, runs, order }             (runs the pipeline snapshot;
-//          aborted early when the browser connection closes — see the run
-//          route's cancellation note below)
+//        -> { ok, validation }                     (writes the file)
+//   POST /dsh-agent-pipeline/run  body { sessionId, cwd, graph, input }
+//        -> { ok, runId } | 409 { ok: false, activeRunId }
+//        (starts a DURABLE run executor in the Host process and returns
+//        immediately — see lib/runs.ts. Runs outlive the tab: there is NO
+//        abort-on-client-disconnect here anymore.)
+//   GET  /dsh-agent-pipeline/run?id=<runId>&cwd=<absolute project root>
+//        -> { ok, run: <full record> }             (debug/fallback; curl-able)
+//   GET  /dsh-agent-pipeline/run/events?id=<runId>&cwd=<absolute project root>
+//        -> text/event-stream: `event: snapshot` (full record) on connect,
+//           `event: update` per transition, `: ping` heartbeats. The browser
+//           uses EventSource (same-origin auth like fetch; auto-reconnect
+//           self-heals a profile restart).
+//   POST /dsh-agent-pipeline/control body { runId, cwd, action, feedback? }
+//        -> { ok } | { ok: false, error }   (resume | rerun | steer | abort)
 //   GET  /dsh-agent-pipeline/options?provider=<route id>
-//        -> { ok, providers, models, provider }      (the registered LLM
-//          provider routes for the config modal's dropdowns; `models` are
-//          the advertised models of one route, `provider` the route the models
-//          belong to. Read server-side off the `llm` service — per-provider
-//          model catalogs are not remotely callable, so the browser reads
-//          them through this plugin route. Degrades to empty lists.)
+//        -> { ok, providers, models, provider }    (the settings panel's
+//          provider/model directory, read server-side off the `llm` service.
+//          Degrades to empty lists.)
 //
-// The run route is a minimal, sequential executor: it validates the snapshot,
-// resolves the session's live Agent as the parent, and runs each pipeline agent
-// as a fresh `spawn` subagent in deterministic topological order, passing each
-// output downstream (see lib/runner.ts). It reuses the harness's own `subagents`
-// service — no separate agent execution mechanism.
+// Run execution: the run registry (lib/runs.ts) walks the graph's topological
+// order sequentially. Non-breakpointed agents run as one-shot `spawn`
+// subagents parented to the session agent; breakpointed agents run as
+// continuable subagents under a disposable per-run coordinator agent (hidden,
+// `origin: "subagent"`, delegationDepth 0), pausing at each breakpoint for the
+// user's Resume / Rerun / Steer / Abort. Breakpointed agents require the
+// harness continuable runtime (`subagents.startContinuable` +
+// `sessionPersistence`, both mounted by the base bundle); when absent the
+// plugin degrades: breakpointed agents run one-shot, steering is rejected,
+// rerun still works.
 //
-// Storage: `<cwd>/.agent-pipeline/pipeline.json`, written atomically (temp file
-// + rename) so a crash mid-write never leaves a truncated file. The pipeline
-// belongs to the workspace / repo where the Agent Pipeline view is opened; a
-// different repository has its own project root and therefore its own file.
+// Storage: `<cwd>/.agent-pipeline/pipeline.json` and
+// `<cwd>/.agent-pipeline/runs/<runId>.json`, both written atomically (temp
+// file + rename — see lib/storage.ts) so a crash mid-write never leaves a
+// truncated file. The pipeline and its runs belong to the workspace / repo
+// where the Agent Pipeline view is opened; a different repository has its own
+// project root and therefore its own files.
 //
-// Trust model (local, single-user tool): the browser supplies the cwd, which is
-// the workspace root the session already resolved (the view reads it off the
-// session's own summary). The Host only ever appends `.agent-pipeline/
-// pipeline.json` under that absolute path; it refuses a relative or empty cwd,
-// so the file cannot land outside a real project directory. No data is returned
-// back to the browser other than the graph itself or `{ ok }` / `{ ok: false }`.
+// Trust model (local, single-user tool): the browser supplies the cwd, which
+// is the workspace root the session already resolved (the view reads it off
+// the session's own summary). The Host only ever appends `.agent-pipeline/…`
+// under that absolute path; it refuses a relative or empty cwd, so files
+// cannot land outside a real project directory.
 
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { mkdir, readFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { validateGraph } from "./graph.ts";
-import { runPipeline, type RunnerContext } from "./runner.ts";
+import type { RunnerContext, SubagentRunEndInfoLike } from "./runner.ts";
+import { RunRegistry } from "./runs.ts";
+import { writeAtomic } from "./storage.ts";
 import type { PipelineGraph } from "./types.ts";
 
 const name = "agent-pipeline-canvas";
 // `webServer` serves the routes; `agents` resolves the live session Agent that
-// acts as the parent of every pipeline subagent; `subagents` runs each agent;
-// `llm` answers the options route's provider/model directory.
+// parents one-shot pipeline subagents (and seeds the per-run coordinator);
+// `subagents` runs each agent; `llm` answers the options route's provider/model
+// directory. `sessionPersistence` is deliberately NOT injected: it is
+// feature-probed (ctx.get) so a deployment without it still loads the plugin
+// and simply loses steering (see the degradation note above).
 const inject = ["webServer", "agents", "subagents", "llm"];
 
 /** Same-origin route the browser half loads/saves through. */
 const ROUTE_PATH = "/dsh-agent-pipeline";
-/** Same-origin route that runs a pipeline snapshot (see lib/runner.ts). */
+/** Same-origin route that starts a durable pipeline run (see lib/runs.ts). */
 const RUN_PATH = "/dsh-agent-pipeline/run";
+/** SSE stream of one run's record transitions. */
+const RUN_EVENTS_PATH = "/dsh-agent-pipeline/run/events";
+/** Same-origin route carrying run control commands (resume/rerun/steer/abort). */
+const CONTROL_PATH = "/dsh-agent-pipeline/control";
 /** Same-origin route serving the provider/model directory (the settings panel). */
 const OPTIONS_PATH = "/dsh-agent-pipeline/options";
 /** Storage directory and file under the project root. */
 const PIPELINE_DIR = ".agent-pipeline";
 const PIPELINE_FILE = "pipeline.json";
+/** SSE heartbeat interval (a comment line; keeps intermediaries from idling out). */
+const SSE_PING_MS = 15000;
 
 // ---- Minimal, structural views of the harness services this half touches ----
 // As in runner.ts, these are NOT the full @deepseek-ai/cordis types: this is a
@@ -75,6 +100,7 @@ interface ServerRequest {
 
 interface ServerResponse {
 	writeHead(status: number, headers?: Record<string, string>): void;
+	write(chunk: string): unknown;
 	end(data?: string): void;
 	on(event: string, cb: (...args: unknown[]) => void): void;
 	/** True once `end()` has been called AND the body flushed (node:http). */
@@ -84,7 +110,7 @@ interface ServerResponse {
 type RouteHandler = (req: ServerRequest, res: ServerResponse) => void | Promise<void>;
 
 interface WebServerService {
-	register(route: { kind: "exact"; path: string; handler: RouteHandler }): unknown;
+	register(route: { kind: "exact"; path: string; handler: RouteHandler }): () => void;
 }
 
 /** Structural view of the `llm` service the options route reads (see lib types). */
@@ -109,6 +135,10 @@ interface HostContext extends RunnerContext {
 	webServer: WebServerService;
 	llm: LlmService;
 	effect(fn: () => unknown): unknown;
+	/** Cordis event subscription (used for the `subagent/end` settlement seam). */
+	on(event: string, listener: (payload: never) => void): () => void;
+	/** Cordis service probe (used to feature-detect `sessionPersistence`). */
+	get?(name: string): unknown | undefined;
 }
 
 /**
@@ -123,32 +153,6 @@ function pipelinePath(cwd: unknown): string | null {
 	return join(cwd, PIPELINE_DIR, PIPELINE_FILE);
 }
 
-/**
- * Durably replace `path` with `data`: write a same-directory temp file, fsync
- * it, then `rename()` over the target (atomic on POSIX and Windows). A failed
- * write cleans up the temp file. Mirrors the product's JSON-storage backend
- * write protocol, so one writer (this process) publishing whole files is safe.
- * @param path - absolute target file path.
- * @param data - full new file content.
- */
-async function writeAtomic(path: string, data: string): Promise<void> {
-	const dir = dirname(path);
-	const tmp = join(dir, `.${randomUUID()}.tmp`);
-	try {
-		const handle = await open(tmp, "wx", 0o600);
-		try {
-			await handle.writeFile(data, "utf8");
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		await rename(tmp, path);
-	} catch (error) {
-		try { await rm(tmp, { force: true }); } catch { /* best-effort cleanup */ }
-		throw error;
-	}
-}
-
 /** Buffer and decode a request body (the client emits JSON). */
 function readBody(req: ServerRequest): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -157,6 +161,18 @@ function readBody(req: ServerRequest): Promise<string> {
 		req.on("end", () => { resolve(Buffer.concat(chunks).toString("utf8")); });
 		req.on("error", reject);
 	});
+}
+
+/** Parse a JSON object body, or null when the body is not valid JSON / not an object. */
+async function readJsonObject(req: ServerRequest): Promise<Record<string, unknown> | null> {
+	const body = await readBody(req);
+	try {
+		const payload: unknown = JSON.parse(body);
+		if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+		return payload as Record<string, unknown>;
+	} catch {
+		return null;
+	}
 }
 
 /** Write a JSON response with no-store and end the request. */
@@ -169,11 +185,34 @@ function send(res: ServerResponse, status: number, payload: unknown): void {
 }
 
 /**
- * Mount the pipeline persistence route on this plugin's fiber, so an unload
- * removes it.
+ * Mount the pipeline persistence + run routes on this plugin's fiber, so an
+ * unload removes them and closes every open SSE stream.
  * @param ctx - registrant context carrying the webServer service.
  */
 export function apply(ctx: HostContext): void {
+	// The durable run registry: starts executors, persists records under the
+	// workspace, sweeps stale runs, routes control commands. Settlements arrive
+	// through the root-level `subagent/end` listener (events are filtered by
+	// child id downstream; a root-level listener sees one-shot and continuable
+	// settlements alike).
+	const registry = new RunRegistry({
+		agents: ctx.agents as unknown as ConstructorParameters<typeof RunRegistry>[0]["agents"],
+		subagents: ctx.subagents,
+		logger: ctx.logger,
+		subscribeRunEnd: (fn) => ctx.on("subagent/end", (info: SubagentRunEndInfoLike) => fn(info)),
+		sessionPersistence: typeof ctx.get === "function" ? ctx.get("sessionPersistence") : undefined,
+	});
+
+	// One SSE stream per connected browser tab. Plugin unload (the effect's
+	// cleanup) ends every open response and removes its listeners — no leaks.
+	const sseClients = new Set<{ res: ServerResponse; cleanup: () => void }>();
+	function closeAllSse(): void {
+		for (const client of [...sseClients]) {
+			try { client.res.end(); } catch { /* already gone */ }
+			client.cleanup();
+		}
+	}
+
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: ROUTE_PATH,
@@ -183,7 +222,8 @@ export function apply(ctx: HostContext): void {
 
 			try {
 				if (method === "GET") {
-					const path = pipelinePath(url.searchParams.get("cwd") ?? "");
+					const cwd = url.searchParams.get("cwd") ?? "";
+					const path = pipelinePath(cwd);
 					if (path === null) {
 						send(res, 400, { ok: false, error: "invalid or missing cwd" });
 						return;
@@ -204,35 +244,31 @@ export function apply(ctx: HostContext): void {
 					// `validation` is additive: the browser computes the same result
 					// client-side, but returning it here gives any consumer (e.g. a
 					// future runner) the authoritative DAG check for the on-disk graph.
-					send(res, 200, { ok: true, pipeline, validation: validateGraph(pipeline) });
+					// `run` is the workspace's active run record (running|paused) —
+					// the discovery path for a page reload; loading it also sweeps
+					// stale runs and resurrects paused ones (see lib/runs.ts).
+					const run = await registry.activeRunForCwd(cwd);
+					send(res, 200, { ok: true, pipeline, validation: validateGraph(pipeline), ...(run !== null ? { run } : { run: null }) });
 					return;
 				}
 
 				if (method === "POST") {
-					const body = await readBody(req);
-					let payload: unknown;
-					try {
-						payload = JSON.parse(body);
-					} catch {
-						send(res, 400, { ok: false, error: "request body is not valid JSON" });
-						return;
-					}
-					if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+					const payload = await readJsonObject(req);
+					if (payload === null) {
 						send(res, 400, { ok: false, error: "request body must be a JSON object" });
 						return;
 					}
-					const rec = payload as { cwd?: unknown; graph?: unknown };
-					const path = pipelinePath(rec.cwd);
+					const path = pipelinePath(payload.cwd);
 					if (path === null) {
 						send(res, 400, { ok: false, error: "invalid or missing cwd" });
 						return;
 					}
-					await mkdir(dirname(path), { recursive: true });
-					await writeAtomic(path, `${JSON.stringify(rec.graph, null, 2)}\n`);
+					await mkdir(join((payload.cwd as string), PIPELINE_DIR), { recursive: true });
+					await writeAtomic(path, `${JSON.stringify(payload.graph, null, 2)}\n`);
 					// Still persist the graph (the canvas may be mid-edit); the
 					// validation result is returned so callers can surface issues
 					// without the Host changing its write behaviour.
-					send(res, 200, { ok: true, validation: validateGraph(rec.graph) });
+					send(res, 200, { ok: true, validation: validateGraph(payload.graph) });
 					return;
 				}
 
@@ -244,20 +280,121 @@ export function apply(ctx: HostContext): void {
 		},
 	}));
 
-	// Run a pipeline snapshot: the browser POSTs the graph it currently shows
-	// plus the pipeline-level input and its session id. The Host validates the
-	// snapshot, runs it sequentially (see lib/runner.ts), and returns the
-	// contract's `{ outputs: { [terminalId]: output } }` shape.
-	//
-	// Cancellation: each run gets its own AbortController, aborted the moment
-	// the browser connection closes before the response completed (Stop button
-	// aborting the fetch, tab closed, page reloaded). The runner passes the
-	// signal down to the harness subagents, so the in-flight agent stops
-	// mid-run and no further agent is started. The late response to a gone
-	// client is dropped.
+	// Start a durable run: validate the snapshot, then hand it to the registry.
+	// The route returns `{ ok, runId }` immediately — the executor continues in
+	// the Host process, persists every transition, and pauses at breakpoints.
+	// Deliberately NO abort-on-client-disconnect: runs outlive the tab (a
+	// reload re-discovers the active record via the pipeline GET's `run` field
+	// and re-subscribes to the SSE stream).
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: RUN_PATH,
+		handler: async (req, res) => {
+			const method = req.method ?? "GET";
+			if (method === "GET") {
+				// Debug/fallback read of one record (also curl-able).
+				const url = new URL(req.url ?? "/", "http://x");
+				const record = await registry.getRun(url.searchParams.get("id"), url.searchParams.get("cwd"));
+				if (record === null) {
+					send(res, 404, { ok: false, error: "no such run" });
+					return;
+				}
+				send(res, 200, { ok: true, run: record });
+				return;
+			}
+			if (method !== "POST") {
+				send(res, 405, { ok: false, error: "method not allowed" });
+				return;
+			}
+			try {
+				const payload = await readJsonObject(req);
+				if (payload === null) {
+					send(res, 400, { ok: false, error: "request body must be a JSON object" });
+					return;
+				}
+				const outcome = await registry.startRun({
+					sessionId: typeof payload.sessionId === "string" ? payload.sessionId : "",
+					cwd: typeof payload.cwd === "string" ? payload.cwd : "",
+					graph: (payload.graph ?? undefined) as PipelineGraph | undefined,
+					input: payload.input,
+				});
+				if (outcome.ok) {
+					send(res, 200, { ok: true, runId: outcome.runId });
+					return;
+				}
+				send(res, outcome.activeRunId !== undefined ? 409 : 400, { ok: false, error: outcome.error, ...(outcome.activeRunId !== undefined ? { activeRunId: outcome.activeRunId } : {}) });
+			} catch (error) {
+				ctx.logger.warn(`agent-pipeline: ${RUN_PATH} failed: ${String(error)}`);
+				send(res, 500, { ok: false, error: "pipeline run error" });
+			}
+		},
+	}));
+
+	// SSE stream of one run's record: a full `snapshot` on every (re)connect,
+	// then an `update` per persisted transition. EventSource's auto-reconnect
+	// self-heals profile restarts (the fresh snapshot carries the resumed
+	// state); heartbeats keep intermediaries from idling the stream out.
+	ctx.effect(() => {
+		const disposeRoute = ctx.webServer.register({
+			kind: "exact",
+			path: RUN_EVENTS_PATH,
+			handler: async (req, res) => {
+				const method = req.method ?? "GET";
+				if (method !== "GET") {
+					send(res, 405, { ok: false, error: "method not allowed" });
+					return;
+				}
+				try {
+					const url = new URL(req.url ?? "/", "http://x");
+					const record = await registry.getRun(url.searchParams.get("id"), url.searchParams.get("cwd"));
+					if (record === null) {
+						send(res, 404, { ok: false, error: "no such run" });
+						return;
+					}
+					res.writeHead(200, {
+						"content-type": "text/event-stream",
+						"cache-control": "no-store",
+						// The webserver's gzip filter exempts text/event-stream, so
+						// writes flush immediately.
+					});
+					const writeEvent = (event: string, data: unknown): void => {
+						if (res.writableEnded) return;
+						try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* gone */ }
+					};
+					writeEvent("snapshot", record);
+					const unsubscribe = registry.subscribe(record.runId, (updated) => { writeEvent("update", updated); });
+					const ping = setInterval(() => {
+						if (res.writableEnded) return;
+						try { res.write(": ping\n\n"); } catch { /* gone */ }
+					}, SSE_PING_MS);
+					const client = {
+						res,
+						cleanup: () => {
+							clearInterval(ping);
+							if (unsubscribe !== null) unsubscribe();
+							sseClients.delete(client);
+						},
+					};
+					sseClients.add(client);
+					res.on("close", () => { client.cleanup(); });
+				} catch (error) {
+					ctx.logger.warn(`agent-pipeline: ${RUN_EVENTS_PATH} failed: ${String(error)}`);
+					send(res, 500, { ok: false, error: "run events error" });
+				}
+			},
+		});
+		return () => {
+			closeAllSse();
+			disposeRoute();
+		};
+	});
+
+	// Run control: resume / rerun / steer / abort. Validated and routed by the
+	// registry (which owns the executor mailbox); typed errors for wrong-state
+	// commands, empty steering feedback, or missing runs.
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: CONTROL_PATH,
 		handler: async (req, res) => {
 			const method = req.method ?? "GET";
 			if (method !== "POST") {
@@ -265,44 +402,23 @@ export function apply(ctx: HostContext): void {
 				return;
 			}
 			try {
-				const body = await readBody(req);
-				let payload: unknown;
-				try {
-					payload = JSON.parse(body);
-				} catch {
-					send(res, 400, { ok: false, error: "request body is not valid JSON" });
-					return;
-				}
-				if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+				const payload = await readJsonObject(req);
+				if (payload === null) {
 					send(res, 400, { ok: false, error: "request body must be a JSON object" });
 					return;
 				}
-				const rec = payload as { graph?: unknown; input?: unknown; sessionId?: unknown };
-				const controller = new AbortController();
-				let clientGone = false;
-				// res "close" with a not-yet-ended body is the reliable
-				// client-disconnect signal (req "close" merely marks the
-				// end of the request body).
-				res.on("close", () => {
-					if (!res.writableEnded) {
-						clientGone = true;
-						controller.abort();
-					}
-				});
-				const result = await runPipeline(ctx, {
-					graph: rec.graph as PipelineGraph | null | undefined,
-					input: rec.input,
-					sessionId: typeof rec.sessionId === "string" ? rec.sessionId : "",
-					signal: controller.signal,
-				});
-				if (clientGone) return;
-					send(res, 200, result);
-				} catch (error) {
-					ctx.logger.warn(`agent-pipeline: ${RUN_PATH} failed: ${String(error)}`);
-					send(res, 500, { ok: false, error: "pipeline run error" });
-				}
-			},
-		}));
+				const outcome = await registry.control(
+					payload.runId,
+					{ action: payload.action, feedback: payload.feedback },
+					payload.cwd,
+				);
+				send(res, outcome.ok ? 200 : 400, outcome);
+			} catch (error) {
+				ctx.logger.warn(`agent-pipeline: ${CONTROL_PATH} failed: ${String(error)}`);
+				send(res, 500, { ok: false, error: "run control error" });
+			}
+		},
+	}));
 
 	// Provider/model directory for the settings panel: the
 	// registered LLM provider routes plus, for one route, the models its
@@ -359,6 +475,14 @@ export function apply(ctx: HostContext): void {
 			}
 		},
 	}));
+
+	// Unload: close every open SSE stream. The run registry's records are
+	// intentionally left untouched — a paused run must survive an unload (and a
+	// process death) on disk and be resurrected by the next load.
+	ctx.effect(() => () => {
+		closeAllSse();
+		registry.dispose();
+	});
 }
 
 export { name, inject };

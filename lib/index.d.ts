@@ -1,4 +1,4 @@
-import { type RunnerContext } from "./runner.ts";
+import type { RunnerContext } from "./runner.ts";
 declare const name = "agent-pipeline-canvas";
 declare const inject: string[];
 interface ServerRequest {
@@ -8,6 +8,7 @@ interface ServerRequest {
 }
 interface ServerResponse {
     writeHead(status: number, headers?: Record<string, string>): void;
+    write(chunk: string): unknown;
     end(data?: string): void;
     on(event: string, cb: (...args: unknown[]) => void): void;
     /** True once `end()` has been called AND the body flushed (node:http). */
@@ -19,7 +20,7 @@ interface WebServerService {
         kind: "exact";
         path: string;
         handler: RouteHandler;
-    }): unknown;
+    }): () => void;
 }
 /** Structural view of the `llm` service the options route reads (see lib types). */
 interface LlmProviderInfoLike {
@@ -40,10 +41,14 @@ interface HostContext extends RunnerContext {
     webServer: WebServerService;
     llm: LlmService;
     effect(fn: () => unknown): unknown;
+    /** Cordis event subscription (used for the `subagent/end` settlement seam). */
+    on(event: string, listener: (payload: never) => void): () => void;
+    /** Cordis service probe (used to feature-detect `sessionPersistence`). */
+    get?(name: string): unknown | undefined;
 }
 /**
- * Mount the pipeline persistence route on this plugin's fiber, so an unload
- * removes it.
+ * Mount the pipeline persistence + run routes on this plugin's fiber, so an
+ * unload removes them and closes every open SSE stream.
  * @param ctx - registrant context carrying the webServer service.
  */
 export declare function apply(ctx: HostContext): void;
