@@ -1,0 +1,34 @@
+/* The paused-run inspection modal: meta strip, fixed composed input, adopted
+   output, the steer feedback box, and the control actions. Reuses the shared
+   modal/result vocabulary (.pipeline-modal, .pipeline-btn, .run-status). */
+
+.pipeline-inspect-meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+	font-size: 11px;
+	color: var(--dsw-alias-label-secondary);
+}
+.pipeline-inspect-hint { flex: 1; text-align: right; }
+.pipeline-inspect-block {
+	margin: 0;
+	padding: 6px 8px;
+	background: var(--dsw-alias-bg-base);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 6px;
+	font-size: 11px;
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 140px;
+	overflow: auto;
+}
+.pipeline-inspect-error {
+	font-size: 11px;
+	color: var(--dsw-alias-state-error-primary);
+}
+.pipeline-inspect-spacer { flex: 1; }
+.pipeline-btn-danger {
+	color: var(--dsw-alias-state-error-primary);
+	border-color: var(--dsw-alias-state-error-primary);
+}

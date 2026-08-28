@@ -31,6 +31,8 @@ export interface CanvasAgent {
 	y: number;
 	/** The agent's settings (see AgentSettings); absent fields inherit defaults. */
 	settings?: AgentSettings;
+	/** Pause-on-output breakpoint: the run parks after this agent settles. */
+	breakpoint?: boolean;
 }
 
 /** A connection as held in React state (ports derived from source/target). */
@@ -47,6 +49,36 @@ export interface RunResultLike {
 	runs?: Array<{ id: string; label?: string; status?: string; error?: string; childSessionId?: string }>;
 	error?: string;
 	validationErrors?: Array<{ message?: string }>;
+	/** The durable run ended because the user aborted it. */
+	aborted?: boolean;
+}
+
+// ---- Durable run state (mirrors the Host's RunRecord; type-only import) ----
+
+/** One agent's state inside a run record (mirrors the Host's RunNodeState). */
+export interface RunNodeStateLike {
+	status?: "pending" | "running" | "done" | "paused" | "aborted" | "error";
+	input?: string;
+	output?: string;
+	error?: string;
+	stopReason?: string;
+	childSessionId?: string;
+}
+
+/** The run record the browser follows over SSE (mirrors the Host's RunRecord). */
+export interface RunRecordLike {
+	runId?: string;
+	cwd?: string;
+	sessionId?: string;
+	coordinatorSessionId?: string;
+	createdAt?: string;
+	updatedAt?: string;
+	state?: "running" | "paused" | "completed" | "aborted" | "error";
+	pausedAt?: string;
+	graph?: PipelineGraph;
+	input?: unknown;
+	order?: string[];
+	nodes?: Record<string, RunNodeStateLike>;
 }
 
 /** The useSessions feed: session list rows plus the current selection. */
@@ -156,6 +188,7 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 			input: a.id + ":in",
 			output: a.id + ":out",
 			...(a.settings ? { settings: a.settings } : {}),
+			...(a.breakpoint === true ? { breakpoint: true } : {}),
 		})),
 		connections: connections.map((c) => ({
 			id: c.id,
@@ -176,7 +209,7 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
  * hand-edited file must not lose data); the edit form canonicalizes a shape
  * only when that agent is saved again.
  */
-export function loadAgent(raw: unknown): { systemPrompt: string; settings?: AgentSettings } {
+export function loadAgent(raw: unknown): { systemPrompt: string; settings?: AgentSettings; breakpoint?: boolean } {
 	const rawAgent = (raw ?? {}) as Record<string, unknown>;
 	const rawSettings = loadSettingsShape(rawAgent.settings !== undefined ? rawAgent.settings : rawAgent.overrides);
 	const legacySettingsPersona = rawSettings?.persona;
@@ -193,7 +226,8 @@ export function loadAgent(raw: unknown): { systemPrompt: string; settings?: Agen
 				: typeof legacySettingsPersona === "string"
 					? legacySettingsPersona
 					: "";
-	return { systemPrompt, settings };
+	const breakpoint = rawAgent.breakpoint === true;
+	return { systemPrompt, settings, ...(breakpoint ? { breakpoint: true } : {}) };
 }
 
 function loadSettingsShape(raw: unknown): (AgentSettings & { persona?: string }) | undefined {

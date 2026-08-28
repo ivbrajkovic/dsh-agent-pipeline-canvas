@@ -1,16 +1,30 @@
 // The Pipelines canvas view: the whole node workspace — a palette with a
-// draggable Agent, a canvas, node move/select, the node edit button,
-// output→input connections with directed edges, the toolbar (add/delete/
-// JSON/clear/run/stop), load/save through the Host routes, and the run/result
-// modals. Renders inside the per-session view tab AND the frame-wide shell
-// panel (see ./shell-panel.tsx); the two hosts differ only in the props below.
+// draggable Agent, a canvas, node move/select, the node edit button, the
+// breakpoint toggle, output→input connections with directed edges, the toolbar
+// (add/delete/JSON/clear/run/abort), load/save through the Host routes, the
+// run/result modals, and the paused-run inspection modal. Renders inside the
+// per-session view tab AND the frame-wide shell panel (see ./shell-panel.tsx);
+// the two hosts differ only in the props below.
+//
+// Running is DURABLE: the Run dialog POSTs the snapshot to the Host's /run
+// route, which starts a run executor in the Host process and returns a runId
+// immediately (one active run per workspace — a 409 reports the other run).
+// The view then follows the run's record over SSE (snapshot on connect/reconnect,
+// update per transition); EventSource's auto-reconnect self-heals a profile
+// restart. When the record pauses at a breakpointed agent, the inspection modal
+// opens with the composed input, the adopted output, and the control actions
+// (Resume / Rerun / Steer / Abort). On a terminal state (completed / aborted /
+// error) the result modal opens. A page reload re-discovers the active run via
+// the pipeline GET's `run` field and re-subscribes — runs outlive the tab.
 import * as React from "react";
 import { validateGraph } from "../graph.ts";
+import { classifyGraph } from "../execution.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
 import type { ValidationResult } from "../types.ts";
 import { AgentConfigPanel } from "./agent-config.tsx";
 import { RunModal } from "./run-modal.tsx";
 import { ResultModal } from "./result-modal.tsx";
+import { InspectModal } from "./inspect-modal.tsx";
 import {
 	ENDPOINT,
 	EMPTY_ITEMS,
@@ -23,6 +37,7 @@ import {
 	type CanvasConnection,
 	type FileRefCandidate,
 	type PipelineServices,
+	type RunRecordLike,
 	type RunResultLike,
 	type SessionTarget,
 	type UseSessions,
@@ -54,15 +69,21 @@ function PipelineView({
 	const [showJson, setShowJson] = React.useState(false);
 	const [configAgentId, setConfigAgentId] = React.useState<string | null>(null);
 	const [showRunModal, setShowRunModal] = React.useState(false);
-	const [running, setRunning] = React.useState(false);
+	// The durable run being followed (running or paused); null when idle/terminal.
+	const [activeRun, setActiveRun] = React.useState<RunRecordLike | null>(null);
+	const [startPending, setStartPending] = React.useState(false);
 	const [runResult, setRunResult] = React.useState<RunResultLike | null>(null);
 	const [resultOpen, setResultOpen] = React.useState(false);
 	const [continueBusy, setContinueBusy] = React.useState<string | null>(null);
 	const [continueStatus, setContinueStatus] = React.useState<string | null>(null);
+	// The paused-run inspection modal: closed per (run, agent) by the user.
+	const [inspectDismissedFor, setInspectDismissedFor] = React.useState<string | null>(null);
+	const [controlBusy, setControlBusy] = React.useState<string | null>(null);
+	const [controlStatus, setControlStatus] = React.useState<string | null>(null);
 	const runTextRef = React.useRef("");
 	const runFilesRef = React.useRef<string[]>([]);
-	/** The in-flight run's fetch AbortController; Stop aborts it (runAbortRef). */
-	const runAbortRef = React.useRef<AbortController | null>(null);
+	/** The live SSE subscription for the active run's record. */
+	const sseRef = React.useRef<EventSource | null>(null);
 	const canvasRef = React.useRef<HTMLDivElement | null>(null);
 	const idRef = React.useRef(0);
 	const dragRef = React.useRef<{ id: string; startClientX: number; startClientY: number; startX: number; startY: number } | null>(null);
@@ -90,6 +111,12 @@ function PipelineView({
 	const workspaceItems = useWorkspaces
 		? useWorkspaces((s) => (s && s.items) || EMPTY_ITEMS)
 		: EMPTY_ITEMS;
+
+	React.useEffect(() => () => {
+		// Unmount (leaving the canvas, panel close): the run itself keeps going
+		// server-side; the stream is simply detached. A remount re-discovers it.
+		if (sseRef.current !== null) { sseRef.current.close(); sseRef.current = null; }
+	}, []);
 
 	function newId(prefix: string): string {
 		idRef.current += 1;
@@ -205,57 +232,156 @@ function PipelineView({
 		runTextRef.current = ""; runFilesRef.current = [];
 	}
 
-	// Run the pipeline: POST the snapshot the user currently sees (the graph
-	// as-is, plus the composed pipeline input from the Run modal and the
-	// session id) to the Host's /run route, which executes it sequentially
-	// and returns the contract's `{ outputs: { [terminalId]: output } }` shape.
-	// The fetch rides a per-run AbortController: Stop aborts it, the browser
-	// closes the connection, and the Host aborts the run server-side.
+	// ---- Durable run lifecycle ----------------------------------------------
+	// An active run is anything the Host reports as running or paused; the
+	// canvas shows its per-node states, the Abort button, and (while a run is
+	// active) an "editing affects the next run" hint. The immutable snapshot
+	// was taken at POST time — canvas edits never touch the in-flight run.
+
+	const runActive = activeRun !== null && (activeRun.state === "running" || activeRun.state === "paused");
+	const pausedAt = runActive && activeRun.state === "paused" ? activeRun.pausedAt ?? null : null;
+	const inspectOpen = pausedAt !== null
+		&& activeRun !== null
+		&& typeof activeRun.runId === "string"
+		&& inspectDismissedFor !== (activeRun.runId + ":" + pausedAt);
+
+	function disconnectRunEvents() {
+		if (sseRef.current !== null) { sseRef.current.close(); sseRef.current = null; }
+	}
+
+	function connectRunEvents(runId: string) {
+		disconnectRunEvents();
+		if (typeof cwdRef.current !== "string" || cwdRef.current.length === 0) return;
+		const source = new EventSource(ENDPOINT + "/run/events?id=" + encodeURIComponent(runId) + "&cwd=" + encodeURIComponent(cwdRef.current));
+		sseRef.current = source;
+		const onRecord = (event: MessageEvent<string>) => {
+			let rec: RunRecordLike | null = null;
+			try { rec = JSON.parse(event.data) as RunRecordLike; } catch { rec = null; }
+			if (rec === null || typeof rec !== "object") return;
+			adoptRecord(rec);
+		};
+		source.addEventListener("snapshot", onRecord as EventListener);
+		source.addEventListener("update", onRecord as EventListener);
+		// Errors (a profile restart dropped the stream) are healed by
+		// EventSource's automatic reconnect: the fresh snapshot re-syncs state.
+	}
+
+	// Fold one record transition into the view: keep it while active; on a
+	// terminal state, detach the stream, re-enable the Run button, and open
+	// the result modal with the per-node statuses and terminal outputs.
+	function adoptRecord(rec: RunRecordLike) {
+		const state = rec.state;
+		if (state === "running" || state === "paused") {
+			setActiveRun(rec);
+			return;
+		}
+		disconnectRunEvents();
+		setActiveRun(null);
+		setRunResult(recordToResult(rec));
+		setResultOpen(true);
+	}
+
+	// Terminal record → the result modal's shape: the contract outputs keyed by
+	// terminal id (only agents that produced an output) plus per-agent statuses.
+	function recordToResult(rec: RunRecordLike): RunResultLike {
+		const nodes = rec.nodes ?? {};
+		const order = Array.isArray(rec.order) ? rec.order : [];
+		const runs = order.map((id) => {
+			const node = nodes[id];
+			return {
+				id,
+				label: nameOf(id),
+				status: node?.status ?? "pending",
+				...(node?.error ? { error: node.error } : {}),
+				...(node?.childSessionId ? { childSessionId: node.childSessionId } : {}),
+			};
+		});
+		if (rec.state === "error") {
+			return { ok: false, error: "The run failed — see the per-agent statuses below.", runs };
+		}
+		const terminals = classifyGraph(rec.graph).terminals;
+		const outputs: Record<string, unknown> = {};
+		for (const id of terminals) {
+			const output = nodes[id]?.output;
+			if (typeof output === "string") outputs[id] = output;
+		}
+		return { ok: true, outputs, runs, ...(rec.state === "aborted" ? { aborted: true } : {}) };
+	}
+
+	// Start a durable run: POST the snapshot the user currently sees (plus the
+	// composed pipeline input and the workspace root) and subscribe to the
+	// run's SSE stream. The Host validates, enforces the single-active-run rule
+	// (409 with the other run's id), and returns the runId immediately.
 	function run(text: string, files: string[]) {
-		if (running) return;
+		if (runActive || startPending) return;
 		runTextRef.current = text;
 		runFilesRef.current = files;
+		const workspace = cwdRef.current;
+		if (typeof workspace !== "string" || workspace.length === 0) {
+			setRunResult({ ok: false, error: "the pipeline's workspace root is not known yet — reopen this view and try again" });
+			setResultOpen(true);
+			return;
+		}
 		const g = buildGraph(agents, connections);
-		const controller = new AbortController();
-		runAbortRef.current = controller;
-		setRunning(true);
+		setStartPending(true);
 		setRunResult(null);
 		setShowRunModal(false);
+		setInspectDismissedFor(null);
+		setControlStatus(null);
 		fetch(ENDPOINT + "/run", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ sessionId, graph: g, input: composePipelineInput(text, files) }),
-			signal: controller.signal,
+			body: JSON.stringify({ sessionId, cwd: workspace, graph: g, input: composePipelineInput(text, files) }),
 		})
-			.then((r) => {
-				return r.text().then((body) => {
-					let data: RunResultLike | null = null;
-					try { data = body.length > 0 ? JSON.parse(body) : null; } catch { data = null; }
-					if (!r.ok) return { ok: false, error: (data && data.error) ? data.error : ("HTTP " + r.status) };
-					return data || { ok: false, error: "empty response" };
-				});
+			.then(async (r) => {
+				let data: { ok?: unknown; runId?: unknown; error?: unknown; activeRunId?: unknown } | null = null;
+				try { data = await r.json(); } catch { data = null; }
+				if (!r.ok || data === null || data.ok !== true || typeof data.runId !== "string") {
+					const detail = typeof data?.error === "string" ? data.error : "HTTP " + r.status;
+					const other = typeof data?.activeRunId === "string" ? ` (run ${data.activeRunId.slice(0, 8)}…)` : "";
+					throw new Error(detail + other);
+				}
+				return data.runId;
 			})
-			.then((data) => { runAbortRef.current = null; setRunning(false); setRunResult(data); setResultOpen(true); })
+			.then((runId) => { connectRunEvents(runId); })
 			.catch((err: unknown) => {
-				runAbortRef.current = null;
-				setRunning(false);
-				const stopped = (err as { name?: string } | null) !== null && (err as { name?: string }).name === "AbortError";
-				setRunResult({ ok: false, error: stopped ? "Run stopped — the in-flight agent was interrupted." : String(err) });
+				setRunResult({ ok: false, error: err instanceof Error ? err.message : String(err) });
 				setResultOpen(true);
-			});
+			})
+			.finally(() => { setStartPending(false); });
 	}
 
-	// Stop the in-flight run: aborting the fetch closes the connection, which
-	// the Host's run route watches — it aborts the pipeline server-side (the
-	// in-flight agent is interrupted, later agents never start).
-	function stopRun() {
-		const controller = runAbortRef.current;
-		if (controller) controller.abort();
+	// Send a control command for the active run (resume / rerun / steer /
+	// abort). State transitions come back through the SSE stream; a typed
+	// error is surfaced inline in the modal that issued the command.
+	async function controlRun(action: "resume" | "rerun" | "steer" | "abort", feedback?: string) {
+		const rec = activeRun;
+		const workspace = cwdRef.current;
+		if (!rec || typeof rec.runId !== "string" || typeof workspace !== "string") return;
+		setControlBusy(action);
+		setControlStatus(null);
+		try {
+			const r = await fetch(ENDPOINT + "/control", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ runId: rec.runId, cwd: workspace, action, ...(feedback !== undefined ? { feedback } : {}) }),
+			});
+			let data: { ok?: unknown; error?: unknown } | null = null;
+			try { data = await r.json(); } catch { data = null; }
+			if (!r.ok || data === null || data.ok !== true) {
+				throw new Error(typeof data?.error === "string" ? data.error : "HTTP " + r.status);
+			}
+		} catch (err) {
+			setControlStatus(err instanceof Error ? err.message : String(err));
+		} finally {
+			setControlBusy(null);
+		}
 	}
 
 	// Open one agent's durable child session (the run's transcript). Navigating
-	// to another session unmounts this view and drops the run result — that is
-	// the accepted cost of every route that leaves the canvas.
+	// to another session unmounts this view and drops the live view of the run —
+	// that is the accepted cost of every route that leaves the canvas; the run
+	// itself continues server-side.
 	function openTranscript(childSessionId: string) {
 		const sessions = services && services.sessions;
 		if (sessions && typeof sessions.open === "function") sessions.open(childSessionId);
@@ -378,7 +504,9 @@ function PipelineView({
 		}
 	}
 
-	// Load the saved graph once the workspace root is known.
+	// Load the saved graph once the workspace root is known. The response's
+	// `run` field re-discovers an active run after a page reload (the SSE
+	// stream is re-attached; a paused run's inspection modal reopens).
 	React.useEffect(() => {
 		if (typeof cwd !== "string" || cwd.length === 0) return;
 		let cancelled = false;
@@ -393,13 +521,14 @@ function PipelineView({
 				loadedRef.current = true;
 				setAgents(as.map((a: unknown) => {
 					const loaded = loadAgent(a);
-					const r = (a ?? {}) as { id?: unknown; name?: unknown; description?: unknown; instructions?: unknown; x?: unknown; y?: unknown };
+					const r = (a ?? {}) as { id?: unknown; name?: unknown; description?: unknown; instructions?: unknown; x?: unknown; y?: unknown; breakpoint?: unknown };
 					return {
 						id: String(r.id), name: String(r.name), description: String(r.description || ""),
 						...(loaded.systemPrompt.length > 0 ? { systemPrompt: loaded.systemPrompt } : {}),
 						instructions: String(r.instructions || ""),
 						x: Number(r.x) || 0, y: Number(r.y) || 0,
 						settings: loaded.settings,
+						...(r.breakpoint === true ? { breakpoint: true } : {}),
 					};
 				}));
 				setConnections(cs.map((c: { id: unknown; source: unknown; target: unknown }) => ({
@@ -416,6 +545,12 @@ function PipelineView({
 					if (v > maxSeq) maxSeq = v;
 				});
 				setSeq(maxSeq + 1);
+				// Discovery: adopt the workspace's active run (if any) and follow it.
+				const active = data && data.ok === true && data.run !== null && typeof data.run === "object" ? data.run as RunRecordLike : null;
+				if (active !== null && (active.state === "running" || active.state === "paused") && typeof active.runId === "string") {
+					setActiveRun(active);
+					connectRunEvents(active.runId);
+				}
 			})
 			.catch(() => { loadedRef.current = true; });
 		return () => { cancelled = true; };
@@ -466,19 +601,40 @@ function PipelineView({
 		}
 	}
 
+	const runNodes = runActive && activeRun?.nodes ? activeRun.nodes : null;
 	const nodes = agents.map((agent) => {
 		const selected = agent.id === selectedId;
 		const hoveredIn = hoverTarget === agent.id && gesture;
+		const nodeState = runNodes !== null ? runNodes[agent.id] : undefined;
+		const status = nodeState?.status;
+		const showStatus = status !== undefined && status !== "pending";
 		return (
 			<div
 				key={agent.id}
-				className={"pipeline-node" + (selected ? " selected" : "")}
+				className={"pipeline-node" + (selected ? " selected" : "") + (showStatus && status ? " node-" + status : "")}
 				style={{ left: agent.x + "px", top: agent.y + "px" }}
 				data-agent-id={agent.id}
+				data-node-status={status ?? ""}
 				onPointerDown={(e) => { onNodePointerDown(e, agent); }}
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
 			>
+				<button
+					className={"node-breakpoint" + (agent.breakpoint ? " armed" : "")}
+					title={agent.breakpoint
+						? "Breakpoint armed — the run pauses after this agent finishes (click to disarm)"
+						: "Arm a breakpoint — pause the run after this agent finishes"}
+					aria-label={(agent.breakpoint ? "Disarm breakpoint on " : "Arm breakpoint on ") + agent.name}
+					onPointerDown={(e) => { e.stopPropagation(); }}
+					onClick={(e) => {
+						e.stopPropagation();
+						setAgents((prev) => prev.map((a) => (a.id === agent.id ? { ...a, breakpoint: !a.breakpoint } : a)));
+					}}
+				>
+					<svg width={10} height={10} viewBox="0 0 24 24" aria-hidden="true">
+						<circle cx={12} cy={12} r={8} fill="currentColor" />
+					</svg>
+				</button>
 				<button
 					className="node-edit"
 					title="Edit agent"
@@ -496,6 +652,7 @@ function PipelineView({
 				</button>
 				<div className="node-name">{agent.name}</div>
 				<div className="node-sub">{agent.id}</div>
+				{showStatus ? <div className={"node-status status-" + status}>{status}</div> : null}
 				<div
 					className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
 					onPointerEnter={(e) => { onInputPointerEnter(e, agent); }}
@@ -519,6 +676,8 @@ function PipelineView({
 	let configAgent: CanvasAgent | null = null;
 	for (let k = 0; k < agents.length; k++) if (agents[k].id === configAgentId) configAgent = agents[k];
 
+	const inspectNode = pausedAt !== null && activeRun?.nodes ? activeRun.nodes[pausedAt] : undefined;
+
 	return (
 		<div
 			className="pipeline-view"
@@ -537,6 +696,11 @@ function PipelineView({
 				>
 					{validation.ok ? "Valid" : validation.errors.length + " issue" + (validation.errors.length === 1 ? "" : "s")}
 				</span>
+				{runActive ? (
+					<span className="pipeline-run-live" title="A run is active in this workspace — canvas edits affect the NEXT run only">
+						{activeRun?.state === "paused" ? "Paused at " + nameOf(pausedAt as string) : "Running…"}
+					</span>
+				) : null}
 				<button className="pipeline-btn" onClick={addAgentFromToolbar}>+ Add Agent</button>
 				<button className="pipeline-btn" onClick={deleteSelected} disabled={!selectedId}>Delete</button>
 				<button className="pipeline-btn" onClick={() => { setShowJson(!showJson); }}>{showJson ? "Hide JSON" : "View JSON"}</button>
@@ -550,16 +714,17 @@ function PipelineView({
 				) : null}
 				<button
 					className="pipeline-btn pipeline-btn-run"
-					disabled={running || !validation.ok}
-					title={running ? "Running…" : "Open the run dialog"}
+					disabled={runActive || startPending || !validation.ok}
+					title={runActive ? "A run is already active in this workspace" : startPending ? "Starting the run…" : "Open the run dialog"}
 					onClick={() => { setShowRunModal(true); }}
-				>{running ? "Running…" : "Run"}</button>
-				{running ? (
+				>{runActive ? "Running…" : startPending ? "Starting…" : "Run"}</button>
+				{runActive || startPending ? (
 					<button
 						className="pipeline-btn pipeline-btn-stop"
-						title="Stop the run — interrupts the in-flight agent and skips the rest"
-						onClick={stopRun}
-					>Stop</button>
+						title="Abort the run — completed outputs are preserved, downstream agents never start"
+						disabled={startPending || controlBusy !== null}
+						onClick={() => { controlRun("abort"); }}
+					>Abort</button>
 				) : null}
 			</div>
 			{validation.ok ? null : (
@@ -614,7 +779,15 @@ function PipelineView({
 					onSave={(updated) => {
 						setAgents((prev) => prev.map((a) =>
 							a.id === updated.id
-								? { ...a, name: updated.name, description: updated.description, systemPrompt: updated.systemPrompt, instructions: updated.instructions, settings: updated.settings }
+								? {
+									...a,
+									name: updated.name,
+									description: updated.description,
+									systemPrompt: updated.systemPrompt,
+									instructions: updated.instructions,
+									settings: updated.settings,
+									...(updated.breakpoint === true ? { breakpoint: true } : { breakpoint: undefined }),
+								}
 								: a
 						));
 						setConfigAgentId(null);
@@ -627,10 +800,25 @@ function PipelineView({
 					cwd={cwd}
 					initialText={runTextRef.current}
 					initialFiles={runFilesRef.current}
-					running={running}
+					running={runActive || startPending}
 					fileList={services && services.remote && services.remote.fileReferences ? queryFiles : null}
 					onRun={run}
 					onClose={() => { setShowRunModal(false); }}
+				/>
+			) : null}
+			{inspectOpen && pausedAt !== null && inspectNode !== undefined && activeRun !== null ? (
+				<InspectModal
+					agentName={nameOf(pausedAt)}
+					node={inspectNode}
+					busy={controlBusy}
+					status={controlStatus}
+					canSteer={typeof inspectNode.childSessionId === "string" && (inspectNode.childSessionId as string).length > 0}
+					onOpenSession={openTranscript}
+					onResume={() => { controlRun("resume"); }}
+					onRerun={() => { controlRun("rerun"); }}
+					onSteer={(feedback) => { controlRun("steer", feedback); }}
+					onAbort={() => { controlRun("abort"); }}
+					onClose={() => { setInspectDismissedFor((activeRun.runId ?? "") + ":" + pausedAt); }}
 				/>
 			) : null}
 			{runResult && resultOpen ? (

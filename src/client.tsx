@@ -33,21 +33,24 @@
 // Running: the Run button opens an INPUT MODAL (multiline text + workspace
 // files attached as ABSOLUTE PATHS via the harness `@`-mention file-reference
 // completion or manual entry; contents are never inlined — the first agent
-// reads them with its own tools). While a run is in flight a Stop button takes
-// its place in the toolbar: aborting the fetch closes the connection and the
-// Host aborts the run server-side (the in-flight agent is interrupted, the
-// remaining agents never start). On completion a RESULT MODAL offers the
-// continue routes: "Continue in chat" prefills this session's composer via the
-// standard `inputActions` and opens the chat view; "Continue in a new session"
-// resolves the pipeline's workspace (cwd match first, then the session's own)
-// and opens a session ATTACHED to it via `uiWorkspace.connectWorkspace` — so
-// the chat lands in `workspace.sessionIds` and shows in the sidebar;
+// reads them with its own tools). A run is DURABLE: POST /run starts a run
+// executor in the Host process and returns a runId; the view follows the run's
+// record over SSE and re-discovers an active run after a reload via the
+// pipeline GET's `run` field — runs outlive the tab. Each per-agent breakpoint
+// (armed on the node) parks the run before its downstream: an inspection modal
+// shows the composed input and the output and offers Resume / Rerun / Steer
+// (feedback to the SAME continuable child) / Abort. On a terminal state a
+// RESULT MODAL offers the continue routes: "Continue in chat" prefills this
+// session's composer via the standard `inputActions` and opens the chat view;
+// "Continue in a new session" resolves the pipeline's workspace (cwd match
+// first, then the session's own) and opens a session ATTACHED to it via
+// `uiWorkspace.connectWorkspace` — so the chat lands in
+// `workspace.sessionIds` and shows in the sidebar;
 // "Send to session…" prefills another
 // session's composer by id. Nothing ever auto-sends — every route stages the
-// text and the user presses send. Each run record also carries the agent's
-// published child session id (`childSessionId`), and the result modal offers a
-// Transcript route that opens that durable child session — the agent's full
-// transcript.
+// text and the user presses send. Each run node also carries the agent's
+// child session id (`childSessionId`), and both modals offer a Transcript
+// route that opens that durable child session — the agent's full transcript.
 //
 // Per-agent settings: the edit modal's right column holds the settings that
 // shape the harness start request (agent options
@@ -57,7 +60,7 @@
 // structured result is preferred over raw text downstream.
 // The system prompt (the harness persona slot) is NOT an override — it is a
 // first-class agent field, `Agent.systemPrompt` (see types.ts and
-// SYSTEM-PROMPT.md).
+// docs/SYSTEM-PROMPT.md).
 //
 // Persistence: the graph is backed by the project's `.agent-pipeline/pipeline.json`
 // (written by the Host half via the `/dsh-agent-pipeline` route). The view

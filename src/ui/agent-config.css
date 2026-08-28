@@ -130,3 +130,22 @@
   font-size: 11px;
   color: var(--dsw-alias-state-error-primary);
 }
+.pipeline-config .config-warning {
+  font-size: 11px;
+  color: var(--dsw-alias-state-warning-primary, #b8860b);
+}
+.pipeline-config .config-check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+.pipeline-config .config-check input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--dsw-alias-brand-primary);
+}
+

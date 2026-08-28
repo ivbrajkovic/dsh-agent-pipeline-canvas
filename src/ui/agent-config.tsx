@@ -4,7 +4,7 @@
 // installs it as the child's scoped `deployment:persona` system-prompt
 // section (order 0), replacing that one slot for this child alone — the
 // standard prompt (identity, policies, tool explanations) is inherited
-// untouched (see SYSTEM-PROMPT.md). The right column holds the agent's
+// untouched (see docs/SYSTEM-PROMPT.md). The right column holds the agent's
 // settings — agent options (provider / model / reasoning-effort / max-tokens),
 // tool filter, delegation depth, and an object-rooted JSON output schema.
 // Everything is always visible (no disclosure). Opened from the agent
@@ -64,6 +64,7 @@ function AgentConfigPanel({
     systemPrompt?: string;
     instructions: string;
     settings?: AgentSettings;
+    breakpoint?: boolean;
   }) => void;
   onClose: () => void;
 }) {
@@ -73,6 +74,9 @@ function AgentConfigPanel({
     agent.systemPrompt ?? '',
   );
   const [instructions, setInstructions] = React.useState(agent.instructions);
+  const [breakpoint, setBreakpoint] = React.useState(
+    agent.breakpoint === true,
+  );
   const settings = agent.settings;
   const [maxDepth, setMaxDepth] = React.useState(
     settings?.maxDepth != null ? String(settings.maxDepth) : '',
@@ -333,6 +337,30 @@ function AgentConfigPanel({
             </div>
           </div>
           <div className='config-col config-col-settings'>
+            <div className='config-row'>
+              <label>Pause on output</label>
+              <label
+                className='config-check'
+                title='Arm a breakpoint: the run pauses after this agent finishes, before any downstream agent starts — inspect the input and output, then Resume, Rerun, or Steer'
+              >
+                <input
+                  type='checkbox'
+                  checked={breakpoint}
+                  onChange={(e) => {
+                    setBreakpoint(e.target.checked);
+                  }}
+                  onKeyDown={stopKey}
+                />
+                <span>Pause the run after this agent finishes</span>
+              </label>
+              {breakpoint && schemaTrimmed.length > 0 ? (
+                <div className='config-warning'>
+                  A breakpointed agent runs as a continuable child, which cannot
+                  produce structured output — the output schema below is ignored
+                  for this agent.
+                </div>
+              ) : null}
+            </div>
             <div className='config-grid'>
               <div className='config-row'>
                 <label>Provider</label>
@@ -469,6 +497,7 @@ function AgentConfigPanel({
                 systemPrompt: assembled.systemPrompt,
                 instructions,
                 settings: assembled.settings,
+                ...(breakpoint ? { breakpoint: true } : {}),
               });
             }}
           >

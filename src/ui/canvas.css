@@ -142,6 +142,61 @@
 	cursor: pointer;
 }
 .pipeline-node .node-edit:hover { color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.pipeline-node .node-breakpoint {
+	position: absolute;
+	top: 3px;
+	left: 4px;
+	width: 18px;
+	height: 18px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: none;
+	border-radius: 5px;
+	background: transparent;
+	color: color-mix(in srgb, var(--dsw-alias-label-secondary) 45%, transparent);
+	cursor: pointer;
+}
+.pipeline-node .node-breakpoint:hover { color: var(--dsw-alias-state-warning-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.pipeline-node .node-breakpoint.armed { color: var(--dsw-alias-state-warning-primary); }
+/* Live per-node run states (from the active run's record). */
+.pipeline-node.node-running { border-color: var(--dsw-alias-brand-primary); }
+.pipeline-node.node-paused { border-color: var(--dsw-alias-state-warning-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-warning-primary) 55%, transparent); }
+.pipeline-node.node-done { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 60%, var(--dsw-alias-border-l2)); }
+.pipeline-node.node-aborted { border-color: var(--dsw-alias-state-error-primary); }
+.pipeline-node.node-error { border-color: var(--dsw-alias-state-error-primary); }
+.pipeline-node .node-status {
+	position: absolute;
+	bottom: -8px;
+	left: 50%;
+	transform: translateX(-50%);
+	font-size: 9px;
+	line-height: 1;
+	padding: 2px 7px;
+	border-radius: 999px;
+	background: var(--dsw-alias-bg-overlay);
+	border: 1px solid var(--dsw-alias-border-l2);
+	text-transform: uppercase;
+	letter-spacing: .05em;
+}
+.pipeline-node .node-status.status-running { color: var(--dsw-alias-brand-primary); border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, transparent); }
+.pipeline-node .node-status.status-paused { color: var(--dsw-alias-state-warning-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 50%, transparent); }
+.pipeline-node .node-status.status-done { color: var(--dsw-alias-state-success-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 50%, transparent); }
+.pipeline-node .node-status.status-aborted,
+.pipeline-node .node-status.status-error { color: var(--dsw-alias-state-error-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent); }
+.pipeline-view .pipeline-toolbar .pipeline-run-live {
+	font-size: 12px;
+	color: var(--dsw-alias-state-warning-primary);
+	padding: 3px 9px;
+	border-radius: 999px;
+	border: 1px dashed color-mix(in srgb, var(--dsw-alias-state-warning-primary) 50%, transparent);
+	line-height: 1;
+	max-width: 260px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
 .pipeline-port {
 	position: absolute;
 	top: 50%;
