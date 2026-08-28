@@ -25,7 +25,7 @@
  * on a specific model, with restricted tools, a delegation-depth cap, or a
  * structured output schema. Absent fields inherit the defaults (the parent's
  * provider/model, unrestricted tools). The system prompt is NOT here — it is
- * a first-class field on Agent (see SYSTEM-PROMPT.md).
+ * a first-class field on Agent (see docs/SYSTEM-PROMPT.md).
  */
 export interface AgentSettings {
 	/** Absolute delegation-depth cap for the child (`SubagentStartRequest.maxDepth`). */
@@ -68,7 +68,7 @@ export interface Agent {
 	 * section (order 0), replacing that one slot for this child alone. The rest
 	 * of the standard prompt — identity, delegation statement, policies, and
 	 * every harness tool explanation — is inherited untouched (see
-	 * SYSTEM-PROMPT.md). Absent/empty keeps the deployment default (on this
+	 * docs/SYSTEM-PROMPT.md). Absent/empty keeps the deployment default (on this
 	 * deployment: unset, so just the fixed harness identity line).
 	 */
 	systemPrompt?: string;
@@ -80,6 +80,17 @@ export interface Agent {
 	output: string;
 	/** The agent's settings (see AgentSettings); absent fields inherit defaults. */
 	settings?: AgentSettings;
+	/**
+	 * Pause-on-output breakpoint. When armed, the run pauses after this agent's
+	 * output settles and before any downstream agent starts, so the user can
+	 * inspect the composed input and the output and choose Resume / Rerun /
+	 * Steer / Abort (see the run record types below). Absent/false runs through.
+	 * A breakpointed agent runs as a CONTINUABLE subagent (steerable via harness
+	 * continuation); `settings.outputSchema` is ignored for it — continuable
+	 * children cannot produce structured output (a harness limitation) — and the
+	 * edit panel warns when both are set.
+	 */
+	breakpoint?: boolean;
 }
 
 /**
@@ -201,3 +212,81 @@ export interface PipelineRunFailure {
 
 /** Discriminated union returned by the runner. */
 export type PipelineRunResult = PipelineRunSuccess | PipelineRunFailure;
+
+// ---- Durable runs -----------------------------------------------------------------
+// A run is no longer a blocking request/response: POST /run starts a run
+// executor in the Host process and returns a runId immediately. The executor's
+// state lives in a per-workspace record (`.agent-pipeline/runs/<runId>.json`,
+// rewritten atomically on every transition) so a paused run stays controllable
+// across profile restarts and page reloads. The browser follows the record over
+// SSE and issues control commands (resume / rerun / steer / abort) at pause
+// points. One run is active (running or paused) per workspace at a time.
+
+/** Terminal-or-not lifecycle state of a whole run. */
+export type RunState = "running" | "paused" | "completed" | "aborted" | "error";
+
+/** Per-agent status inside a run record. */
+export type RunNodeStatus = "pending" | "running" | "done" | "paused" | "aborted" | "error";
+
+/** One agent's durable state within a run record. */
+export interface RunNodeState {
+	status: RunNodeStatus;
+	/**
+	 * The composed prompt string this agent was (or would be) started with.
+	 * Written ONCE, when the executor first reaches the node, and immutable for
+	 * the run's lifetime — Rerun restarts the agent with this verbatim input,
+	 * never with any steering conversation content.
+	 */
+	input?: string;
+	/** The adopted output (text, or rendered JSON for a structured one-shot result). */
+	output?: string;
+	error?: string;
+	/** The harness stop reason of the settling epoch (completed/aborted/error/…). */
+	stopReason?: string;
+	/**
+	 * The agent's child session id. For a breakpointed (continuable) agent this
+	 * is the durable continuable child id — stable across steering and restarts,
+	 * and the transcript address for inspection. For a one-shot agent it is the
+	 * published run id (the child session id).
+	 */
+	childSessionId?: string;
+}
+
+/**
+ * The durable per-run record, persisted per workspace and streamed to the
+ * browser over SSE. `graph` is the immutable snapshot the run was started
+ * from; canvas edits during a run affect only the NEXT run.
+ */
+export interface RunRecord {
+	runId: string;
+	/** Absolute workspace root the run belongs to (records live under it). */
+	cwd: string;
+	/** The user conversation id the run was started from. */
+	sessionId: string;
+	/**
+	 * The disposable per-run coordinator session id (hidden `origin: "subagent"`
+	 * agent that parents the run's continuable children so settlement notices
+	 * never reach the user's chat). Absent until the first continuable start.
+	 */
+	coordinatorSessionId?: string;
+	createdAt: string;
+	updatedAt: string;
+	state: RunState;
+	/** The agent the run is paused at (when `state === "paused"`). */
+	pausedAt?: string;
+	/** Immutable graph snapshot. */
+	graph: PipelineGraph;
+	/** The pipeline-level input the run was started with. */
+	input?: unknown;
+	/** Deterministic topological order the executor follows. */
+	order: string[];
+	nodes: Record<string, RunNodeState>;
+}
+
+/** One control command for a run (POST /dsh-agent-pipeline/control). */
+export interface RunControlRequest {
+	runId: string;
+	action: "resume" | "rerun" | "steer" | "abort";
+	/** Required for `steer`: the user feedback delivered to the SAME child. */
+	feedback?: string;
+}
