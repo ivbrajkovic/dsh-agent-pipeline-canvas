@@ -82,6 +82,7 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
 		".pipeline-json{border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base)}",
 		".pipeline-json pre{margin:0;padding:10px;max-height:200px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word}",
 		".pipeline-config-overlay{position:absolute;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)}",
+		".pipeline-modal-overlay{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)}",
 		".pipeline-config{width:380px;max-width:92%;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:16px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 30px rgba(0,0,0,.35)}",
 		".pipeline-config h3{margin:0;font-size:14px;font-weight:600}",
 		".pipeline-config .config-row{display:flex;flex-direction:column;gap:4px}",
@@ -394,7 +395,7 @@ function RunModal({ cwd, initialText, initialFiles, running, fileList, onRun, on
 	return React.createElement(
 		"div",
 		{
-			className: "pipeline-config-overlay",
+			className: "pipeline-modal-overlay",
 			onPointerDown: (e: React.PointerEvent) => { e.stopPropagation(); },
 		},
 		React.createElement(
@@ -537,7 +538,7 @@ function ResultModal({ result, names, targets, busy, status, onContinueChat, onC
 	return React.createElement(
 		"div",
 		{
-			className: "pipeline-config-overlay",
+			className: "pipeline-modal-overlay",
 			onPointerDown: (e: React.PointerEvent) => { e.stopPropagation(); },
 		},
 		React.createElement(
