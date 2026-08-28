@@ -1,12 +1,13 @@
 // runPipeline orchestration smoke test — plain Node script (no framework). Run:
 //   tsx test/runner.test.ts
 // It exercises the runner's sequencing against a SCRIPTED subagent provider (the
-// same idea as the harness's own ScriptedSubagentProvider): it records the order
-// and prompt of every agent it starts and returns a deterministic output per
-// agent, so we can assert fan-in waiting, prompt passing, orphan handling, and
-// the terminal-output shape WITHOUT a live model. The real harness subagent
-// service satisfies the same `start(name, { prompt, parent, label, signal })`
-// contract.
+// same idea as the harness's own ScriptedSubagentProvider): it records the full
+// start request of every agent it starts and returns a deterministic output per
+// agent, so we can assert fan-in waiting, prompt passing, orphan handling,
+// per-agent override passthrough, child-session capture, and the
+// terminal-output shape WITHOUT a live model. The real harness subagent
+// service satisfies the same
+// `start(name, { prompt, parent, label, signal, ...settings })` contract.
 import { runPipeline } from "../lib/runner.js";
 import { deepStrictEqual, ok } from "node:assert";
 
@@ -27,12 +28,24 @@ const conn = (id: string, source: string, target: string) => ({
 });
 const graph = (agents: unknown[], connections: unknown[]) => ({ agents, connections });
 
+type RecordedRequest = {
+	label?: string;
+	prompt: Array<{ text: string }>;
+	parent: unknown;
+	signal?: unknown;
+	agentOptions?: unknown;
+	outputSchema?: unknown;
+	maxDepth?: number;
+	toolFilter?: unknown;
+	persona?: string;
+};
+
 function makeCtx(providerNames?: string[]) {
-	const invocations: Array<{ name: string; label: string | undefined; prompt: string; parent: unknown; signal: unknown }> = [];
+	const invocations: Array<{ name: string; label: string | undefined; prompt: string; parent: unknown; signal: unknown; request: RecordedRequest }> = [];
 	const subagents = {
 		list: () => providerNames ?? ["spawn"],
-		start: (name: string, request: { label?: string; prompt: Array<{ text: string }>; parent: unknown; signal?: unknown }) => {
-			invocations.push({ name, label: request.label, prompt: request.prompt[0].text, parent: request.parent, signal: request.signal });
+		start: (name: string, request: RecordedRequest) => {
+			invocations.push({ name, label: request.label, prompt: request.prompt[0].text, parent: request.parent, signal: request.signal, request });
 			return {
 				id: "child-" + invocations.length,
 				result: Promise.resolve({ output: [{ type: "text", text: "<out:" + request.label + ">" }], stopReason: "completed" }),
@@ -185,6 +198,71 @@ function makeCtx(providerNames?: string[]) {
 	if (result.ok) {
 		okCheck("pre-aborted: no agent started", invocations.length === 0);
 		okCheck("pre-aborted: no runs recorded", result.runs.length === 0);
+	}
+}
+
+// --- per-agent settings pass through; child session id is captured --------
+{
+	const { ctx, invocations } = makeCtx();
+	const withSettings = {
+		...agent("a", "Alpha", "Extract."),
+		systemPrompt: "Terse auditor.",
+		settings: {
+			maxDepth: 2,
+			agentOptions: { provider: "ds", model: "m-1", reasoningEffort: "high", maxTokens: 512 },
+			toolFilter: { deny: ["write", "edit"] },
+			outputSchema: { type: "object", properties: { summary: { type: "string" } } },
+		},
+	};
+	const result = await runPipeline(ctx, {
+		graph: graph([withSettings, agent("b", "Beta", "Sum.")], [conn("c1", "a", "b")]),
+		input: "hello",
+		sessionId: "sess",
+	});
+	okCheck("settings run ok", result.ok === true);
+	const req = invocations[0].request;
+	okCheck("system prompt forwarded as request persona", req.persona === "Terse auditor.");
+	okCheck("maxDepth forwarded", req.maxDepth === 2);
+	deepStrictEqual(req.agentOptions, { provider: "ds", model: "m-1", reasoningEffort: "high", maxTokens: 512 });
+	deepStrictEqual(req.toolFilter, { deny: ["write", "edit"] });
+	deepStrictEqual(req.outputSchema, { type: "object", properties: { summary: { type: "string" } } });
+	// The plain agent gets none of the optional setting fields.
+	const plain = invocations[1].request;
+	okCheck("no settings on plain agent", plain.persona === undefined && plain.agentOptions === undefined
+		&& plain.toolFilter === undefined && plain.outputSchema === undefined && plain.maxDepth === undefined);
+	if (result.ok) {
+		okCheck("child session id captured", result.runs[0].childSessionId === "child-1" && result.runs[1].childSessionId === "child-2");
+	}
+}
+
+// --- structured result preferred over raw text ----------------------------
+{
+	const invocations: Array<{ label: string | undefined }> = [];
+	const subagents = {
+		list: () => ["spawn"],
+		start: (_name: string, request: { label?: string }) => {
+			invocations.push({ label: request.label });
+			return {
+				id: "child-structured",
+				result: Promise.resolve({
+					output: [{ type: "text", text: "raw prose" }],
+					structured: { summary: "clean" },
+					stopReason: "completed",
+				}),
+				dispose: () => Promise.resolve(),
+			};
+		},
+	};
+	const ctx = { subagents, agents: { get: (id: string) => (id === "sess" ? { id: "sess" } : undefined) }, logger: { warn: () => {} } };
+	const result = await runPipeline(ctx, {
+		graph: graph([agent("a", "Alpha", "A.")], []),
+		input: "x",
+		sessionId: "sess",
+	});
+	okCheck("structured run ok", result.ok === true);
+	if (result.ok) {
+		deepStrictEqual(result.runs[0].output, JSON.stringify({ summary: "clean" }, null, 2));
+		deepStrictEqual(result.outputs, { a: JSON.stringify({ summary: "clean" }, null, 2) });
 	}
 }
 

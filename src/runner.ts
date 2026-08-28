@@ -23,6 +23,26 @@
 // with status "aborted", and the remaining agents are simply absent from
 // `runs`.
 //
+// Per-agent settings: an agent entry may carry an optional `settings`
+// object ({ maxDepth, agentOptions, toolFilter, outputSchema }, see types.ts)
+// — authored in the client's configuration panel and persisted on the agent.
+// They are settings, not run-time overrides: saved with the graph, they shape
+// every run of that agent. Each present field is forwarded as the
+// corresponding `subagents.start` request field (the spawn provider supports
+// all of them), so a pipeline agent can run on a specific model, with
+// restricted tools, a delegation-depth cap, or a structured outputSchema; an
+// absent field inherits the default.
+// When the child returns a validated structured value, it is preferred over
+// the raw text output and rendered as JSON — that rendered string is what
+// flows downstream and into the run record. The system prompt is forwarded
+// from the agent's first-class `systemPrompt` field (mapped to the harness
+// request's `persona` field — the child's system-prompt persona slot).
+//
+// Child sessions: the harness run object carries the published child session
+// id (`run.id` — for a local run it IS the child's session id). The runner
+// records it per agent as `childSessionId` so the client can open the agent's
+// full transcript; it is absent when the start itself failed.
+//
 // Invocation precondition (from the harness SubagentStartRequest contract): a
 // live parent Agent is required. The runner resolves it from the session's agent
 // (`agents.get(sessionId)`), which is the browser conversation id. This does not
@@ -34,10 +54,12 @@ import {
 	agentInput,
 	agentPrompt,
 	pipelineResult,
+	renderValue,
 	topoOrder,
 } from "./execution.ts";
 import type {
 	Agent,
+	AgentSettings,
 	PipelineGraph,
 	PipelineRunRequest,
 	PipelineRunResult,
@@ -53,10 +75,13 @@ const PROVIDER = "spawn";
 
 interface SubagentResult {
 	output?: unknown;
+	structured?: unknown;
 	stopReason?: string;
 }
 
 interface SubagentRun {
+	/** The published child session id (a local run's id IS the child session id). */
+	id?: string;
 	result: Promise<SubagentResult>;
 	dispose(): Promise<void> | void;
 }
@@ -66,6 +91,11 @@ interface SubagentStartRequest {
 	prompt: unknown[];
 	parent: unknown;
 	signal?: AbortSignal;
+	agentOptions?: AgentSettings["agentOptions"];
+	outputSchema?: unknown;
+	maxDepth?: number;
+	toolFilter?: AgentSettings["toolFilter"];
+	persona?: string;
 }
 
 interface SubagentsService {
@@ -138,7 +168,7 @@ export async function runPipeline(ctx: RunnerContext, options: PipelineRunReques
 
 	const order = topoOrder(graph);
 	const outputsById: Record<string, unknown> = {};
-	const runs: Array<{ id: string; label: string; status: string; output?: string; error?: string }> = [];
+	const runs: Array<{ id: string; label: string; status: string; output?: string; error?: string; childSessionId?: string }> = [];
 
 	for (const id of order) {
 		// Cancellation gate: once the caller aborts, no further agent starts.
@@ -149,22 +179,44 @@ export async function runPipeline(ctx: RunnerContext, options: PipelineRunReques
 		const prompt = agentPrompt(agent, inputs, agentById);
 		const label = agent && typeof agent.name === "string" && agent.name.length > 0 ? agent.name : id;
 
+		// Forward the agent's settings as the harness start-request fields;
+		// absent fields keep the harness defaults (parent options, deployment
+		// persona, unrestricted tools, no schema, no depth cap). The system
+		// prompt travels on the agent's first-class field; the harness names
+		// that request field `persona`.
+		const settings: AgentSettings | undefined = agent?.settings;
+		const request: SubagentStartRequest = {
+			label,
+			prompt: [{ type: "text", text: prompt }],
+			parent,
+			signal,
+		};
+		if (settings?.agentOptions != null) request.agentOptions = settings.agentOptions;
+		if (settings?.outputSchema != null) request.outputSchema = settings.outputSchema;
+		if (typeof settings?.maxDepth === "number" && Number.isFinite(settings.maxDepth)) request.maxDepth = settings.maxDepth;
+		if (settings?.toolFilter != null) request.toolFilter = settings.toolFilter;
+		const systemPrompt = agent && typeof agent.systemPrompt === "string" ? agent.systemPrompt : "";
+		if (systemPrompt.trim().length > 0) request.persona = systemPrompt;
+
 		try {
-			const run = await ctx.subagents.start(PROVIDER, {
-				label,
-				prompt: [{ type: "text", text: prompt }],
-				parent,
-				signal,
-			});
+			const run = await ctx.subagents.start(PROVIDER, request);
 			let result: SubagentResult;
 			try {
 				result = await run.result;
 			} finally {
 				try { await run.dispose(); } catch { /* disposal failure must not mask the result */ }
 			}
-			const output = toText(result.output);
+			// A validated structured result (outputSchema set) is preferred over
+			// the raw text output; the rendered JSON string flows downstream.
+			const output = result.structured !== undefined ? renderValue(result.structured) : toText(result.output);
 			outputsById[id] = output;
-			runs.push({ id, label, status: result.stopReason ?? "unknown", output });
+			runs.push({
+				id,
+				label,
+				status: result.stopReason ?? "unknown",
+				output,
+				childSessionId: typeof run.id === "string" ? run.id : undefined,
+			});
 		} catch (error) {
 			// An aborted signal can reject the start itself (the driver's
 			// pre-publication abort) — record it as the abort it is, not an error.

@@ -1,9 +1,12 @@
-import type { PipelineRunRequest, PipelineRunResult } from "./types.ts";
+import type { AgentSettings, PipelineRunRequest, PipelineRunResult } from "./types.ts";
 interface SubagentResult {
     output?: unknown;
+    structured?: unknown;
     stopReason?: string;
 }
 interface SubagentRun {
+    /** The published child session id (a local run's id IS the child session id). */
+    id?: string;
     result: Promise<SubagentResult>;
     dispose(): Promise<void> | void;
 }
@@ -12,6 +15,11 @@ interface SubagentStartRequest {
     prompt: unknown[];
     parent: unknown;
     signal?: AbortSignal;
+    agentOptions?: AgentSettings["agentOptions"];
+    outputSchema?: unknown;
+    maxDepth?: number;
+    toolFilter?: AgentSettings["toolFilter"];
+    persona?: string;
 }
 interface SubagentsService {
     list(): string[];

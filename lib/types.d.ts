@@ -1,15 +1,66 @@
+/**
+ * Per-agent settings, authored in the client's configuration panel and
+ * persisted on the agent (they are settings, not run-time overrides: they are
+ * saved with the graph and shape every run of that agent). Each present field
+ * is forwarded as the corresponding harness `SubagentStartRequest` field (all
+ * of them are supported by the `spawn` provider), so a pipeline agent can run
+ * on a specific model, with restricted tools, a delegation-depth cap, or a
+ * structured output schema. Absent fields inherit the defaults (the parent's
+ * provider/model, unrestricted tools). The system prompt is NOT here — it is
+ * a first-class field on Agent (see SYSTEM-PROMPT.md).
+ */
+export interface AgentSettings {
+    /** Absolute delegation-depth cap for the child (`SubagentStartRequest.maxDepth`). */
+    maxDepth?: number;
+    /** Host-Agent options; each present field replaces the parent Agent's option. */
+    agentOptions?: {
+        /** Provider route (must have a registered adapter at call time). */
+        provider?: string;
+        /** Model id interpreted by the selected provider adapter. */
+        model?: string;
+        /** Adapter-owned reasoning-effort id (provider-specific, free-form). */
+        reasoningEffort?: string;
+        /** Maximum output tokens per model request. */
+        maxTokens?: number;
+    };
+    /** Child tool scoping: global tool names to allow (others removed) or to deny. */
+    toolFilter?: {
+        allow?: string[];
+        deny?: string[];
+    };
+    /**
+     * Object-rooted JSON Schema for the child's structured result
+     * (`SubagentStartRequest.outputSchema`). A successful child returns the
+     * matching value as `SubagentResult.structured`, which the runner prefers
+     * over the raw text output.
+     */
+    outputSchema?: unknown;
+}
 /** One pipeline agent node on the canvas. */
 export interface Agent {
     id: string;
     name: string;
     description: string;
     instructions: string;
+    /**
+     * The agent's system prompt — REAL system-prompt text. Forwarded as
+     * `SubagentStartRequest.persona` (the harness's field name), which the
+     * harness installs as the child's scoped `deployment:persona` system-prompt
+     * section (order 0), replacing that one slot for this child alone. The rest
+     * of the standard prompt — identity, delegation statement, policies, and
+     * every harness tool explanation — is inherited untouched (see
+     * SYSTEM-PROMPT.md). Absent/empty keeps the deployment default (on this
+     * deployment: unset, so just the fixed harness identity line).
+     */
+    systemPrompt?: string;
     x: number;
     y: number;
     /** The agent's single input port, `<id>:in` by convention. */
     input: string;
     /** The agent's single output port, `<id>:out` by convention. */
     output: string;
+    /** The agent's settings (see AgentSettings); absent fields inherit defaults. */
+    settings?: AgentSettings;
 }
 /**
  * One directed edge from a source agent's output port to a target agent's input
@@ -78,6 +129,12 @@ export interface AgentRunRecord {
     status: string;
     output?: string;
     error?: string;
+    /**
+     * The published child session id of this agent's run (`SubagentRun.id`).
+     * The child session is durable and holds the full transcript, so the
+     * client can open it for inspection; absent when the start itself failed.
+     */
+    childSessionId?: string;
 }
 /**
  * A pipeline run request: the snapshot the browser currently shows, the
