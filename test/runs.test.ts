@@ -1,0 +1,554 @@
+// Durable run registry tests — plain Node script (no framework). Run:
+//   tsx test/runs.test.ts
+// Exercises the executor and control plane against SCRIPTED services (the same
+// fake-service style as runner.test.ts): a fake subagent seam whose continuable
+// children settle when the test emits a `subagent/end` payload, a fake agents
+// service that records coordinator create/resume/dispose, and a real temp
+// directory for the per-workspace run records. Asserts pause/resume ordering,
+// rerun verbatim inputs + fresh child ids, steering to the SAME child, abort
+// preservation, the stale-running sweep, the single-active-run rule, coordinator
+// disposal between operations, and the degraded no-continuable path — all
+// WITHOUT a live model.
+import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
+import { validateGraph } from "../lib/graph.js";
+import type { RunRecord } from "../lib/types.js";
+import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+let passed = 0;
+let failed = 0;
+function okCheck(name: string, cond: boolean) {
+	if (cond) { passed++; console.log(`ok    ${name}`); }
+	else { failed++; console.error(`FAIL  ${name}`); }
+}
+
+const agent = (id: string, name: string, instructions?: string, extra: Record<string, unknown> = {}) => ({
+	id, name, description: "", instructions: instructions || "",
+	x: 0, y: 0, input: id + ":in", output: id + ":out", ...extra,
+});
+const conn = (id: string, source: string, target: string) => ({
+	id, source, target, sourcePort: source + ":out", targetPort: target + ":in",
+});
+
+type EndListener = (info: { id?: string; stopReason?: string; lastAssistantMessage?: unknown }) => void;
+
+/** The scripted harness: services + recording + a settle() the test drives. */
+function makeHarness(options: { continuable?: boolean } = {}) {
+	const continuable = options.continuable !== false;
+	const listeners = new Set<EndListener>();
+	const starts: Array<{ kind: string; childId: string; label: string; prompt: string; parentId: string; request: Record<string, unknown> }> = [];
+	const followups: Array<{ childId: string; text: string; parentId: string }> = [];
+	const interrupts: Array<{ childId: string; parentSessionId: string }> = [];
+	const coordinatorCreated: Array<{ sessionId: string; meta: Record<string, unknown> | undefined; agentOptions: Record<string, unknown> | undefined }> = [];
+	const coordinatorResumed: string[] = [];
+	const coordinatorDisposed: string[] = [];
+	const liveCoordinators = new Set<string>();
+	let seq = 0;
+
+	const subagents = {
+		list: () => ["spawn"],
+		start: (_provider: string, req: { label?: string; prompt: Array<{ text: string }>; parent: { id: string } }) => {
+			seq += 1;
+			starts.push({ kind: "oneshot", childId: "oneshot-" + seq, label: String(req.label), prompt: req.prompt[0].text, parentId: req.parent.id, request: req as unknown as Record<string, unknown> });
+			const id = "oneshot-" + seq;
+			return {
+				id,
+				result: Promise.resolve({ output: [{ type: "text", text: "<out:" + req.label + ">" }], stopReason: "completed" }),
+				dispose: () => Promise.resolve(),
+			};
+		},
+		...(continuable ? {
+			startContinuable: async (spec: { label: string; request: { prompt: Array<{ text: string }>; parent: { id: string } } }) => {
+				seq += 1;
+				const childId = "child-" + seq;
+				starts.push({ kind: "continuable", childId, label: spec.label, prompt: spec.request.prompt[0].text, parentId: spec.request.parent.id, request: spec.request as unknown as Record<string, unknown> });
+				return { childId, messageId: "m-" + seq };
+			},
+			followup: async (parent: { id: string }, childId: string, content: Array<{ text: string }>) => {
+				followups.push({ childId, text: content[0].text, parentId: parent.id });
+				return "m-follow-" + followups.length;
+			},
+			interrupt: (childId: string, authority: { kind: string; parentSessionId: string }) => {
+				interrupts.push({ childId, parentSessionId: authority.parentSessionId });
+			},
+		} : {}),
+	};
+	const agentsService = {
+		get: (id: string) => {
+			if (id === "sess") return { id: "sess", options: { provider: "ds", model: "m-1", subagentDepth: 99 } };
+			if (liveCoordinators.has(id)) return { id, options: {} };
+			return undefined;
+		},
+		create: async (opts: { sessionId: string; meta?: Record<string, unknown>; agentOptions?: Record<string, unknown> }) => {
+			coordinatorCreated.push({ sessionId: opts.sessionId, meta: opts.meta, agentOptions: opts.agentOptions });
+			liveCoordinators.add(opts.sessionId);
+			return {
+				agent: { id: opts.sessionId, options: {} },
+				dispose: async () => { liveCoordinators.delete(opts.sessionId); coordinatorDisposed.push(opts.sessionId); },
+			};
+		},
+		resume: async (opts: { resumeSessionId: string }) => {
+			coordinatorResumed.push(opts.resumeSessionId);
+			liveCoordinators.add(opts.resumeSessionId);
+			return {
+				agent: { id: opts.resumeSessionId, options: {} },
+				dispose: async () => { liveCoordinators.delete(opts.resumeSessionId); coordinatorDisposed.push(opts.resumeSessionId); },
+			};
+		},
+	};
+	const warnings: string[] = [];
+	const services = {
+		agents: agentsService,
+		subagents,
+		logger: { warn: (...args: unknown[]) => { warnings.push(args.join(" ")); } },
+		subscribeRunEnd: (fn: EndListener) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+		sessionPersistence: {},
+	} as unknown as RunRegistryServices;
+	return {
+		services,
+		starts, followups, interrupts,
+		coordinatorCreated, coordinatorResumed, coordinatorDisposed, liveCoordinators,
+		warnings,
+		/** Simulate the child's epoch settling: the harness emits `subagent/end`. */
+		settle(childId: string, output: string, stopReason = "completed") {
+			const info = { runId: "run-" + childId, provider: "spawn", id: childId, local: true, stopReason, lastAssistantMessage: [{ type: "text", text: output }] };
+			for (const listener of [...listeners]) listener(info);
+		},
+	};
+}
+
+async function withTempDir(fn: (cwd: string) => Promise<void>): Promise<void> {
+	const cwd = await mkdtemp(join(tmpdir(), "pipeline-runs-test-"));
+	try {
+		await fn(cwd);
+	} finally {
+		// A just-finished executor may still be writing its final state; retry the
+		// recursive removal rather than failing the test on cleanup.
+		await rm(cwd, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	}
+}
+
+/** Poll an (async) condition until it holds, with a friendly timeout error. */
+async function waitFor(what: string, cond: () => boolean | Promise<boolean>, ms = 2000): Promise<void> {
+	const start = Date.now();
+	for (;;) {
+		let good = false;
+		try { good = await cond(); } catch { good = false; }
+		if (good) return;
+		if (Date.now() - start > ms) throw new Error("timeout waiting for: " + what);
+		await new Promise((r) => setTimeout(r, 5));
+	}
+}
+
+/** Wait until the run is paused at `agentId` and return the record. */
+async function waitPausedAt(registry: RunRegistry, runId: string, cwd: string, agentId: string): Promise<RunRecord> {
+	let rec: RunRecord | null = null;
+	await waitFor("paused at " + agentId, async () => {
+		rec = await registry.getRun(runId, cwd);
+		if (!(rec !== null && rec.state === "paused" && rec.pausedAt === agentId)) return false;
+		// Require DURABILITY too: the in-memory record flips to paused one
+		// commit ahead of the disk write, and the restart test reloads from disk.
+		try {
+			const disk = JSON.parse(await readFile(join(cwd, ".agent-pipeline", "runs", runId + ".json"), "utf8")) as RunRecord;
+			return disk.state === "paused" && disk.pausedAt === agentId;
+		} catch {
+			return false;
+		}
+	});
+	return rec as RunRecord;
+}
+
+/** Wait until the run reaches a terminal state and return the record. */
+async function waitTerminal(registry: RunRegistry, runId: string, cwd: string): Promise<RunRecord> {
+	let rec: RunRecord | null = null;
+	await waitFor("terminal state", async () => {
+		rec = await registry.getRun(runId, cwd);
+		return rec !== null && (rec.state === "completed" || rec.state === "aborted" || rec.state === "error");
+	});
+	return rec as RunRecord;
+}
+
+// --- graph with breakpoint fields still validates (compat) ----------------
+{
+	const result = validateGraph({
+		agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }, agent("b", "Beta", "B.")],
+		connections: [conn("c1", "a", "b")],
+	});
+	okCheck("breakpoint graph validates", result.ok === true);
+}
+
+// --- breakpoint pauses before downstream; resume completes ----------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [{ ...agent("a", "Alpha", "Extract."), breakpoint: true }, agent("b", "Beta", "Summarize.")], connections: [conn("c1", "a", "b")] },
+		input: "hello",
+	});
+	okCheck("pause: start ok", started.ok === true);
+	if (!started.ok) return;
+	// a starts as a continuable child, then the test settles its epoch.
+	await waitFor("a's continuable start", () => harness.starts.length === 1 && harness.starts[0].kind === "continuable" && harness.starts[0].label === "Alpha");
+	harness.settle(harness.starts[0].childId, "<out:after-breakpoint>");
+	const rec = await waitPausedAt(registry, started.runId, cwd, "a");
+	okCheck("pause: paused at a before b", rec.nodes.a.status === "paused" && rec.nodes.b.status === "pending");
+	okCheck("pause: a adopted the epoch output", rec.nodes.a.output === "<out:after-breakpoint>");
+	okCheck("pause: a carries the durable child id", rec.nodes.a.childSessionId === harness.starts[0].childId);
+	okCheck("pause: downstream b not started", harness.starts.every((s) => s.label !== "Beta"));
+
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("pause: resume completes the run", done.state === "completed");
+	await waitFor("b started once", () => harness.starts.filter((s) => s.label === "Beta").length === 1);
+	okCheck("pause: b runs one-shot on a's adopted output", harness.starts[1].kind === "oneshot" && harness.starts[1].prompt.includes("## Alpha\n<out:after-breakpoint>"));
+	okCheck("pause: b done with its own output", rec.nodes.b.status === "done" && rec.nodes.b.output === "<out:Beta>");
+	// The continuable child parents to the run coordinator; the one-shot
+	// child stays parented to the session agent (unchanged behavior).
+	const coordinatorId = rec.coordinatorSessionId as string;
+	okCheck("pause: continuable child parented to the coordinator", harness.starts[0].parentId === coordinatorId);
+	okCheck("pause: one-shot child parented to the session agent", harness.starts[1].parentId === "sess");
+});
+
+// --- multiple breakpoints pause in sequence, in topo order ----------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A.", { breakpoint: true }),
+				agent("b", "Beta", "B.", { breakpoint: true }),
+				agent("c", "Gamma", "C."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "b", "c")],
+		},
+		input: "go",
+	});
+	if (!started.ok) { okCheck("sequence: start ok", false); return; }
+	await waitFor("a's continuable start", () => harness.starts.length === 1);
+	harness.settle(harness.starts[0].childId, "<out:a>");
+	const first = await waitPausedAt(registry, started.runId, cwd, "a");
+	okCheck("sequence: first pause at a", first.pausedAt === "a");
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	await waitFor("b's continuable start", () => harness.starts.filter((s) => s.label === "Beta").length === 1);
+	harness.settle(harness.starts[1].childId, "<out:b>");
+	const second = await waitPausedAt(registry, started.runId, cwd, "b");
+	okCheck("sequence: second pause at b (c never started)", second.pausedAt === "b" && harness.starts.every((s) => s.label !== "Gamma"));
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("sequence: completes after both breakpoints", done.state === "completed" && done.nodes.c.status === "done");
+});
+
+// --- terminal breakpoint pauses BEFORE finalization ------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [agent("a", "Alpha", "A."), { ...agent("b", "Beta", "B."), breakpoint: true }], connections: [conn("c1", "a", "b")] },
+		input: "x",
+	});
+	if (!started.ok) { okCheck("terminal: start ok", false); return; }
+	await waitFor("b's continuable start", () => harness.starts.filter((s) => s.label === "Beta").length === 1);
+	harness.settle(harness.starts[1].childId, "<out:Beta>");
+	const rec = await waitPausedAt(registry, started.runId, cwd, "b");
+	okCheck("terminal: pauses at the terminal agent", rec.pausedAt === "b" && rec.state === "paused");
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("terminal: resume finalizes completed", done.state === "completed" && done.nodes.b.output === "<out:Beta>");
+});
+
+// --- rerun: fresh child, verbatim input; steering targets the new child -----
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [{ ...agent("a", "Alpha", "Sum the facts."), breakpoint: true }], connections: [] },
+		input: "the input",
+	});
+	if (!started.ok) { okCheck("rerun: start ok", false); return; }
+	await waitFor("a's continuable start", () => harness.starts.length === 1);
+	harness.settle(harness.starts[0].childId, "<out:initial>");
+	const first = await waitPausedAt(registry, started.runId, cwd, "a");
+	const originalInput = first.nodes.a.input as string;
+	okCheck("rerun: input composed once", originalInput.includes("Sum the facts.") && originalInput.includes("## Input\nthe input"));
+	const firstChildId = first.nodes.a.childSessionId as string;
+	okCheck("rerun: first child started", firstChildId === harness.starts[0].childId);
+
+	// Steer the first child, adopt the steering epoch output, stay paused.
+	await registry.control(started.runId, { action: "steer", feedback: "make it shorter" }, cwd);
+	await waitFor("followup delivered", () => harness.followups.length === 1);
+	okCheck("rerun: steer went to the SAME child", harness.followups[0].childId === firstChildId && harness.followups[0].text === "make it shorter");
+	okCheck("rerun: steer parented to the coordinator", harness.followups[0].parentId === first.coordinatorSessionId);
+	harness.settle(firstChildId, "<out:steered-1>");
+	const afterSteer1 = await waitPausedAt(registry, started.runId, cwd, "a");
+	okCheck("rerun: steering epoch output adopted", afterSteer1.nodes.a.output === "<out:steered-1>");
+	okCheck("rerun: still the same child after steer", afterSteer1.nodes.a.childSessionId === firstChildId);
+
+	// Steer AGAIN — repeatable.
+	await registry.control(started.runId, { action: "steer", feedback: "shorter still" }, cwd);
+	await waitFor("second followup", () => harness.followups.length === 2);
+	okCheck("rerun: second steer same child", harness.followups[1].childId === firstChildId);
+	harness.settle(firstChildId, "<out:steered-2>");
+	await waitPausedAt(registry, started.runId, cwd, "a");
+	okCheck("rerun: second steering output adopted", true);
+
+	// Rerun: fresh child, verbatim ORIGINAL input.
+	await registry.control(started.runId, { action: "rerun" }, cwd);
+	await waitFor("fresh child started", () => harness.starts.length === 2);
+	okCheck("rerun: second start is continuable with the SAME prompt", harness.starts[1].kind === "continuable" && harness.starts[1].prompt === originalInput);
+	harness.settle(harness.starts[1].childId, "<out:rerun>");
+	const second = await waitPausedAt(registry, started.runId, cwd, "a");
+	const secondChildId = second.nodes.a.childSessionId as string;
+	okCheck("rerun: fresh child id (old transcript preserved)", secondChildId !== firstChildId && secondChildId === harness.starts[1].childId);
+	okCheck("rerun: rerun output adopted", second.nodes.a.output === "<out:rerun>");
+
+	// Steering after the rerun targets the NEW child.
+	await registry.control(started.runId, { action: "steer", feedback: "one more pass" }, cwd);
+	await waitFor("third followup", () => harness.followups.length === 3);
+	okCheck("rerun: steering after rerun targets the new child", harness.followups[2].childId === secondChildId);
+	harness.settle(secondChildId, "<out:final>");
+	await waitPausedAt(registry, started.runId, cwd, "a");
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("rerun: completes with the final adopted output", done.state === "completed" && done.nodes.a.output === "<out:final>");
+});
+
+// --- coordinator lifecycle: created with depth 0, disposed between ops ------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }], connections: [] },
+		input: "x",
+	});
+	if (!started.ok) { okCheck("coordinator: start ok", false); return; }
+	await waitFor("a's continuable start", () => harness.starts.length === 1);
+	harness.settle(harness.starts[0].childId, "<out:1>");
+	const rec = await waitPausedAt(registry, started.runId, cwd, "a");
+	okCheck("coordinator: exactly one created", harness.coordinatorCreated.length === 1);
+	const created = harness.coordinatorCreated[0];
+	okCheck("coordinator: persisted in the record", rec.coordinatorSessionId === created.sessionId);
+	okCheck("coordinator: meta origin/depth/parent", created.meta?.origin === "subagent" && created.meta?.delegationDepth === 0 && created.meta?.parentSession === "sess" && created.meta?.cwd === cwd);
+	okCheck("coordinator: options mirrored minus subagentDepth", created.agentOptions?.provider === "ds" && created.agentOptions?.subagentDepth === undefined);
+	okCheck("coordinator: disposed after the start acceptance", harness.coordinatorDisposed.includes(created.sessionId) && !harness.liveCoordinators.has(created.sessionId));
+	// Steer: resumed on demand, disposed again right after the followup.
+	await registry.control(started.runId, { action: "steer", feedback: "go on" }, cwd);
+	await waitFor("followup", () => harness.followups.length === 1);
+	okCheck("coordinator: resumed for the steer", harness.coordinatorResumed.includes(created.sessionId));
+	await waitFor("coordinator re-disposed", () => harness.coordinatorDisposed.filter((id) => id === created.sessionId).length >= 2);
+	okCheck("coordinator: absent parent drops the settlement notice (no live coordinator)", !harness.liveCoordinators.has(created.sessionId));
+	harness.settle(rec.nodes.a.childSessionId as string, "<out:yes>");
+	await waitPausedAt(registry, started.runId, cwd, "a");
+});
+
+// --- abort: completed outputs preserved; run finalized aborted --------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [agent("a", "Alpha", "A."), { ...agent("b", "Beta", "B."), breakpoint: true }], connections: [conn("c1", "a", "b")] },
+		input: "x",
+	});
+	if (!started.ok) { okCheck("abort: start ok", false); return; }
+	await waitFor("b's continuable start", () => harness.starts.filter((s) => s.label === "Beta").length === 1);
+	harness.settle(harness.starts[1].childId, "<out:Beta>");
+	await waitPausedAt(registry, started.runId, cwd, "b");
+	await registry.control(started.runId, { action: "abort" }, cwd);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("abort: run marked aborted", done.state === "aborted");
+	okCheck("abort: completed upstream output preserved", done.nodes.a.status === "done" && done.nodes.a.output === "<out:Alpha>");
+	okCheck("abort: paused node marked aborted with output kept", done.nodes.b.status === "aborted" && done.nodes.b.output === "<out:Beta>");
+});
+
+// --- abort mid-flight interrupts the live continuable child -----------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [agent("a", "Alpha", "A."), { ...agent("b", "Beta", "B."), breakpoint: true }], connections: [conn("c1", "a", "b")] },
+		input: "x",
+	});
+	if (!started.ok) { okCheck("abort-flight: start ok", false); return; }
+	// a completes one-shot on its own; abort while b's initial epoch is in
+	// flight (the executor waits for the epoch's settlement that never comes).
+	await waitFor("b's child started", () => harness.starts.filter((s) => s.label === "Beta").length === 1);
+	await registry.control(started.runId, { action: "abort" }, cwd);
+	// The abort finalizes via the signal (the harness interrupt stop reason is
+	// not required for the run to settle).
+	const rec = await waitTerminal(registry, started.runId, cwd);
+	const bChild = rec.nodes.b.childSessionId as string;
+	okCheck("abort-flight: interrupt sent to the live child via the coordinator address",
+		harness.interrupts.some((i) => i.childId === bChild && i.parentSessionId === rec.coordinatorSessionId));
+	okCheck("abort-flight: run aborted", rec.state === "aborted" && rec.nodes.b.status === "aborted");
+});
+
+// --- stale `running` sweep: aborted with outputs intact ---------------------
+await withTempDir(async (cwd) => {
+	// Simulate a record left behind by a dead process: a done, b in flight.
+	const stale: RunRecord = {
+		runId: "stale-run",
+		cwd,
+		sessionId: "sess",
+		coordinatorSessionId: "coord-1",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "running",
+		graph: { agents: [agent("a", "Alpha", "A."), agent("b", "Beta", "B.")], connections: [conn("c1", "a", "b")] },
+		input: "x",
+		order: ["a", "b"],
+		nodes: {
+			a: { status: "done", output: "<out:Alpha>", childSessionId: "oneshot-1", stopReason: "completed" },
+			b: { status: "running", input: "b prompt", childSessionId: "child-9" },
+		},
+	};
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "stale-run.json"), JSON.stringify(stale, null, 2));
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const active = await registry.activeRunForCwd(cwd);
+	okCheck("sweep: stale run is not active", active === null);
+	const swept = await registry.getRun("stale-run", cwd);
+	okCheck("sweep: record swept to aborted", swept !== null && swept.state === "aborted");
+	okCheck("sweep: in-flight node aborted", swept?.nodes.b.status === "aborted");
+	okCheck("sweep: completed outputs intact", swept?.nodes.a.status === "done" && swept.nodes.a.output === "<out:Alpha>");
+	// Swept terminal run accepts no control commands.
+	const controlled = await registry.control("stale-run", { action: "resume" }, cwd);
+	okCheck("sweep: terminal run rejects control", controlled.ok === false);
+});
+
+// --- paused record survives a restart: resurrected fully controllable ------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry1 = new RunRegistry(harness.services);
+	const started = await registry1.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }, agent("b", "Beta", "B.")], connections: [conn("c1", "a", "b")] },
+		input: "persist me",
+	});
+	if (!started.ok) { okCheck("restart: start ok", false); return; }
+	await waitFor("a's continuable start", () => harness.starts.length === 1);
+	harness.settle(harness.starts[0].childId, "<out:before-restart>");
+	const before = await waitPausedAt(registry1, started.runId, cwd, "a");
+	const childId = before.nodes.a.childSessionId as string;
+	const coordinatorId = before.coordinatorSessionId as string;
+	// "Restart": a brand-new registry over the same workspace.
+	const registry2 = new RunRegistry(harness.services);
+	const discovered = await registry2.activeRunForCwd(cwd);
+	okCheck("restart: paused run discovered via the workspace", discovered !== null && discovered.runId === started.runId && discovered.state === "paused" && discovered.pausedAt === "a");
+	okCheck("restart: coordinator id preserved", discovered?.coordinatorSessionId === coordinatorId);
+	// Steering after the restart: coordinator resumed, SAME child, then resume.
+	await registry2.control(started.runId, { action: "steer", feedback: "post-restart steer" }, cwd);
+	await waitFor("post-restart followup", () => harness.followups.length === 1);
+	okCheck("restart: followup to the SAME child", harness.followups[0].childId === childId);
+	okCheck("restart: coordinator cold-resumed for the steer", harness.coordinatorResumed.includes(coordinatorId));
+	okCheck("restart: steer parented to the resumed coordinator", harness.followups[0].parentId === coordinatorId);
+	harness.settle(childId, "<out:after-restart>");
+	await waitPausedAt(registry2, started.runId, cwd, "a");
+	await registry2.control(started.runId, { action: "resume" }, cwd);
+	const done = await waitTerminal(registry2, started.runId, cwd);
+	okCheck("restart: resume after restart completes", done.state === "completed" && done.nodes.b.status === "done");
+	okCheck("restart: downstream used the post-restart output", harness.starts.find((s) => s.label === "Beta")?.prompt.includes("<out:after-restart>") === true);
+});
+
+// --- single active run per workspace (409 semantics) ------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const first = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }], connections: [] },
+		input: "x",
+	});
+	okCheck("single: first start ok", first.ok === true);
+	if (!first.ok) return;
+	await waitFor("a's continuable start", () => harness.starts.length === 1);
+	harness.settle(harness.starts[0].childId, "<out:1>");
+	await waitPausedAt(registry, first.runId, cwd, "a");
+	const second = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }], connections: [] },
+		input: "y",
+	});
+	okCheck("single: second start rejected with the active run id", second.ok === false && second.activeRunId === first.runId);
+	// A DIFFERENT workspace may run concurrently.
+	const other = await registry.startRun({
+		sessionId: "sess",
+		cwd: join(cwd, "other"),
+		graph: { agents: [{ ...agent("a", "Alpha2", "A."), breakpoint: true }], connections: [] },
+		input: "x",
+	});
+	okCheck("single: other workspace allowed", other.ok === true);
+});
+
+// --- degraded deployment: no continuable support ----------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ continuable: false });
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [agent("a", "Alpha", "A."), { ...agent("b", "Beta", "B."), breakpoint: true }], connections: [conn("c1", "a", "b")] },
+		input: "x",
+	});
+	okCheck("degraded: start ok", started.ok === true);
+	if (!started.ok) return;
+	// a runs one-shot (no breakpoint), b runs one-shot and STILL pauses.
+	const rec = await waitPausedAt(registry, started.runId, cwd, "b");
+	okCheck("degraded: breakpointed agent ran one-shot and paused", harness.starts[1].kind === "oneshot" && rec.nodes.b.status === "paused");
+	okCheck("degraded: no coordinator ever created", harness.coordinatorCreated.length === 0);
+	// Steering is rejected with a typed error; rerun works.
+	const steer = await registry.control(started.runId, { action: "steer", feedback: "nope" }, cwd);
+	okCheck("degraded: steering rejected", steer.ok === false);
+	const rerun = await registry.control(started.runId, { action: "rerun" }, cwd);
+	okCheck("degraded: rerun accepted", rerun.ok === true);
+	await waitFor("degraded rerun start", () => harness.starts.length === 3);
+	okCheck("degraded: rerun is a fresh one-shot", harness.starts[2].kind === "oneshot");
+	okCheck("degraded: rerun used the verbatim composed input", harness.starts[2].prompt === rec.nodes.b.input);
+	await waitPausedAt(registry, started.runId, cwd, "b");
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("degraded: resume completes", done.state === "completed");
+});
+
+// --- wrong-state control commands get typed errors --------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }], connections: [] },
+		input: "x",
+	});
+	if (!started.ok) { okCheck("typed: start ok", false); return; }
+	await waitFor("a's continuable start", () => harness.starts.length === 1);
+	harness.settle(harness.starts[0].childId, "<out:1>");
+	await waitPausedAt(registry, started.runId, cwd, "a");
+	const emptySteer = await registry.control(started.runId, { action: "steer", feedback: "   " }, cwd);
+	okCheck("typed: empty steer feedback rejected", emptySteer.ok === false);
+	const badAction = await registry.control(started.runId, { action: "explode" }, cwd);
+	okCheck("typed: unknown action rejected", badAction.ok === false);
+	const unknown = await registry.control("no-such-run", { action: "resume" }, cwd);
+	okCheck("typed: unknown run rejected", unknown.ok === false);
+});
+
+console.log(`\n${passed} passed, ${failed} failed`);
+process.exit(failed === 0 ? 0 : 1);

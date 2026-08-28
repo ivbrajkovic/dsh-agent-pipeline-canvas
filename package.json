@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "tsx test/validate.test.ts && tsx test/execution.test.ts && tsx test/message.test.ts && tsx test/runner.test.ts",
+    "test": "tsx test/validate.test.ts && tsx test/execution.test.ts && tsx test/message.test.ts && tsx test/runner.test.ts && tsx test/runs.test.ts",
     "sync": "npm run typecheck && npm test && npm run build && rsync -a --delete --exclude .git --exclude node_modules ./ ~/.dsh/profiles/web/node_modules/dsh-agent-pipeline-canvas/ && echo 'Synced to the profile — hard-refresh the browser tab; restart the web profile only if host routes changed.'"
   },
   "dsh": {
