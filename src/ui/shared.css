@@ -1,0 +1,87 @@
+/* Shared primitives for every pipeline surface: buttons and the modal frame
+   (run + result modals). Injected once via the build's pipeline-css-inline
+   loader as <style data-plugin-css="dsh-agent-pipeline-canvas/styles/shared.css">. */
+
+.pipeline-btn {
+	cursor: pointer;
+	border: 1px solid var(--dsw-alias-border-l2);
+	background: var(--dsw-alias-bg-layer-2);
+	color: var(--dsw-alias-label-primary);
+	border-radius: 6px;
+	padding: 4px 10px;
+	font-size: 12px;
+}
+.pipeline-btn:hover { border-color: var(--dsw-alias-brand-primary); }
+.pipeline-btn:disabled { opacity: .5; cursor: default; }
+.pipeline-btn-run { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.pipeline-btn-run:disabled { border-color: var(--dsw-alias-border-l2); color: var(--dsw-alias-label-secondary); }
+.pipeline-btn-stop { border-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); }
+.pipeline-btn-mini { padding: 1px 8px; font-size: 11px; flex-shrink: 0; }
+
+.pipeline-modal-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 60;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(0, 0, 0, .45);
+}
+.pipeline-modal {
+	width: 560px;
+	max-width: 94%;
+	max-height: 88%;
+	background: var(--dsw-alias-bg-layer-1);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 12px;
+	padding: 16px;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	box-shadow: 0 8px 30px rgba(0, 0, 0, .35);
+	overflow: auto;
+}
+.pipeline-modal h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.pipeline-modal .modal-row { display: flex; flex-direction: column; gap: 6px; }
+.pipeline-modal label { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.pipeline-modal textarea {
+	font-family: inherit;
+	font-size: 12px;
+	color: var(--dsw-alias-label-primary);
+	background: var(--dsw-alias-bg-base);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 6px;
+	padding: 6px 8px;
+	box-sizing: border-box;
+	width: 100%;
+	min-height: 96px;
+	resize: vertical;
+}
+.pipeline-modal input {
+	font-family: inherit;
+	font-size: 12px;
+	color: var(--dsw-alias-label-primary);
+	background: var(--dsw-alias-bg-base);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 6px;
+	padding: 6px 8px;
+	box-sizing: border-box;
+	width: 100%;
+}
+.pipeline-modal textarea:focus, .pipeline-modal input:focus, .pipeline-modal select:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+.pipeline-modal select {
+	font-family: inherit;
+	font-size: 12px;
+	color: var(--dsw-alias-label-primary);
+	background: var(--dsw-alias-bg-base);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 6px;
+	padding: 5px 8px;
+	box-sizing: border-box;
+	width: 100%;
+}
+.pipeline-modal-notice { font-size: 11px; color: var(--dsw-alias-state-warning-primary); }
+.pipeline-modal-status { font-size: 11px; color: var(--dsw-alias-state-error-primary); }
+.pipeline-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; align-items: center; }
+.pipeline-modal-actions .spacer { flex: 1; }

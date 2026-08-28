@@ -1,0 +1,79 @@
+/* The Run modal's attachment zone, path chips, and the file-reference picker. */
+
+.pipeline-attach-zone {
+	border: 1px dashed var(--dsw-alias-border-l2);
+	border-radius: 8px;
+	padding: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.pipeline-attach-zone.drag { border-color: var(--dsw-alias-brand-primary); }
+.pipeline-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pipeline-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+	background: var(--dsw-alias-bg-layer-2);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 999px;
+	padding: 2px 4px 2px 9px;
+	max-width: 100%;
+}
+.pipeline-chip .chip-path {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 420px;
+}
+.pipeline-chip .chip-x {
+	cursor: pointer;
+	border: none;
+	background: transparent;
+	color: var(--dsw-alias-label-secondary);
+	font-size: 12px;
+	line-height: 1;
+	padding: 2px 6px;
+	border-radius: 999px;
+}
+.pipeline-chip .chip-x:hover { color: var(--dsw-alias-state-error-primary); }
+.pipeline-picker-list {
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 6px;
+	background: var(--dsw-alias-bg-base);
+	max-height: 150px;
+	overflow: auto;
+	display: flex;
+	flex-direction: column;
+}
+.pipeline-picker-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 8px;
+	font-size: 11px;
+	cursor: pointer;
+	user-select: none;
+}
+.pipeline-picker-row:hover { background: var(--dsw-alias-bg-layer-2); }
+.pipeline-picker-row .row-kind {
+	flex-shrink: 0;
+	font-size: 10px;
+	color: var(--dsw-alias-label-secondary);
+	width: 52px;
+}
+.pipeline-picker-row .row-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pipeline-picker-row .row-add {
+	flex-shrink: 0;
+	border: 1px solid var(--dsw-alias-border-l2);
+	background: transparent;
+	color: var(--dsw-alias-label-secondary);
+	border-radius: 4px;
+	font-size: 11px;
+	line-height: 1;
+	padding: 2px 6px;
+	cursor: pointer;
+}
+.pipeline-picker-row .row-add:hover { color: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+.pipeline-picker-status { font-size: 11px; color: var(--dsw-alias-label-secondary); }

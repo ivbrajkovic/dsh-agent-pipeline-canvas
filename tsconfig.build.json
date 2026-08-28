@@ -22,5 +22,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/client.ts"]
+  "exclude": ["src/client.tsx", "src/ui"]
 }

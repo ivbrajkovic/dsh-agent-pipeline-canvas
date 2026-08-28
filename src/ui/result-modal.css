@@ -1,0 +1,48 @@
+/* The Result modal: terminal-output blocks and the per-run status strip with
+   the Transcript route into each agent's child session. */
+
+.pipeline-result {
+	background: var(--dsw-alias-bg-base);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 8px;
+	padding: 8px;
+	max-height: 220px;
+	overflow: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.pipeline-result-row { display: flex; flex-direction: column; gap: 2px; }
+.pipeline-result-label { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.pipeline-result-value {
+	margin: 0;
+	padding: 6px 8px;
+	background: var(--dsw-alias-bg-base);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 6px;
+	font-size: 11px;
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 160px;
+	overflow: auto;
+}
+.pipeline-result-warn { font-size: 11px; color: var(--dsw-alias-state-warning-primary); }
+.pipeline-result-error { font-size: 11px; color: var(--dsw-alias-state-error-primary); }
+.pipeline-runs {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	border-top: 1px dashed var(--dsw-alias-border-l2);
+	padding-top: 6px;
+}
+.pipeline-run-row { display: flex; align-items: center; gap: 8px; font-size: 11px; min-height: 20px; }
+.pipeline-run-row .run-name { font-weight: 600; flex-shrink: 0; }
+.pipeline-run-row .run-status { color: var(--dsw-alias-label-secondary); flex-shrink: 0; }
+.pipeline-run-row .run-status.warn { color: var(--dsw-alias-state-warning-primary); }
+.pipeline-run-row .run-error {
+	color: var(--dsw-alias-state-error-primary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+}

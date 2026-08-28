@@ -4,7 +4,7 @@
 // This module is the single authoritative definition of the pipeline's graph
 // contract. It is intentionally PURE (no Node or browser APIs, no I/O, no React)
 // so it can be imported by the Host (./index.ts), the executor (./runner.ts),
-// and the browser client (./client.ts, where tsdown bundles it in), and its
+// and the browser client (./client.tsx, where tsdown bundles it in), and its
 // behaviour can be exercised in a plain Node script (see test/validate.test.ts).
 //
 // ## The graph, treated as a DAG

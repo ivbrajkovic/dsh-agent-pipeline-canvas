@@ -1,0 +1,132 @@
+/* The agent configuration modal: overlay, a wide two-column card — the left
+   column is the agent's behavior (name / description / system prompt /
+   instructions), the right column the always-visible construction overrides. */
+
+.pipeline-config-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.pipeline-config {
+  width: 720px;
+  max-width: 94%;
+  max-height: 92%;
+  overflow-y: auto;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  padding: 16px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+.pipeline-config h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.pipeline-config .config-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pipeline-config label {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+.pipeline-config input,
+.pipeline-config textarea {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  width: 100%;
+}
+.pipeline-config select {
+  /* Customizable select: the popup renders in-page, so its rows get the
+     padding below on every side (the macOS native menu ignores option CSS).
+     Unsupported browsers keep the native popup — this is simply ignored. */
+  appearance: base-select;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pipeline-config select::picker(select) {
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.pipeline-config select option {
+  padding: 6px 10px;
+  border-radius: 5px;
+  color: inherit;
+}
+.pipeline-config select option:hover,
+.pipeline-config select option:focus {
+  background: color-mix(
+    in srgb,
+    var(--dsw-alias-brand-primary) 18%,
+    transparent
+  );
+}
+.pipeline-config input:focus,
+.pipeline-config textarea:focus,
+.pipeline-config select:focus {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}
+.pipeline-config textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+.pipeline-config .config-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.pipeline-config .config-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.pipeline-config .config-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.pipeline-config .config-col-settings {
+  padding-left: 16px;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
+.pipeline-config .config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 10px;
+}
+.pipeline-config .config-error {
+  font-size: 11px;
+  color: var(--dsw-alias-state-error-primary);
+}
