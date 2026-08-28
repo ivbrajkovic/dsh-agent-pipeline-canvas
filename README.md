@@ -17,8 +17,31 @@ graph persists per repository.
 - Drag from an agent's **output** port to another agent's **input** port to
   connect them. Edges are directed and arrow-marked; an output may **fan out**
   to many inputs, and an input may **fan in** from many sources.
-- **Double-click an agent** to open its configuration panel and edit its
-  `name`, `description`, and `instructions` (single-click still selects).
+- Click an agent's **edit button** (the pencil in its top-right corner) to open
+  its configuration panel — a wide two-column card, everything visible. The
+  left column is the agent's behavior: `name`, `description`, **system
+  prompt**, and `instructions` (a plain click still selects the node).
+- The right column holds the agent's **settings**: **agent options**
+  (provider / model / reasoning effort / max output tokens), a **tool filter**
+  (allow-only or deny, comma-separated global tool names), a **delegation-depth
+  cap**, and an **output schema** (object-rooted JSON Schema). These are
+  settings, not run-time overrides — they are persisted with the graph and
+  shape every run of the agent. Empty fields inherit the defaults
+  (provider/model from the parent session, unrestricted tools); present fields
+  are forwarded to the harness subagent start request for that agent, and a
+  validated
+  structured result is preferred over the raw text output (rendered as JSON)
+  both downstream and in the result modal.
+  **Provider** and **Model** are dropdowns served by the Host's `/options`
+  route: the deployment's registered LLM routes, and the selected route's
+  advertised models. Both default to "inherit parent"; a saved value the
+  directory no longer lists stays selectable so it is never silently lost.
+- The **System prompt** field is real system-prompt text: the harness installs
+  it as the agent's `deployment:persona` system-prompt section, replacing that
+  one slot for this agent alone — the standard prompt (identity, policies,
+  every tool explanation) is inherited untouched. See
+  [SYSTEM-PROMPT.md](SYSTEM-PROMPT.md) for the full section layout and what is
+  replaceable.
 - The graph is **validated as a DAG** as you edit — a *Valid* / *N issues* chip
   in the toolbar plus an issue strip report cycles, self-connections, duplicate
   edges, and connections referencing a missing agent or port.
@@ -42,7 +65,7 @@ different repositories get independent pipelines.
 Three faces over one pure core:
 
 - **Host half** — `src/index.ts` + `src/runner.ts` (Node). Mounts as the Cordis
-  plugin row `agent-pipeline-canvas` and registers two exact `webServer` routes:
+  plugin row `agent-pipeline-canvas` and registers three exact `webServer` routes:
   - `GET|POST /dsh-agent-pipeline` — persistence. `GET ?cwd=<absolute project
     root>` reads `<cwd>/.agent-pipeline/pipeline.json` (or `null` when absent);
     `POST { cwd, graph }` writes it atomically. A relative or empty `cwd` is
@@ -51,7 +74,12 @@ Three faces over one pure core:
     graph on disk) without changing the load/save behaviour.
   - `POST /dsh-agent-pipeline/run` — executes a pipeline snapshot (see
     [Running a pipeline](#running-a-pipeline)).
-- **Browser half** — `src/client.ts`: the Pipelines canvas, a React component
+  - `GET /dsh-agent-pipeline/options?provider=<id>` — the registered LLM
+    provider routes plus one route's advertised models, read server-side off
+    the `llm` service (per-provider model catalogs are not remotely callable).
+    Feeds the settings panel's Provider/Model dropdowns and degrades to
+    empty lists so the fields stay free-form.
+- **Browser half** — `src/client.tsx`: the Pipelines canvas, a React component
   registered into three additive slots. The per-session tab lives in
   `conversation.view` (`id: pipeline`, `order: 30`); a compact **Pipelines**
   icon button lives in the composer tool row
@@ -93,7 +121,7 @@ dsh-agent-pipeline-canvas/
                         runtime deps; typecheck/test/build scripts + devDeps
   tsconfig.json         whole-tree noEmit typecheck facade (incl. the browser client)
   tsconfig.build.json   node-half emit: src/*.ts -> lib/*.js + lib/*.d.ts (excl. client)
-  tsdown.config.ts      browser bundle: src/client.ts -> lib/client.js (module-loader format)
+  tsdown.config.ts      browser bundle: src/client.tsx -> lib/client.js (module-loader format)
   src/types.ts          shared contract types (PipelineGraph / Agent / Connection,
                         validation errors+results, agent execution input, pipeline
                         execution result, runner request/result)
@@ -104,13 +132,18 @@ dsh-agent-pipeline-canvas/
                         (root/terminal/orphan), the per-agent input shape, the
                         default prompt framing, the deterministic run order
                         (topoOrder), and the final-result shape
-  src/index.ts          Host half: Cordis plugin row + the two webServer routes
-                        (persistence with atomic writes, run endpoint)
+  src/index.ts          Host half: Cordis plugin row + the three webServer routes
+                        (persistence with atomic writes, run endpoint, options
+                        catalog for the Advanced dropdowns)
   src/runner.ts         Host-side minimal sequential runner: validates the snapshot,
                         resolves the session's live Agent as parent, and runs each
                         pipeline agent as a fresh `spawn` subagent in topological order
-  src/client.ts         browser half: the Pipelines view tab (canvas, config panel,
-                        load/save, live DAG validation UI)
+  src/client.tsx         browser entry: slot registration only (the components live
+                        in src/ui/ — one module + one stylesheet per surface:
+                        pipeline-view, agent-config, run-modal, result-modal,
+                        shell-panel, shared; each `.css` import compiles into a
+                        tagged <style data-plugin-css> injector at factory
+                        materialization, see tsdown.config.ts)
   test/validate.test.ts   validateGraph smoke tests
   test/execution.test.ts  execution-contract smoke tests
   test/runner.test.ts     runner-orchestration smoke tests
@@ -224,24 +257,31 @@ persisted). The runner (`src/runner.ts`) then:
 4. **Passes each output** to its downstream agents' inputs.
 5. **Returns** `{ ok, outputs: { [terminalId]: output }, runs, order }`, where
    `outputs` is the contract's final-result shape and `runs` carries per-agent
-   `{ id, label, status }` for a minimal status surface.
+   `{ id, label, status, childSessionId }` — the child session id of the
+   agent's published run, so the result modal can open its full transcript.
 
 The parent's provider/model is inherited by each child (via the harness's
-`resolveChildAgentOptions`), so pipeline agents run on the deployment's
-configured model. The `spawn` provider is the one registered by the base bundle.
-The run is currently a blocking synchronous POST, and it is **stoppable**: while
-a run is in flight the toolbar shows **Stop**, which aborts the request — the
-Host notices the dropped connection and aborts the run server-side, so the
-in-flight agent is interrupted and the remaining agents never start. Closing the
-tab or reloading has the same effect. Parallel execution, retries, conditions,
-loops, model/tool selection, and live visualization are deliberately **not**
-implemented.
+`resolveChildAgentOptions`) **unless the agent's settings say otherwise** —
+per-agent provider/model/reasoning-effort/max-tokens, tool filter,
+delegation-depth cap, and output schema are forwarded (see
+[The canvas](#the-canvas)); the system prompt travels separately, as the
+agent's first-class `systemPrompt` field (forwarded to the harness's persona
+slot). The `spawn` provider is the one registered by
+the base bundle. The run is currently a blocking synchronous POST, and it is
+**stoppable**: while a run is in flight the toolbar shows **Stop**, which
+aborts the request — the Host notices the dropped connection and aborts the run
+server-side, so the in-flight agent is interrupted and the remaining agents
+never start. Closing the tab or reloading has the same effect. Parallel
+execution, retries, conditions, loops, and live visualization are deliberately
+**not** implemented.
 
 ### Result & continue routes
 
-On completion a result modal shows the terminal outputs and offers three
-continue routes — every route only **prefills a composer and lets the user
-send**; nothing is ever auto-sent:
+On completion a result modal shows the terminal outputs, a per-run status
+strip, and offers the continue routes — every route only **prefills a composer
+and lets the user send**; nothing is ever auto-sent. Each run row also carries
+a **Transcript** button (when the run published a child session): it opens the
+agent's durable child session, which holds the agent's full transcript.
 
 - **Continue in chat** — stages the final output into this session's composer
   (the standard `inputActions`) and opens the Chat tab.
@@ -284,17 +324,22 @@ One-time wiring:
      name: dsh-agent-pipeline-canvas
    ```
 
-Then, after every build (or any change), sync the tree into the profile and let
-the user restart the web profile so the Host routes re-mount:
+Then, after every change, run the one-command loop — it typechecks, runs the
+tests, builds, and syncs the tree into the profile (stopping before the copy
+if any step fails):
 
 ```
-rsync -a --delete --exclude .git --exclude node_modules ./ \
-  ~/.dsh/profiles/web/node_modules/dsh-agent-pipeline-canvas/
+npm run sync
 ```
+
+(the script wraps the plain copy, if you ever need it on its own:
+`rsync -a --delete --exclude .git --exclude node_modules ./ \
+  ~/.dsh/profiles/web/node_modules/dsh-agent-pipeline-canvas/`)
 
 Client-only changes need just the sync plus a hard browser refresh (the client
-is served fresh, no cache). `pnpm install` inside the profile is currently
-blocked by a pre-existing supply-chain policy error
+is served fresh, no cache). Host changes additionally need the user to restart
+the web profile so the routes re-mount. `pnpm install` inside the profile is
+currently blocked by a pre-existing supply-chain policy error
 (`ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` for `dshmarket@1.34.0`); the rsync
 path needs no install. After a restart, verify the route is mounted:
 
