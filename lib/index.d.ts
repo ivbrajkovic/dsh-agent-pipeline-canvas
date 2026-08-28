@@ -21,9 +21,24 @@ interface WebServerService {
         handler: RouteHandler;
     }): unknown;
 }
+/** Structural view of the `llm` service the options route reads (see lib types). */
+interface LlmProviderInfoLike {
+    id?: unknown;
+    name?: unknown;
+}
+interface LlmModelInfoLike {
+    id?: unknown;
+    name?: unknown;
+    description?: unknown;
+}
+interface LlmService {
+    listProviders(): LlmProviderInfoLike[];
+    listModels(provider: string): Promise<LlmModelInfoLike[]>;
+}
 /** The slice of the plugin context the Host half needs (extends RunnerContext). */
 interface HostContext extends RunnerContext {
     webServer: WebServerService;
+    llm: LlmService;
     effect(fn: () => unknown): unknown;
 }
 /**
