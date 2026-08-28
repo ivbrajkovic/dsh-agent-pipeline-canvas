@@ -6,9 +6,9 @@ Context) and from a **Pipelines** button in the composer's tool row — the
 button opens a frame-wide panel that works even on a brand-new session, where
 the harness shows no view tabs at all. Build a DAG of generic agents,
 then run it — each agent is delegated to the harness's own `subagents` service
-as a fresh one-shot child in deterministic topological order, outputs flow
-downstream, and the run returns `{ outputs: { [terminalId]: output } }`. The
-graph persists per repository.
+in deterministic topological order (one-shot children, or continuable children
+for breakpointed agents), outputs flow downstream, and the durable run returns
+`{ outputs: { [terminalId]: output } }`. The graph persists per repository.
 
 ## The canvas
 
@@ -40,7 +40,7 @@ graph persists per repository.
   it as the agent's `deployment:persona` system-prompt section, replacing that
   one slot for this agent alone — the standard prompt (identity, policies,
   every tool explanation) is inherited untouched. See
-  [SYSTEM-PROMPT.md](SYSTEM-PROMPT.md) for the full section layout and what is
+  [docs/SYSTEM-PROMPT.md](docs/SYSTEM-PROMPT.md) for the full section layout and what is
   replaceable.
 - The graph is **validated as a DAG** as you edit — a *Valid* / *N issues* chip
   in the toolbar plus an issue strip report cycles, self-connections, duplicate
@@ -64,16 +64,21 @@ different repositories get independent pipelines.
 
 Three faces over one pure core:
 
-- **Host half** — `src/index.ts` + `src/runner.ts` (Node). Mounts as the Cordis
-  plugin row `agent-pipeline-canvas` and registers three exact `webServer` routes:
+- **Host half** — `src/index.ts` + `src/runner.ts` + `src/runs.ts` (Node).
+  Mounts as the Cordis plugin row `agent-pipeline-canvas` and registers exact
+  `webServer` routes:
   - `GET|POST /dsh-agent-pipeline` — persistence. `GET ?cwd=<absolute project
-    root>` reads `<cwd>/.agent-pipeline/pipeline.json` (or `null` when absent);
+    root>` reads `<cwd>/.agent-pipeline/pipeline.json` (or `null` when absent)
+    and also returns `run` — the workspace's active run record (or `null`);
     `POST { cwd, graph }` writes it atomically. A relative or empty `cwd` is
     refused, so the file can only land under a real project directory. Both
     responses carry a `validation` field (the `validateGraph` result for the
     graph on disk) without changing the load/save behaviour.
-  - `POST /dsh-agent-pipeline/run` — executes a pipeline snapshot (see
-    [Running a pipeline](#running-a-pipeline)).
+  - `POST /dsh-agent-pipeline/run` — starts a durable run and returns
+    `{ ok, runId }` immediately (see [Running a pipeline](#running-a-pipeline)).
+  - `GET /dsh-agent-pipeline/run` — one run's full record (debug/fallback).
+  - `GET /dsh-agent-pipeline/run/events` — the run's SSE stream.
+  - `POST /dsh-agent-pipeline/control` — resume / rerun / steer / abort.
   - `GET /dsh-agent-pipeline/options?provider=<id>` — the registered LLM
     provider routes plus one route's advertised models, read server-side off
     the `llm` service (per-provider model catalogs are not remotely callable).
@@ -112,8 +117,8 @@ The source lives under `src/` (TypeScript); the shipped artifacts under `lib/`
 are build output (`npm run build` → `tsc -p tsconfig.build.json && tsdown
 --config tsdown.config.ts`), matching the DSH plugin convention. The node half
 (`lib/index.js`, `lib/graph.js`, `lib/execution.js`, `lib/runner.js`,
-`lib/types.js` + `.d.ts`) is emitted by tsc; the browser bundle
-(`lib/client.js`) is built by tsdown.
+`lib/runs.js`, `lib/storage.js`, `lib/types.js` + `.d.ts`) is emitted by tsc;
+the browser bundle (`lib/client.js`) is built by tsdown.
 
 ```
 dsh-agent-pipeline-canvas/
@@ -124,7 +129,8 @@ dsh-agent-pipeline-canvas/
   tsdown.config.ts      browser bundle: src/client.tsx -> lib/client.js (module-loader format)
   src/types.ts          shared contract types (PipelineGraph / Agent / Connection,
                         validation errors+results, agent execution input, pipeline
-                        execution result, runner request/result)
+                        execution result, runner request/result, durable run record
+                        and control shapes)
   src/graph.ts          canonical graph semantics: pure validateGraph(graph) /
                         findCycle — imported by the Host, the runner, AND the
                         browser bundle (inlined by tsdown)
@@ -132,21 +138,30 @@ dsh-agent-pipeline-canvas/
                         (root/terminal/orphan), the per-agent input shape, the
                         default prompt framing, the deterministic run order
                         (topoOrder), and the final-result shape
-  src/index.ts          Host half: Cordis plugin row + the three webServer routes
-                        (persistence with atomic writes, run endpoint, options
-                        catalog for the Advanced dropdowns)
-  src/runner.ts         Host-side minimal sequential runner: validates the snapshot,
-                        resolves the session's live Agent as parent, and runs each
-                        pipeline agent as a fresh `spawn` subagent in topological order
+  src/storage.ts        the atomic temp-file+rename write protocol shared by the
+                        pipeline file and the run records
+  src/index.ts          Host half: Cordis plugin row + the webServer routes
+                        (persistence with atomic writes, durable run start +
+                        record read + SSE stream + control, options catalog)
+  src/runner.ts         per-agent primitives: runOneAgent (one-shot `spawn` child
+                        with settings forwarding), startContinuableAgent /
+                        steerContinuableAgent (breakpoint path), and the legacy
+                        blocking runPipeline executor
+  src/runs.ts           the durable run registry: per-workspace run records,
+                        the sequential executor + control mailbox, the per-run
+                        coordinator lifecycle, the subagent/end settlement
+                        matcher, restart sweep, single-active-run rule
   src/client.tsx         browser entry: slot registration only (the components live
                         in src/ui/ — one module + one stylesheet per surface:
                         pipeline-view, agent-config, run-modal, result-modal,
-                        shell-panel, shared; each `.css` import compiles into a
-                        tagged <style data-plugin-css> injector at factory
-                        materialization, see tsdown.config.ts)
+                        inspect-modal, shell-panel, shared; each `.css` import
+                        compiles into a tagged <style data-plugin-css> injector
+                        at factory materialization, see tsdown.config.ts)
   test/validate.test.ts   validateGraph smoke tests
   test/execution.test.ts  execution-contract smoke tests
   test/runner.test.ts     runner-orchestration smoke tests
+  test/runs.test.ts       durable-run tests: pause/resume, breakpoints, rerun,
+                          steering, abort, restart sweep, 409, degradation
   lib/                  committed build output — rebuild, never hand-edit
 ```
 
@@ -239,26 +254,92 @@ a browser, so a dropped file points at the picker instead. File **contents are
 never inlined**: the composed input lists the paths, and the first agent reads
 them with its own file tools.
 
-The browser then POSTs `{ sessionId, graph, input }` to
+The browser then POSTs `{ sessionId, cwd, graph, input }` to
 `POST /dsh-agent-pipeline/run` (the graph is the snapshot the user currently
-sees; `input` is the composed text+files string — a runtime-only value, never
-persisted). The runner (`src/runner.ts`) then:
+sees; `input` is the composed text+files string). The route **starts a durable
+run executor in the Host process and returns `{ ok, runId }` immediately** —
+the run is not tied to the HTTP request, the tab, or even the profile's
+lifetime. The browser follows the run's record over
+**SSE** (`GET /dsh-agent-pipeline/run/events?id=…&cwd=…`, an
+`event: snapshot` full record on every connect/reconnect and an `event: update`
+per transition; `EventSource` auto-reconnect self-heals a profile restart),
+and a page reload re-discovers the workspace's active run through the
+`run` field of `GET /dsh-agent-pipeline?cwd=…`. **One run is active
+(running|paused) per workspace**; a second `POST /run` answers
+`409 { ok: false, activeRunId }`. Canvas edits during a run affect only the
+next run (the executor works on an immutable snapshot).
 
-1. **Validates** the snapshot with `validateGraph` (rejects an invalid graph).
-2. **Resolves the live parent Agent** from `agents.get(sessionId)` — the
-   harness subagent contract requires a non-optional `parent: Agent`, so the
-   runner must run inside the context of the session's live agent. This is an
-   invocation precondition, not an execution-contract change.
-3. **Runs each agent** as a fresh one-shot `subagents.start("spawn", ...)` child.
-   The prompt is built with the execution contract (`agentPrompt`). A node only
-   becomes ready once every upstream has completed (Kahn's algorithm,
-   `topoOrder`), which gives the fan-in *wait-for-all-upstreams* rule. Runs
-   execute **sequentially**.
-4. **Passes each output** to its downstream agents' inputs.
-5. **Returns** `{ ok, outputs: { [terminalId]: output }, runs, order }`, where
-   `outputs` is the contract's final-result shape and `runs` carries per-agent
-   `{ id, label, status, childSessionId }` — the child session id of the
-   agent's published run, so the result modal can open its full transcript.
+The run record persists per workspace at
+`<cwd>/.agent-pipeline/runs/<runId>.json` (rewritten atomically on every
+transition — same protocol as `pipeline.json`) and carries the immutable graph
+snapshot, the pipeline input, the deterministic topological `order`, and one
+node state per agent (`pending / running / paused / done / aborted / error`
+plus the adopted `output`, the fixed composed `input`, and the agent's
+`childSessionId`).
+
+Execution (`src/runs.ts`, the run registry):
+
+1. **Validates** the snapshot with `validateGraph` and resolves the live
+   session Agent (one-shot children parent to it, unchanged).
+2. **Runs each agent sequentially** in topological order (Kahn's algorithm,
+   `topoOrder`): fan-in waits for all upstreams, each output flows downstream.
+3. **Non-breakpointed agents** run as one-shot `subagents.start("spawn", …)`
+   children — the historical path, settings forwarding unchanged.
+4. **Breakpointed agents** (see below) run as **continuable** children under a
+   disposable per-run **coordinator** agent, and the run **pauses** at each
+   breakpoint for user inspection.
+5. On a terminal state the record is finalized `completed / aborted / error`
+   with all completed outputs preserved.
+
+### Breakpoints: pause, inspect, resume / rerun / steer / abort
+
+Each agent has a **Pause on output** breakpoint (the dot in the node's
+top-left corner, or the checkbox in the edit panel). When a breakpointed
+agent's output settles, the run parks before any downstream agent starts and
+the inspection modal opens with the agent's composed input (fixed for the
+run), its output, and the control actions:
+
+- **Resume** — continue with the recorded output (to the next breakpoint, or
+  run finalization — a breakpoint on a terminal agent pauses before that too).
+  Multiple breakpoints pause independently, in topological order.
+- **Rerun** — a fresh child (new `childId`; the old transcript is preserved)
+  started with the node's **verbatim original input** — never steering
+  content — then back to paused with the new output.
+- **Steer** — deliver feedback to the **SAME** child via the harness
+  continuation (`subagents.followup`, cold-resuming it from its persisted
+  session — this works across profile restarts). The steering epoch's answer
+  is adopted and the run stays paused; repeat indefinitely.
+- **Abort** — stop the whole run: an in-flight continuable turn is interrupted
+  (authorized by the durable coordinator address, so it works while the
+  coordinator is disposed), the in-flight/paused node reads `aborted`, and
+  completed outputs are preserved in the record.
+
+Breakpointed agents run under a **coordinator agent** (a hidden
+`origin: "subagent"` child of the session with `delegationDepth: 0`), so the
+harness's settlement notices never wake the user's session with a model turn;
+the coordinator handle is disposed between operations and its durable session
+id is persisted in the record for post-restart steering. Continuable children
+cannot produce structured output (a harness limitation), so a breakpointed
+agent ignores `settings.outputSchema` — the edit panel warns when both are
+set; every other setting (provider/model, tool filter, max depth, persona)
+carries to the continuable request unchanged.
+
+**Durability:** a paused run survives page reloads and profile restarts. On
+the next workspace load, a record found `running` is stale (its executor died
+with the previous process) and is swept to `aborted` with outputs intact; a
+record found `paused` is resurrected fully controllable — the coordinator is
+cold-resumed on demand and steering still reaches the same child session.
+
+**Degradation:** continuable children require the harness continuable runtime
+(`subagents.startContinuable` + session persistence, both mounted by the base
+bundle). Without it the plugin still loads: breakpointed agents run one-shot
+and still pause; **steering is rejected**, rerun and resume still work.
+
+The legacy stoppable blocking POST is gone: there is no abort-on-disconnect —
+runs outlive the tab by design (use **Abort**). Parallel execution, retries,
+conditions, loops, and live visualization remain deliberately **not**
+implemented, and the whole run halts while paused (the executor is sequential
+by design — a pause stops every branch, not just one).
 
 The parent's provider/model is inherited by each child (via the harness's
 `resolveChildAgentOptions`) **unless the agent's settings say otherwise** —
@@ -266,14 +347,12 @@ per-agent provider/model/reasoning-effort/max-tokens, tool filter,
 delegation-depth cap, and output schema are forwarded (see
 [The canvas](#the-canvas)); the system prompt travels separately, as the
 agent's first-class `systemPrompt` field (forwarded to the harness's persona
-slot). The `spawn` provider is the one registered by
-the base bundle. The run is currently a blocking synchronous POST, and it is
-**stoppable**: while a run is in flight the toolbar shows **Stop**, which
-aborts the request — the Host notices the dropped connection and aborts the run
-server-side, so the in-flight agent is interrupted and the remaining agents
-never start. Closing the tab or reloading has the same effect. Parallel
-execution, retries, conditions, loops, and live visualization are deliberately
-**not** implemented.
+slot). The `spawn` provider is the one registered by the base bundle.
+
+Control commands ride `POST /dsh-agent-pipeline/control`
+(`{ runId, cwd, action, feedback? }` → `{ ok }` or a typed error), and the
+full record is fetchable for debugging via
+`GET /dsh-agent-pipeline/run?id=…&cwd=…`.
 
 ### Result & continue routes
 
@@ -344,8 +423,8 @@ currently blocked by a pre-existing supply-chain policy error
 path needs no install. After a restart, verify the route is mounted:
 
 ```
-curl -s http://127.0.0.1:3080/dsh-agent-pipeline/run
-# {"ok":false,"error":"method not allowed"}  (405 on GET = mounted)
+curl -s 'http://127.0.0.1:3080/dsh-agent-pipeline/run?id=x'
+# {"ok":false,"error":"no such run"}  (mounted; 404 = the route answered)
 ```
 
 ## Development
@@ -355,7 +434,7 @@ scripts run with no install step:
 
 ```
 npm run typecheck   # tsc -p tsconfig.json (whole tree, noEmit)
-npm test            # all 70 tests: validate + execution + runner
+npm test            # plain tsx scripts: validate + execution + message + runner + runs
 npm run build       # tsc -p tsconfig.build.json && tsdown → lib/
 ```
 
