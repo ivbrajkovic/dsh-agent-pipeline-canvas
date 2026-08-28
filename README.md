@@ -2,10 +2,13 @@
 
 Local DSH Web composition plugin: a visual **agent-pipeline** canvas, available
 in every session as a **Pipelines** view tab (beside Chat / Trajectory /
-Context). Build a DAG of generic agents, then run it — each agent is delegated
-to the harness's own `subagents` service as a fresh one-shot child in
-deterministic topological order, outputs flow downstream, and the run returns
-`{ outputs: { [terminalId]: output } }`. The graph persists per repository.
+Context) and from a **Pipelines** button in the left sidebar's foot — the
+sidebar route opens a frame-wide panel that works even on a brand-new session,
+where the harness shows no view tabs at all. Build a DAG of generic agents,
+then run it — each agent is delegated to the harness's own `subagents` service
+as a fresh one-shot child in deterministic topological order, outputs flow
+downstream, and the run returns `{ outputs: { [terminalId]: output } }`. The
+graph persists per repository.
 
 ## The canvas
 
@@ -48,16 +51,21 @@ Three faces over one pure core:
     graph on disk) without changing the load/save behaviour.
   - `POST /dsh-agent-pipeline/run` — executes a pipeline snapshot (see
     [Running a pipeline](#running-a-pipeline)).
-- **Browser half** — `src/client.ts`: the Pipelines view tab, a React component
-  registered into the additive `conversation.view` slot (`id: pipeline`,
-  `order: 30`), so it appears as a tab in every session. It is bundled by
-  tsdown into `lib/client.js` in the `window.__ModuleLoader__.load(...)` format
-  the browser module system consumes, and is picked into the browser roster
-  because `package.json` declares `dsh.client` and `exports["./client"]`. The
-  view reads the session's workspace root (cwd) from the framework standard kit
-  (`useSessions`), loads on mount, and saves after every graph change — which is
-  what survives the view-tab switch that would otherwise drop component-local
-  React state.
+- **Browser half** — `src/client.ts`: the Pipelines canvas, a React component
+  registered into three additive slots. The per-session tab lives in
+  `conversation.view` (`id: pipeline`, `order: 30`); a **Pipelines** trigger
+  row lives in `sidebar.footer.action` (`id: pipeline-trigger`), and it opens a
+  frame-wide panel in `shell.overlay` (`id: pipeline-panel`) bound to the
+  CURRENT session — that panel is the entry that still works on a brand-new
+  session, because the harness hides the whole session body (tabs included)
+  until the first prompt. Everything is bundled by tsdown into `lib/client.js`
+  in the `window.__ModuleLoader__.load(...)` format the browser module system
+  consumes, and is picked into the browser roster because `package.json`
+  declares `dsh.client` and `exports["./client"]`. The view reads the
+  session's workspace root (cwd) from the framework standard kit
+  (`useSessions`), loads on mount, and saves after every graph change — which
+  is what survives the view-tab switch that would otherwise drop
+  component-local React state.
 - **Pure core** — `src/types.ts` (shared contract types), `src/graph.ts` (DAG
   validation), `src/execution.ts` (execution contract): no Node/browser APIs, no
   I/O, no React, imported by both halves. tsdown **inlines** `validateGraph`

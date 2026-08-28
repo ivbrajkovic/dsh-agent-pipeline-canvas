@@ -25,8 +25,17 @@ Three faces over one pure core:
   - `POST /dsh-agent-pipeline/run` — run a snapshot `{ sessionId, graph, input }`.
 - **Browser half** — `src/client.ts` (React via `createElement`, no JSX),
   bundled by tsdown into `lib/client.js` in the `window.__ModuleLoader__.load(...)`
-  format. Injects the Pipelines view into the `conversation.view` slot
-  (`id: pipeline`, `order: 30`); loads/saves through the Host routes.
+  format. Registers three slots; loads/saves through the Host routes:
+  - `conversation.view` (`id: pipeline`, `order: 30`) — the per-session
+    *Pipelines* tab.
+  - `sidebar.footer.action` (`id: pipeline-trigger`) — the sidebar **Pipelines**
+    row (labeled when wide, icon on the rail).
+  - `shell.overlay` (`id: pipeline-panel`) — a frame-wide panel bound to the
+    CURRENT session (read off the root `useSessions` hook). This is the
+    always-available entry: the harness hides the whole session body (tabs
+    included) while a session is blank, so a brand-new session has NO tab —
+    the sidebar trigger → panel is the route that works everywhere. Opening
+    the panel mounts a fresh view; closing unmounts it.
 - **Pure core** — `src/types.ts` / `src/graph.ts` / `src/execution.ts`, imported
   by both halves. tsdown **inlines** `validateGraph` into the client bundle, so
   there is exactly ONE implementation of the graph semantics — never re-add a
@@ -122,3 +131,11 @@ hosts the session's agent runtime. Restart is the user's job.
 - **Result-modal state is per-mount**: switching conversation tabs or sessions
   unmounts the view and drops the run result (freshly re-loaded each mount).
   The toolbar Result button only reopens a modal dismissed without leaving.
+- **Slot entry hooks must be constant across renders**: a component that adds
+  hook calls after a state flip dies with React error #310 ("rendered more
+  hooks"). The shell-overlay entry is split into a one-hook gate
+  (`PipelinePanelEntry`) plus a body (`PipelinePanel`) that mounts fresh —
+  keep that shape when editing it.
+- **The `conversation.view` tab ring is harness-gated on blank sessions** — do
+  not try to re-enable it from the plugin; the sidebar trigger + shell overlay
+  panel exist for exactly that state.

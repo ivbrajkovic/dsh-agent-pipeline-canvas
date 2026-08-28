@@ -11,6 +11,10 @@
 //
 // It registers a "Pipelines" view tab into `conversation.view` (additive,
 // replaceRisk: none, order 30) so the canvas is available in EVERY session.
+// Because the harness hides the whole session body (tabs included) while a
+// session is blank, two more root-scope seats make the canvas reachable from
+// a brand-new session too: a "Pipelines" trigger row in `sidebar.footer.action`
+// and a frame-wide panel in `shell.overlay` bound to the CURRENT session.
 // The view renders the whole node workspace: a palette with a draggable Agent,
 // a canvas, node move/select, and output→input connections with directed edges.
 //
@@ -126,6 +130,20 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
 		".pipeline-result-value{margin:0;padding:6px 8px;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}",
 		".pipeline-result-warn{font-size:11px;color:var(--dsw-alias-state-warning-primary)}",
 		".pipeline-result-error{font-size:11px;color:var(--dsw-alias-state-error-primary)}",
+		".pipeline-trigger{position:relative;flex:none;display:flex;align-items:center;width:100%;height:42px;margin:8px 0 0}",
+		".pipeline-trigger-btn{display:inline-flex;align-items:center;gap:8px;width:calc(100% + 4px);height:42px;margin:0 -2px;padding:0 10px 0 8px;border:none;border-radius:12px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:14px;cursor:pointer;overflow:hidden}",
+		".pipeline-trigger-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}",
+		".pipeline-trigger.rail{width:36px;height:36px;margin:0}",
+		".pipeline-trigger.rail .pipeline-trigger-btn{justify-content:center;gap:0;width:36px;height:36px;padding:0;border-radius:50%}",
+		".pipeline-trigger-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+		".pipeline-shell-backdrop{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.5)}",
+		".pipeline-shell{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:41;width:min(1200px,94vw);height:min(860px,90vh);display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.35);overflow:hidden}",
+		".pipeline-shell-head{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);flex:none}",
+		".pipeline-shell-head h4{margin:0;font-size:13px;font-weight:600}",
+		".pipeline-shell-cwd{font-size:11px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:46%}",
+		".pipeline-shell-head .spacer{flex:1}",
+		".pipeline-shell .pipeline-view{flex:1;min-height:0;height:auto}",
+		".pipeline-shell-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-secondary);font-size:13px;padding:0 24px;text-align:center}",
 	].join("");
 	document.head.appendChild(tag);
 }
@@ -168,6 +186,8 @@ interface RunResultLike {
 /** The useSessions feed: session list rows plus the current selection. */
 interface SessionSummary {
 	byId?: Record<string, SessionRow>;
+	/** The currently open session id (undefined only in the no-session view). */
+	current?: string;
 }
 
 type UseSessions = <T>(selector: (session: SessionSummary | undefined) => T) => T;
@@ -176,7 +196,7 @@ interface SlotsCtx {
 	slots: {
 		inject(slot: string, register: () => unknown): unknown;
 		register(
-			opts: { name: string; id: string; order: number; label: string },
+			opts: { name: string; id: string; order?: number; label?: string },
 			component: unknown,
 		): unknown;
 	};
@@ -598,7 +618,7 @@ function ResultModal({ result, names, targets, busy, status, onContinueChat, onC
 type UseWorkspaces = <T>(selector: (snapshot: { items?: Array<{ workspaceId?: string; path?: string; sessionIds?: readonly string[] }> }) => T) => T;
 
 function PipelineView({
-	sessionId, useSessions, useWorkspaces, inputActions, openView, services,
+	sessionId, useSessions, useWorkspaces, inputActions, openView, services, onDismiss,
 }: {
 	sessionId: string;
 	useSessions: UseSessions;
@@ -606,6 +626,9 @@ function PipelineView({
 	inputActions?: { setDraft(text: string): void } | undefined;
 	openView?: ((view: string, focus: string) => void) | undefined;
 	services?: PipelineServices;
+	/** Called after a successful continue route when the view is hosted in the
+	 * frame-wide panel: the panel closes so the staged composer is visible. */
+	onDismiss?: (() => void) | undefined;
 }) {
 	const NODE_W = 150;
 	const NODE_H = 58;
@@ -840,6 +863,7 @@ function PipelineView({
 			return;
 		}
 		if (typeof openView === "function") openView("chat", "");
+		else if (onDismiss) onDismiss();
 		setResultOpen(false);
 	}
 	async function continueInNewSession() {
@@ -862,6 +886,7 @@ function PipelineView({
 			if (sessions && typeof sessions.open === "function") sessions.open(newId);
 			if (!stageDraft(newId, continueText)) throw new Error("composer access unavailable");
 			setResultOpen(false);
+			if (onDismiss) onDismiss();
 		} catch (err) {
 			setContinueStatus("Could not start a new session: " + String(err));
 		} finally {
@@ -876,6 +901,7 @@ function PipelineView({
 			if (sessions && typeof sessions.open === "function") sessions.open(targetId);
 			if (!stageDraft(targetId, continueText)) throw new Error("composer access unavailable");
 			setResultOpen(false);
+			if (onDismiss) onDismiss();
 		} catch (err) {
 			setContinueStatus("Could not stage the output: " + String(err));
 		} finally {
@@ -1163,6 +1189,118 @@ function PipelineView({
 	);
 }
 
+// ---- Always-available entry: sidebar footer trigger + frame-wide panel ----
+//
+// The harness hides the whole conversation session body (header tabs and view
+// area included) while a session is blank — a brand-new session therefore
+// shows NO Pipelines tab, and a plugin cannot change that gate. The additive
+// root-scope seats are the supported route around it: a "Pipelines" trigger in
+// `sidebar.footer.action` (the documented place to add to the sidebar) opens a
+// panel in `shell.overlay` (the documented additive frame-wide surface), which
+// renders in EVERY app state. The panel binds to the CURRENT session read off
+// the root `useSessions` standard hook (the graph itself is stored per
+// workspace cwd), so composing and running work from a brand-new session too.
+
+/** Shared open state between the sidebar trigger and the shell-overlay panel. */
+function createPanelGate() {
+	let open = false;
+	const listeners = new Set<() => void>();
+	return {
+		subscribe(listener: () => void): () => void {
+			listeners.add(listener);
+			return () => { listeners.delete(listener); };
+		},
+		get(): boolean { return open; },
+		set(next: boolean): void {
+			if (open === next) return;
+			open = next;
+			listeners.forEach((fn) => fn());
+		},
+	};
+}
+const panelGate = createPanelGate();
+
+/** A small two-node flow glyph for the trigger (no icon package in the bundle). */
+function PipelineGlyph({ size }: { size: number }) {
+	return React.createElement("svg", { width: size, height: size, viewBox: "0 0 16 16", "aria-hidden": "true" },
+		React.createElement("circle", { cx: 3.5, cy: 8, r: 2.1, fill: "none", stroke: "currentColor", strokeWidth: 1.5 }),
+		React.createElement("path", { d: "M5.6 8h4.8", stroke: "currentColor", strokeWidth: 1.5 }),
+		React.createElement("circle", { cx: 12.5, cy: 8, r: 2.1, fill: "none", stroke: "currentColor", strokeWidth: 1.5 })
+	);
+}
+
+/** The sidebar footer action: labeled row when the column is wide, icon on the rail. */
+function PipelineTriggerRow({ wide }: { wide?: boolean }) {
+	const open = React.useSyncExternalStore(panelGate.subscribe, panelGate.get);
+	return React.createElement("div", { className: "pipeline-trigger" + (wide ? "" : " rail") },
+		React.createElement("button", {
+			type: "button",
+			className: "pipeline-trigger-btn",
+			"aria-label": "Pipelines",
+			title: "Pipelines",
+			"aria-expanded": open,
+			onClick: () => { panelGate.set(true); },
+		},
+			React.createElement(PipelineGlyph, { size: wide ? 16 : 18 }),
+			wide ? React.createElement("span", { className: "pipeline-trigger-label" }, "Pipelines") : null
+		)
+	);
+}
+
+/**
+ * The shell-overlay entry: a one-hook gate so the hook count never changes
+ * between closed and open renders; the panel body mounts fresh when opened.
+ */
+function PipelinePanelEntry({ useSessions, services }: { useSessions?: UseSessions | undefined; services?: PipelineServices | undefined }) {
+	const open = React.useSyncExternalStore(panelGate.subscribe, panelGate.get);
+	if (!open) return null;
+	return React.createElement(PipelinePanel, { useSessions, services });
+}
+
+/** The frame-wide panel hosting the canvas for the CURRENT session. */
+function PipelinePanel({ useSessions, services }: { useSessions?: UseSessions | undefined; services?: PipelineServices | undefined }) {
+	const hasSessions = typeof useSessions === "function";
+	const current = hasSessions
+		? (useSessions as UseSessions)((s) => (s && s.current) as string | undefined)
+		: undefined;
+	const cwd = hasSessions
+		? (useSessions as UseSessions)((s) => {
+			const id = s && s.current;
+			if (!id || !s.byId) return undefined;
+			const row = s.byId[id];
+			return row ? row.cwd : undefined;
+		})
+		: undefined;
+	const close = () => { panelGate.set(false); };
+	return React.createElement("div", { className: "pipeline-shell-backdrop" },
+		React.createElement(
+			"div",
+			{ className: "pipeline-shell", "data-pipeline-shell": "true" },
+			React.createElement("div", { className: "pipeline-shell-head" },
+				React.createElement("h4", null, "Pipelines"),
+				cwd ? React.createElement("span", { className: "pipeline-shell-cwd", title: cwd }, cwd) : null,
+				React.createElement("div", { className: "spacer" }),
+				React.createElement("button", {
+					className: "pipeline-btn",
+					title: "Close the pipelines panel",
+					onClick: close,
+				}, "Close")
+			),
+			hasSessions && typeof current === "string" && current.length > 0
+				? PipelineView({
+					sessionId: current,
+					useSessions: useSessions as UseSessions,
+					services,
+					onDismiss: close,
+				})
+				: React.createElement("div", { className: "pipeline-shell-empty" },
+					hasSessions
+						? "Open a session to compose and run pipelines — the graph is stored per workspace."
+						: "The session feed is unavailable here; open the Pipelines tab inside a session instead.")
+		)
+	);
+}
+
 // Declared services are BOTH the activation gate (the runner parks the
 // package until each provider exists) and the guard allowlist — the dynamic
 // ctx proxy rejects property reads of undeclared services, and nested Remote
@@ -1195,6 +1333,23 @@ export function apply(ctx: PipelineCtx): void {
 					useWorkspaces: props.useWorkspaces as UseWorkspaces | undefined,
 					inputActions: props.inputActions as { setDraft(text: string): void },
 					openView: props.openView as (view: string, focus: string) => void,
+					services,
+				})
+		)
+	);
+	ctx.slots.inject("sidebar.footer.action", () =>
+		ctx.slots.register(
+			{ name: "sidebar.footer.action", id: "pipeline-trigger", order: 20 },
+			(props: Record<string, unknown>) =>
+				PipelineTriggerRow({ wide: props.wide as boolean | undefined })
+		)
+	);
+	ctx.slots.inject("shell.overlay", () =>
+		ctx.slots.register(
+			{ name: "shell.overlay", id: "pipeline-panel", order: 20 },
+			(props: Record<string, unknown>) =>
+				PipelinePanelEntry({
+					useSessions: props.useSessions as UseSessions | undefined,
 					services,
 				})
 		)
