@@ -9,7 +9,10 @@ it persists per repository at `<workspace>/.agent-pipeline/pipeline.json`.
 Verified end-to-end in the browser (2026-08-28): `agents.get(sessionId)`
 resolves a live parent from route context; a two-agent pipeline ran
 sequentially, agent-1's output reached agent-2 under its source label, and the
-route returned the contract shape `{ ok, outputs, runs, order }`.
+route returned the contract shape `{ ok, outputs, runs, order }`. The UI round
+is verified the same way: the Run modal attaches a workspace file as an
+absolute path, the first agent reads it with its own tools, and all three
+result-modal continue routes prefill a composer without auto-sending.
 
 ## Architecture
 
@@ -60,7 +63,7 @@ they are the full authoritative rules. The cross-cutting invariants:
 
 ```
 npm run typecheck
-npm test            # 70 tests
+npm test            # 80 tests
 npm run build
 ```
 
@@ -110,3 +113,12 @@ hosts the session's agent runtime. Restart is the user's job.
 - **Import style**: source imports are spelled with `.ts` extensions
   (`allowImportingTsExtensions` + `rewriteRelativeImportExtensions` rewrite them
   to `.js` on emit) — keep new imports in that style.
+- **Dynamic client ctx is a guarded allowlist**: every service the client
+  touches must be on the module's `inject` (property reads of undeclared
+  services REJECT and crash the slot entry), and nested Remote namespaces need
+  their own dotted entry (`remote.fileReferences`, the same convention
+  ui-reference uses). Accessing a service property can itself throw — guard
+  service probing in try/catch.
+- **Result-modal state is per-mount**: switching conversation tabs or sessions
+  unmounts the view and drops the run result (freshly re-loaded each mount).
+  The toolbar Result button only reopens a modal dismissed without leaving.

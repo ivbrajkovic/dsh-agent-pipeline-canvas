@@ -188,9 +188,18 @@ canvas-generated agent id (`agent-N`; ids are not user-editable in the UI).
 
 ## Running a pipeline
 
-The browser's *Run* button POSTs `{ sessionId, graph, input }` to
+**Run** opens a dialog with a multiline input and workspace file attachments.
+Files attach as **absolute paths** — picked from the harness's own
+`@`-mention file-reference completion (type a path, click a file, descend into
+directories) or pasted by hand; OS drag-and-drop of files cannot yield paths in
+a browser, so a dropped file points at the picker instead. File **contents are
+never inlined**: the composed input lists the paths, and the first agent reads
+them with its own file tools.
+
+The browser then POSTs `{ sessionId, graph, input }` to
 `POST /dsh-agent-pipeline/run` (the graph is the snapshot the user currently
-sees). The runner (`src/runner.ts`) then:
+sees; `input` is the composed text+files string — a runtime-only value, never
+persisted). The runner (`src/runner.ts`) then:
 
 1. **Validates** the snapshot with `validateGraph` (rejects an invalid graph).
 2. **Resolves the live parent Agent** from `agents.get(sessionId)` — the
@@ -213,6 +222,29 @@ configured model. The `spawn` provider is the one registered by the base bundle.
 Parallel execution, retries, conditions, loops, cancellation, model/tool
 selection, and live visualization are deliberately **not** implemented; the run
 is currently a blocking synchronous POST.
+
+### Result & continue routes
+
+On completion a result modal shows the terminal outputs and offers three
+continue routes — every route only **prefills a composer and lets the user
+send**; nothing is ever auto-sent:
+
+- **Continue in chat** — stages the final output into this session's composer
+  (the standard `inputActions`) and opens the Chat tab.
+- **Continue in a new session** — creates/opens a session in the workspace
+  (`uiWorkspace.connectWorkspace`, falling back to `sessions.create({ cwd })`)
+  and stages the output in its composer.
+- **Send to session…** — pick one of the workspace's other sessions (same cwd,
+  no subagent children or blank leftovers, id-suffixed labels) and stages the
+  output there.
+
+The routes ride minimal structural views of the client services (`sessions`,
+`uiWorkspace`, `conversation.input`'s per-session shells, and the
+`remote.fileReferences` picker), all declared on the client module's `inject`
+(the dynamic-ctx guard rejects undeclared service access; nested Remote
+namespaces need their own dotted entry). With several terminals the staged
+text is one `## <agent>` section per terminal; a dismissed modal can be
+reopened with the toolbar **Result** button as long as the tab stays mounted.
 
 ## Install & deploy
 

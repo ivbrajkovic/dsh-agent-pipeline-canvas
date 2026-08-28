@@ -40,6 +40,12 @@ export declare function topoOrder(graph: unknown): string[];
  */
 export declare function agentInput(agentId: string, ctx: AgentInputContext): AgentExecutionInput;
 /**
+ * Render a value as prompt text: verbatim strings, structured values as JSON.
+ * Shared with the message-composition module so the Host prompt framing and
+ * the client's result framing render values identically.
+ */
+export declare function renderValue(value: unknown): string;
+/**
  * Frame an agent's structured input into the prompt string a runner hands the
  * agent. DEFAULT framing (a documented convention, overridable by the runner):
  * the agent's `instructions` first, then one "## <source label>" section per

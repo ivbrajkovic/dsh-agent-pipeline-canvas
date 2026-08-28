@@ -14,6 +14,16 @@
 // The view renders the whole node workspace: a palette with a draggable Agent,
 // a canvas, node move/select, and output→input connections with directed edges.
 //
+// Running: the Run button opens an INPUT MODAL (multiline text + workspace
+// files attached as ABSOLUTE PATHS via the harness `@`-mention file-reference
+// completion or manual entry; contents are never inlined — the first agent
+// reads them with its own tools). On completion a RESULT MODAL offers the
+// continue routes: "Continue in chat" prefills this session's composer via the
+// standard `inputActions` and opens the chat view; "Continue in a new session"
+// creates/opens a workspace session; "Send to session…" prefills another
+// session's composer by id. Nothing ever auto-sends — every route stages the
+// text and the user presses send.
+//
 // Persistence: the graph is backed by the project's `.agent-pipeline/pipeline.json`
 // (written by the Host half via the `/dsh-agent-pipeline` route). The view
 // recovers the session's workspace root (cwd) from the framework standard kit
@@ -26,6 +36,7 @@
 
 import * as React from "react";
 import { validateGraph } from "./graph.ts";
+import { composePipelineInput, finalOutputText } from "./message.ts";
 import type { PipelineGraph, ValidationResult } from "./types.ts";
 
 const CSS_TAG = "dsh-agent-pipeline-canvas/styles";
@@ -79,12 +90,36 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
 		".pipeline-config input:focus,.pipeline-config textarea:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}",
 		".pipeline-config textarea{min-height:72px;resize:vertical}",
 		".pipeline-config .config-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}",
-		".pipeline-run-input{min-width:140px;flex:0 1 auto;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:4px 8px;box-sizing:border-box}",
-		".pipeline-run-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}",
 		".pipeline-btn-run{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}",
 		".pipeline-btn-run:disabled{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}",
-		".pipeline-result{background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 60%,var(--dsw-alias-bg-base));border-bottom:1px solid var(--dsw-alias-border-l1);padding:8px 10px;max-height:260px;overflow:auto;display:flex;flex-direction:column;gap:6px}",
-		".pipeline-result-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary)}",
+		".pipeline-modal{width:560px;max-width:94%;max-height:88%;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:16px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 30px rgba(0,0,0,.35);overflow:auto}",
+		".pipeline-modal h3{margin:0;font-size:14px;font-weight:600}",
+		".pipeline-modal .modal-row{display:flex;flex-direction:column;gap:4px}",
+		".pipeline-modal label{font-size:11px;color:var(--dsw-alias-label-secondary)}",
+		".pipeline-modal textarea{font-family:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:6px 8px;box-sizing:border-box;width:100%;min-height:96px;resize:vertical}",
+		".pipeline-modal input{font-family:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:6px 8px;box-sizing:border-box;width:100%}",
+		".pipeline-modal textarea:focus,.pipeline-modal input:focus,.pipeline-modal select:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}",
+		".pipeline-modal select{font-family:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:5px 8px;box-sizing:border-box;width:100%}",
+		".pipeline-attach-zone{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px}",
+		".pipeline-attach-zone.drag{border-color:var(--dsw-alias-brand-primary)}",
+		".pipeline-chips{display:flex;flex-wrap:wrap;gap:6px}",
+		".pipeline-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:2px 4px 2px 9px;max-width:100%}",
+		".pipeline-chip .chip-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px}",
+		".pipeline-chip .chip-x{cursor:pointer;border:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1;padding:2px 6px;border-radius:999px}",
+		".pipeline-chip .chip-x:hover{color:var(--dsw-alias-state-error-primary)}",
+		".pipeline-picker-list{border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:var(--dsw-alias-bg-base);max-height:150px;overflow:auto;display:flex;flex-direction:column}",
+		".pipeline-picker-row{display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:11px;cursor:pointer;user-select:none}",
+		".pipeline-picker-row:hover{background:var(--dsw-alias-bg-layer-2)}",
+		".pipeline-picker-row .row-kind{flex-shrink:0;font-size:10px;color:var(--dsw-alias-label-secondary);width:52px}",
+		".pipeline-picker-row .row-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+		".pipeline-picker-row .row-add{flex-shrink:0;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:4px;font-size:11px;line-height:1;padding:2px 6px;cursor:pointer}",
+		".pipeline-picker-row .row-add:hover{color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}",
+		".pipeline-picker-status{font-size:11px;color:var(--dsw-alias-label-secondary)}",
+		".pipeline-modal-notice{font-size:11px;color:var(--dsw-alias-state-warning-primary)}",
+		".pipeline-modal-status{font-size:11px;color:var(--dsw-alias-state-error-primary)}",
+		".pipeline-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px;align-items:center}",
+		".pipeline-modal-actions .spacer{flex:1}",
+		".pipeline-result{background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px;max-height:220px;overflow:auto;display:flex;flex-direction:column;gap:6px}",
 		".pipeline-result-row{display:flex;flex-direction:column;gap:2px}",
 		".pipeline-result-label{font-size:11px;color:var(--dsw-alias-label-secondary)}",
 		".pipeline-result-value{margin:0;padding:6px 8px;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}",
@@ -96,6 +131,10 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
 
 const ENDPOINT = "/dsh-agent-pipeline";
 const SAVE_DEBOUNCE_MS = 250;
+
+/** Stable empty selector results (identity matters to the snapshot hooks). */
+const EMPTY_ROWS: Record<string, SessionRow> = {};
+const EMPTY_ITEMS: Array<{ workspaceId?: string; path?: string; sessionIds?: readonly string[] }> = [];
 
 // ---- Internal canvas state shapes ----
 
@@ -120,13 +159,14 @@ interface CanvasConnection {
 interface RunResultLike {
 	ok?: boolean;
 	outputs?: Record<string, unknown>;
-	runs?: Array<{ id: string; status?: string; error?: string }>;
+	runs?: Array<{ id: string; label?: string; status?: string; error?: string }>;
 	error?: string;
 	validationErrors?: Array<{ message?: string }>;
 }
 
+/** The useSessions feed: session list rows plus the current selection. */
 interface SessionSummary {
-	byId?: Record<string, { cwd?: string }>;
+	byId?: Record<string, SessionRow>;
 }
 
 type UseSessions = <T>(selector: (session: SessionSummary | undefined) => T) => T;
@@ -139,6 +179,62 @@ interface SlotsCtx {
 			component: unknown,
 		): unknown;
 	};
+}
+
+// ---- Minimal structural views of the harness services the continue routes touch ----
+// Same discipline as RunnerContext/HostContext: only the fields the client
+// calls, never the full Cordis types. The real client services satisfy these
+// shapes structurally (sessions: ISessions; uiWorkspace: UiWorkspace;
+// conversation: ConversationController; remote: generated Remote namespaces).
+
+interface SessionRow {
+	id?: string;
+	displayTitle?: string;
+	title?: string;
+	cwd?: string;
+	parentId?: string;
+	origin?: string;
+	blank?: boolean;
+	updatedAt?: number;
+}
+
+interface SessionsService {
+	list: { getSnapshot(): { byId?: Record<string, SessionRow> } };
+	open(id: string): void;
+	create(opts: { cwd?: string; workspaceId?: string }): Promise<string>;
+}
+
+interface UiWorkspaceService {
+	connectWorkspace(workspaceId: string): Promise<string>;
+}
+
+interface ConversationService {
+	input: { shell(id: string): { setDraft(text: string): void } };
+}
+
+interface FileRefCandidate {
+	path?: string;
+	kind?: string;
+}
+
+interface RemoteService {
+	fileReferences: {
+		list(sessionId: string, query: string, signal: AbortSignal): Promise<{ ok?: boolean; value?: FileRefCandidate[] }>;
+	};
+}
+
+/** Harness client services captured by the apply closure for the view. */
+interface PipelineServices {
+	sessions?: SessionsService;
+	uiWorkspace?: UiWorkspaceService;
+	conversation?: ConversationService;
+	remote?: RemoteService;
+}
+
+/** A workspace session offered as a "Send to session…" target. */
+interface SessionTarget {
+	id: string;
+	label: string;
 }
 
 /** Numeric tail of an id (`agent-12` → 12), used to restore the id counter. */
@@ -217,7 +313,299 @@ function AgentConfigPanel({ agent, onSave, onClose }: {
 	);
 }
 
-function PipelineView({ sessionId, useSessions }: { sessionId: string; useSessions: UseSessions }) {
+/** Resolve a (possibly workspace-relative) path to the absolute form the agent reads. */
+function absolutePath(path: string, cwd: string | undefined): string {
+	if (path.startsWith("/")) return path;
+	const base = typeof cwd === "string" && cwd.length > 0 ? cwd.replace(/\/+$/, "") : "";
+	return base.length > 0 ? base + "/" + path : path;
+}
+
+// The Run modal: multiline pipeline input plus workspace files attached as
+// ABSOLUTE PATHS. Files are never inlined — the first agent reads them with
+// its own tools. The picker rides the harness's own `@`-mention file-reference
+// completion (`remote.fileReferences.list`): type a path prefix, click a file
+// to attach it, click a directory to descend. OS drag-and-drop of files
+// cannot yield absolute paths in a browser, so a dropped file shows a notice;
+// dropped plain-text paths are attached.
+function RunModal({ cwd, initialText, initialFiles, running, fileList, onRun, onClose }: {
+	cwd?: string;
+	initialText: string;
+	initialFiles: string[];
+	running: boolean;
+	fileList: ((query: string, signal: AbortSignal) => Promise<FileRefCandidate[]>) | null;
+	onRun: (text: string, files: string[]) => void;
+	onClose: () => void;
+}) {
+	const [text, setText] = React.useState(initialText);
+	const [files, setFiles] = React.useState<string[]>(initialFiles);
+	const [query, setQuery] = React.useState("");
+	const [candidates, setCandidates] = React.useState<FileRefCandidate[]>([]);
+	const [pickerState, setPickerState] = React.useState<"idle" | "loading" | "ready" | "error">("idle");
+	const [manual, setManual] = React.useState("");
+	const [notice, setNotice] = React.useState<string | null>(null);
+	const [dragOver, setDragOver] = React.useState(false);
+	function stopKey(e: React.KeyboardEvent) {
+		e.stopPropagation();
+		if (e.key === "Escape") onClose();
+	}
+	function attach(path: string) {
+		const abs = absolutePath(path.trim(), cwd);
+		if (abs.length === 0) return;
+		setFiles((prev) => (prev.indexOf(abs) === -1 ? prev.concat([abs]) : prev));
+	}
+	function onPickRow(candidate: FileRefCandidate, add: boolean) {
+		const path = typeof candidate.path === "string" ? candidate.path : "";
+		if (path.length === 0) return;
+		if (add || candidate.kind !== "directory") attach(path);
+		else setQuery(path + "/");
+	}
+	function onDrop(e: React.DragEvent) {
+		e.preventDefault();
+		setDragOver(false);
+		const text = e.dataTransfer.getData("text/plain");
+		if (typeof text === "string" && text.trim().startsWith("/")) {
+			text.split("\n").forEach((line) => { if (line.trim().startsWith("/")) attach(line); });
+			return;
+		}
+		if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+			setNotice("The browser hides dropped files' paths — use the picker below (or paste a path).");
+		}
+	}
+	// Debounced completion query against the file-reference source.
+	React.useEffect(() => {
+		if (fileList === null) return;
+		const controller = new AbortController();
+		const timer = setTimeout(() => {
+			setPickerState("loading");
+			fileList(query, controller.signal)
+				.then((rows) => {
+					if (controller.signal.aborted) return;
+					setCandidates(rows.filter((c) => c && typeof c.path === "string" && c.path.length > 0));
+					setPickerState("ready");
+				})
+				.catch(() => {
+					if (controller.signal.aborted) return;
+					setCandidates([]);
+					setPickerState("error");
+				});
+		}, 150);
+		return () => { clearTimeout(timer); controller.abort(); };
+	}, [query, fileList]);
+	return React.createElement(
+		"div",
+		{
+			className: "pipeline-config-overlay",
+			onPointerDown: (e: React.PointerEvent) => { e.stopPropagation(); },
+		},
+		React.createElement(
+			"div",
+			{ className: "pipeline-modal" },
+			React.createElement("h3", null, "Run Pipeline"),
+			React.createElement("div", { className: "modal-row" },
+				React.createElement("label", null, "Input (the first agent receives this)"),
+				React.createElement("textarea", {
+					value: text,
+					placeholder: "What should the pipeline do?",
+					onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => { setText(e.target.value); },
+					onKeyDown: stopKey,
+				})
+			),
+			React.createElement(
+				"div",
+				{
+					className: "pipeline-attach-zone" + (dragOver ? " drag" : ""),
+					onDragOver: (e: React.DragEvent) => { e.preventDefault(); setDragOver(true); },
+					onDragLeave: () => { setDragOver(false); },
+					onDrop,
+				},
+				files.length > 0 ? React.createElement("div", { className: "pipeline-chips" },
+					files.map((f) => React.createElement("span", { key: f, className: "pipeline-chip", title: f },
+						React.createElement("span", { className: "chip-path" }, f),
+						React.createElement("button", {
+							className: "chip-x",
+							title: "Remove",
+							onClick: () => { setFiles((prev) => prev.filter((p) => p !== f)); },
+						}, "×")
+					))
+				) : React.createElement("div", { className: "pipeline-picker-status" }, "No files attached."),
+				fileList !== null ? React.createElement("input", {
+					value: query,
+					placeholder: "Attach workspace files — type a path to search…",
+					onChange: (e: React.ChangeEvent<HTMLInputElement>) => { setQuery(e.target.value); },
+					onKeyDown: stopKey,
+				}) : null,
+				fileList !== null && (pickerState !== "idle" || query.length > 0) ? React.createElement(
+					"div",
+					{ className: "pipeline-picker-list" },
+					pickerState === "loading" ? React.createElement("div", { className: "pipeline-picker-row" }, React.createElement("span", { className: "pipeline-picker-status" }, "Searching…")) : null,
+					pickerState === "error" ? React.createElement("div", { className: "pipeline-picker-row" }, React.createElement("span", { className: "pipeline-picker-status" }, "File search unavailable.")) : null,
+					pickerState === "ready" && candidates.length === 0 ? React.createElement("div", { className: "pipeline-picker-row" }, React.createElement("span", { className: "pipeline-picker-status" }, "No matches.")) : null,
+					candidates.map((c) => React.createElement("div", {
+						key: c.path,
+						className: "pipeline-picker-row",
+						onClick: () => { onPickRow(c, false); },
+					},
+						React.createElement("span", { className: "row-kind" }, c.kind === "directory" ? "dir" : "file"),
+						React.createElement("span", { className: "row-path", title: c.path }, c.path),
+						React.createElement("button", {
+							className: "row-add",
+							title: "Attach",
+							onClick: (e: React.MouseEvent) => { e.stopPropagation(); onPickRow(c, true); },
+						}, "+ attach")
+					))
+				) : null,
+				React.createElement("div", { className: "pipeline-chips" },
+					React.createElement("input", {
+						value: manual,
+						placeholder: "…or paste an absolute path",
+						style: { flex: "1 1 200px", width: "auto" },
+						onChange: (e: React.ChangeEvent<HTMLInputElement>) => { setManual(e.target.value); },
+						onKeyDown: (e: React.KeyboardEvent) => {
+							e.stopPropagation();
+							if (e.key === "Enter") { attach(manual); setManual(""); }
+							if (e.key === "Escape") onClose();
+						},
+					}),
+					React.createElement("button", {
+						className: "pipeline-btn",
+						disabled: manual.trim().length === 0,
+						onClick: () => { attach(manual); setManual(""); },
+					}, "Add")
+				),
+				notice ? React.createElement("div", { className: "pipeline-modal-notice" }, notice) : null
+			),
+			React.createElement("div", { className: "pipeline-picker-status" },
+				"Files attach as absolute paths only — the first agent reads them with its own tools."),
+			React.createElement(
+				"div",
+				{ className: "pipeline-modal-actions" },
+				React.createElement("button", { className: "pipeline-btn", onClick: onClose }, "Cancel"),
+				React.createElement("button", {
+					className: "pipeline-btn pipeline-btn-run",
+					disabled: running,
+					onClick: () => { onRun(text, files); },
+				}, running ? "Running…" : "Run")
+			)
+		)
+	);
+}
+
+// The Result modal: the run's terminal outputs plus the continue routes.
+// Every route only STAGES text (composer draft) — the user always sends it.
+function ResultModal({ result, names, targets, busy, status, onContinueChat, onContinueNewSession, onSendTo, onClose }: {
+	result: RunResultLike;
+	names: Record<string, string>;
+	targets: SessionTarget[];
+	busy: string | null;
+	status: string | null;
+	onContinueChat: () => void;
+	onContinueNewSession: () => void;
+	onSendTo: (sessionId: string) => void;
+	onClose: () => void;
+}) {
+	const [targetId, setTargetId] = React.useState(targets.length > 0 ? targets[0].id : "");
+	function stopKey(e: React.KeyboardEvent) {
+		e.stopPropagation();
+		if (e.key === "Escape") onClose();
+	}
+	const termName: Record<string, string> = { ...names };
+	const rows: React.ReactNode[] = [];
+	if (result.ok) {
+		Object.keys(result.outputs || {}).forEach((id) => {
+			const v = result.outputs![id];
+			const txt = typeof v === "string" ? v : JSON.stringify(v, null, 2);
+			rows.push(React.createElement("div", { key: "o-" + id, className: "pipeline-result-row" },
+				React.createElement("div", { className: "pipeline-result-label" }, termName[id] || id),
+				React.createElement("pre", { className: "pipeline-result-value" }, txt)));
+		});
+		if (Array.isArray(result.runs)) {
+			result.runs.forEach((r) => {
+				if (r.status && r.status !== "completed") {
+					const warn = "agent " + (termName[r.id] || r.id) + ": " + r.status + (r.error ? " — " + r.error : "");
+					rows.push(React.createElement("div", { key: "w-" + r.id, className: "pipeline-result-warn" }, warn));
+				}
+			});
+		}
+		if (rows.length === 0) {
+			rows.push(React.createElement("div", { key: "empty", className: "pipeline-result-row" }, "No terminal output."));
+		}
+	} else {
+		const msg = result.error || ("graph is invalid: " + (result.validationErrors || []).map((e) => e.message).join("; "));
+		rows.push(React.createElement("div", { key: "err", className: "pipeline-result-error" }, msg));
+	}
+	const canContinue = result.ok === true;
+	return React.createElement(
+		"div",
+		{
+			className: "pipeline-config-overlay",
+			onPointerDown: (e: React.PointerEvent) => { e.stopPropagation(); },
+		},
+		React.createElement(
+			"div",
+			{ className: "pipeline-modal" },
+			React.createElement("h3", null, result.ok ? "Pipeline Result" : "Pipeline Failed"),
+			React.createElement("div", { className: "pipeline-result" }, rows),
+			canContinue ? React.createElement(
+				"div",
+				{ className: "modal-row" },
+				React.createElement("div", { className: "pipeline-modal-actions", style: { marginTop: 0 } },
+					React.createElement("button", {
+						className: "pipeline-btn",
+						disabled: busy !== null,
+						title: "Prefill this session's composer with the final output (you send it)",
+						onClick: onContinueChat,
+					}, busy === "chat" ? "Working…" : "Continue in chat"),
+					React.createElement("button", {
+						className: "pipeline-btn",
+						disabled: busy !== null,
+						title: "Create a session in this workspace and prefill its composer (you send it)",
+						onClick: onContinueNewSession,
+					}, busy === "new" ? "Working…" : "Continue in a new session")
+				),
+				targets.length > 0 ? React.createElement(
+					"div",
+					{ className: "pipeline-modal-actions", style: { marginTop: 0 } },
+					React.createElement("select", {
+						value: targetId,
+						onChange: (e: React.ChangeEvent<HTMLSelectElement>) => { setTargetId(e.target.value); },
+						onKeyDown: stopKey,
+						"aria-label": "Target session",
+					},
+						targets.map((t) => React.createElement("option", { key: t.id, value: t.id }, t.label))
+					),
+					React.createElement("button", {
+						className: "pipeline-btn",
+						disabled: busy !== null || targetId.length === 0,
+						title: "Open that session and prefill its composer (you send it)",
+						onClick: () => { onSendTo(targetId); },
+					}, busy === "send" ? "Working…" : "Send to session…")
+				) : null,
+				React.createElement("div", { className: "pipeline-picker-status" },
+					"Every route only prefills a composer — you review and press send.")
+			) : null,
+			status ? React.createElement("div", { className: "pipeline-modal-status" }, status) : null,
+			React.createElement(
+				"div",
+				{ className: "pipeline-modal-actions" },
+				React.createElement("button", { className: "pipeline-btn", onClick: onClose }, "Close")
+			)
+		)
+	);
+}
+
+/** Snapshot selector over the workspace list (the standard useWorkspaces hook). */
+type UseWorkspaces = <T>(selector: (snapshot: { items?: Array<{ workspaceId?: string; path?: string; sessionIds?: readonly string[] }> }) => T) => T;
+
+function PipelineView({
+	sessionId, useSessions, useWorkspaces, inputActions, openView, services,
+}: {
+	sessionId: string;
+	useSessions: UseSessions;
+	useWorkspaces?: UseWorkspaces | undefined;
+	inputActions?: { setDraft(text: string): void } | undefined;
+	openView?: ((view: string, focus: string) => void) | undefined;
+	services?: PipelineServices;
+}) {
 	const NODE_W = 150;
 	const NODE_H = 58;
 	const [agents, setAgents] = React.useState<CanvasAgent[]>([]);
@@ -228,9 +616,14 @@ function PipelineView({ sessionId, useSessions }: { sessionId: string; useSessio
 	const [hoverTarget, setHoverTarget] = React.useState<string | null>(null);
 	const [showJson, setShowJson] = React.useState(false);
 	const [configAgentId, setConfigAgentId] = React.useState<string | null>(null);
-	const [runInput, setRunInput] = React.useState("");
+	const [showRunModal, setShowRunModal] = React.useState(false);
 	const [running, setRunning] = React.useState(false);
 	const [runResult, setRunResult] = React.useState<RunResultLike | null>(null);
+	const [resultOpen, setResultOpen] = React.useState(false);
+	const [continueBusy, setContinueBusy] = React.useState<string | null>(null);
+	const [continueStatus, setContinueStatus] = React.useState<string | null>(null);
+	const runTextRef = React.useRef("");
+	const runFilesRef = React.useRef<string[]>([]);
 	const canvasRef = React.useRef<HTMLDivElement | null>(null);
 	const idRef = React.useRef(0);
 	const dragRef = React.useRef<{ id: string; startClientX: number; startClientY: number; startX: number; startY: number } | null>(null);
@@ -251,6 +644,13 @@ function PipelineView({ sessionId, useSessions }: { sessionId: string; useSessio
 		return entry ? entry.cwd : undefined;
 	});
 	cwdRef.current = cwd;
+	// Workspace sessions offered as "Send to session…" targets (same cwd,
+	// excluding this session and subagent rows). Empty constants keep the
+	// selector results stable across snapshots.
+	const sessionRows = useSessions((s) => (s && s.byId) || EMPTY_ROWS);
+	const workspaceItems = useWorkspaces
+		? useWorkspaces((s) => (s && s.items) || EMPTY_ITEMS)
+		: EMPTY_ITEMS;
 
 	function newId(prefix: string): string {
 		idRef.current += 1;
@@ -362,34 +762,136 @@ function PipelineView({ sessionId, useSessions }: { sessionId: string; useSessio
 		setAgents([]); setConnections([]); setSelectedId(null); setHoverTarget(null); setConnectCursor(null);
 		dragRef.current = null; connectRef.current = null;
 		setSeq(1); idRef.current = 0;
-		setRunResult(null);
+		setRunResult(null); setResultOpen(false); setShowRunModal(false);
+		runTextRef.current = ""; runFilesRef.current = [];
 	}
 
 	// Run the pipeline: POST the snapshot the user currently sees (the graph
-	// as-is, plus the pipeline input and the session id) to the Host's /run
-	// route, which executes it sequentially and returns the contract's
-	// `{ outputs: { [terminalId]: output } }` shape.
-	function run() {
+	// as-is, plus the composed pipeline input from the Run modal and the
+	// session id) to the Host's /run route, which executes it sequentially
+	// and returns the contract's `{ outputs: { [terminalId]: output } }` shape.
+	function run(text: string, files: string[]) {
 		if (running) return;
+		runTextRef.current = text;
+		runFilesRef.current = files;
 		const g = buildGraph(agents, connections);
 		setRunning(true);
 		setRunResult(null);
+		setShowRunModal(false);
 		fetch(ENDPOINT + "/run", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ sessionId, graph: g, input: runInput }),
+			body: JSON.stringify({ sessionId, graph: g, input: composePipelineInput(text, files) }),
 		})
 			.then((r) => {
-				return r.text().then((text) => {
+				return r.text().then((body) => {
 					let data: RunResultLike | null = null;
-					try { data = text.length > 0 ? JSON.parse(text) : null; } catch (e) { data = null; }
+					try { data = body.length > 0 ? JSON.parse(body) : null; } catch (e) { data = null; }
 					if (!r.ok) return { ok: false, error: (data && data.error) ? data.error : ("HTTP " + r.status) };
 					return data || { ok: false, error: "empty response" };
 				});
 			})
-			.then((data) => { setRunning(false); setRunResult(data); })
-			.catch((err: unknown) => { setRunning(false); setRunResult({ ok: false, error: String(err) }); });
+			.then((data) => { setRunning(false); setRunResult(data); setResultOpen(true); })
+			.catch((err: unknown) => { setRunning(false); setRunResult({ ok: false, error: String(err) }); setResultOpen(true); });
 	}
+
+	// Completion query against the harness `@`-mention file-reference source
+	// (workspace files and directories, path-only — the same candidates the
+	// composer's @ menu offers).
+	function queryFiles(query: string, signal: AbortSignal): Promise<FileRefCandidate[]> {
+		const remote = services && services.remote;
+		if (!remote || !remote.fileReferences || typeof remote.fileReferences.list !== "function") {
+			return Promise.reject(new Error("file references unavailable"));
+		}
+		return remote.fileReferences.list(sessionId, query, signal).then((r) =>
+			(r && r.ok === true && Array.isArray(r.value)) ? r.value : []);
+	}
+
+	function nameOf(id: string): string {
+		for (const a of agents) if (a.id === id) return a.name;
+		return id;
+	}
+	const continueText = runResult && runResult.ok ? finalOutputText(runResult.outputs || {}, nameOf) : "";
+
+	// Stage text into a session's composer WITHOUT sending. The current
+	// session goes through the standard inputActions; other sessions through
+	// the conversation service's per-session input shell.
+	function stageDraft(targetSessionId: string, text: string): boolean {
+		if (text.length === 0) return false;
+		if (targetSessionId === sessionId && inputActions && typeof inputActions.setDraft === "function") {
+			inputActions.setDraft(text);
+			return true;
+		}
+		const conversation = services && services.conversation;
+		if (conversation && conversation.input && typeof conversation.input.shell === "function") {
+			try {
+				conversation.input.shell(targetSessionId).setDraft(text);
+				return true;
+			} catch {
+				// No live binding for that session — reported by the caller.
+			}
+		}
+		return false;
+	}
+	function continueInChat() {
+		if (!stageDraft(sessionId, continueText)) {
+			setContinueStatus("Composer access is unavailable in this view.");
+			return;
+		}
+		if (typeof openView === "function") openView("chat", "");
+		setResultOpen(false);
+	}
+	async function continueInNewSession() {
+		setContinueBusy("new");
+		setContinueStatus(null);
+		try {
+			const sessions = services && services.sessions;
+			const uiWorkspace = services && services.uiWorkspace;
+			let newId: string | undefined;
+			if (uiWorkspace && typeof uiWorkspace.connectWorkspace === "function") {
+				// The workspace holding this session (fall back to the cwd match).
+				const ws = workspaceItems.find((w) => Array.isArray(w.sessionIds) && w.sessionIds.indexOf(sessionId) !== -1)
+					|| (cwd ? workspaceItems.find((w) => w.path === cwd) : undefined);
+				if (ws && typeof ws.workspaceId === "string") newId = await uiWorkspace.connectWorkspace(ws.workspaceId);
+			}
+			if (newId === undefined && sessions && typeof sessions.create === "function" && cwd) {
+				newId = await sessions.create({ cwd });
+			}
+			if (typeof newId !== "string" || newId.length === 0) throw new Error("no session could be created for this workspace");
+			if (sessions && typeof sessions.open === "function") sessions.open(newId);
+			if (!stageDraft(newId, continueText)) throw new Error("composer access unavailable");
+			setResultOpen(false);
+		} catch (err) {
+			setContinueStatus("Could not start a new session: " + String(err));
+		} finally {
+			setContinueBusy(null);
+		}
+	}
+	async function sendToSession(targetId: string) {
+		setContinueBusy("send");
+		setContinueStatus(null);
+		try {
+			const sessions = services && services.sessions;
+			if (sessions && typeof sessions.open === "function") sessions.open(targetId);
+			if (!stageDraft(targetId, continueText)) throw new Error("composer access unavailable");
+			setResultOpen(false);
+		} catch (err) {
+			setContinueStatus("Could not stage the output: " + String(err));
+		} finally {
+			setContinueBusy(null);
+		}
+	}
+	// Workspace sessions offered as "Send to session…" targets: same cwd,
+	// excluding this session, subagent children (parentId), blank leftovers,
+	// and subagent-origin rows. The id suffix disambiguates same-titled rows.
+	const targets: SessionTarget[] = Object.values(sessionRows)
+		.filter((r) => r && typeof r.id === "string" && r.id !== sessionId
+			&& r.cwd === cwd && !r.parentId && !r.blank && r.origin !== "subagent")
+		.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+		.map((r) => {
+			const label = r.displayTitle || r.title || (r.id as string);
+			return { id: r.id as string, label: label + " · " + (r.id as string).slice(-6) };
+		});
 	function onKeyDown(e: React.KeyboardEvent) {
 		if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); deleteSelected(); }
 		if (e.key === "Escape") { if (connectRef.current) { connectRef.current = null; setHoverTarget(null); setConnectCursor(null); } }
@@ -523,36 +1025,6 @@ function PipelineView({ sessionId, useSessions }: { sessionId: string; useSessio
 	const validation: ValidationResult = validateGraph(graphData);
 	const jsonText = JSON.stringify(graphData, null, 2);
 
-	let resultRows: React.ReactNode[] | null = null;
-	if (runResult) {
-		const termName: Record<string, string> = {};
-		agents.forEach((a) => { termName[a.id] = a.name; });
-		resultRows = [];
-		if (runResult.ok) {
-			Object.keys(runResult.outputs || {}).forEach((id) => {
-				const v = runResult.outputs![id];
-				const txt = typeof v === "string" ? v : JSON.stringify(v, null, 2);
-				resultRows!.push(React.createElement("div", { key: "o-" + id, className: "pipeline-result-row" },
-					React.createElement("div", { className: "pipeline-result-label" }, termName[id] || id),
-					React.createElement("pre", { className: "pipeline-result-value" }, txt)));
-			});
-			if (Array.isArray(runResult.runs)) {
-				runResult.runs.forEach((r) => {
-					if (r.status && r.status !== "completed") {
-						const warn = "agent " + (termName[r.id] || r.id) + ": " + r.status + (r.error ? " — " + r.error : "");
-						resultRows!.push(React.createElement("div", { key: "w-" + r.id, className: "pipeline-result-warn" }, warn));
-					}
-				});
-			}
-			if (resultRows.length === 0) {
-				resultRows.push(React.createElement("div", { key: "empty", className: "pipeline-result-row" }, "No terminal output."));
-			}
-		} else {
-			const msg = runResult.error || ("graph is invalid: " + (runResult.validationErrors || []).map((e) => e.message).join("; "));
-			resultRows.push(React.createElement("div", { key: "err", className: "pipeline-result-error" }, msg));
-		}
-	}
-
 	let configAgent: CanvasAgent | null = null;
 	for (let k = 0; k < agents.length; k++) if (agents[k].id === configAgentId) configAgent = agents[k];
 
@@ -583,18 +1055,16 @@ function PipelineView({ sessionId, useSessions }: { sessionId: string; useSessio
 			React.createElement("button", { className: "pipeline-btn", onClick: deleteSelected, disabled: !selectedId }, "Delete"),
 			React.createElement("button", { className: "pipeline-btn", onClick: () => { setShowJson(!showJson); } }, showJson ? "Hide JSON" : "View JSON"),
 			React.createElement("button", { className: "pipeline-btn", onClick: clearAll }, "Clear"),
-			React.createElement("input", {
-				className: "pipeline-run-input",
-				type: "text",
-				placeholder: "Pipeline input",
-				value: runInput,
-				onChange: (e: React.ChangeEvent<HTMLInputElement>) => { setRunInput(e.target.value); },
-			}),
+			runResult && !resultOpen ? React.createElement("button", {
+				className: "pipeline-btn",
+				title: "Reopen the last run's result",
+				onClick: () => { setResultOpen(true); },
+			}, "Result") : null,
 			React.createElement("button", {
 				className: "pipeline-btn pipeline-btn-run",
 				disabled: running || !validation.ok,
-				title: running ? "Running…" : "Run the pipeline",
-				onClick: run,
+				title: running ? "Running…" : "Open the run dialog",
+				onClick: () => { setShowRunModal(true); },
 			}, running ? "Running…" : "Run")
 		),
 		validation.ok ? null : React.createElement(
@@ -604,12 +1074,6 @@ function PipelineView({ sessionId, useSessions }: { sessionId: string; useSessio
 				return React.createElement("div", { key: err.code + ":" + err.message, className: "pipeline-issue" }, err.message);
 			})
 		),
-		runResult ? React.createElement(
-			"div",
-			{ className: "pipeline-result" },
-			React.createElement("div", { className: "pipeline-result-title" }, runResult.ok ? "Pipeline result" : "Pipeline failed"),
-			resultRows
-		) : null,
 		React.createElement(
 			"div",
 			{ className: "pipeline-body" },
@@ -674,17 +1138,64 @@ function PipelineView({ sessionId, useSessions }: { sessionId: string; useSessio
 				setConfigAgentId(null);
 			},
 			onClose: () => { setConfigAgentId(null); },
+		}) : null,
+		showRunModal ? React.createElement(RunModal, {
+			cwd,
+			initialText: runTextRef.current,
+			initialFiles: runFilesRef.current,
+			running,
+			fileList: services && services.remote && services.remote.fileReferences ? queryFiles : null,
+			onRun: run,
+			onClose: () => { setShowRunModal(false); },
+		}) : null,
+		runResult && resultOpen ? React.createElement(ResultModal, {
+			result: runResult,
+			names: agents.reduce<Record<string, string>>((acc, a) => { acc[a.id] = a.name; return acc; }, {}),
+			targets,
+			busy: continueBusy,
+			status: continueStatus,
+			onContinueChat: continueInChat,
+			onContinueNewSession: continueInNewSession,
+			onSendTo: sendToSession,
+			onClose: () => { setResultOpen(false); setContinueStatus(null); },
 		}) : null
 	);
 }
 
-export const inject = ["slots"];
+// Declared services are BOTH the activation gate (the runner parks the
+// package until each provider exists) and the guard allowlist — the dynamic
+// ctx proxy rejects property reads of undeclared services, and nested Remote
+// namespaces need their own dotted entry (same convention ui-reference uses).
+export const inject = ["slots", "sessions", "uiWorkspace", "conversation", "remote", "remote.fileReferences"];
 
-export function apply(ctx: SlotsCtx): void {
+interface PipelineCtx extends SlotsCtx {
+	sessions?: SessionsService;
+	uiWorkspace?: UiWorkspaceService;
+	conversation?: ConversationService;
+	remote?: RemoteService;
+}
+
+export function apply(ctx: PipelineCtx): void {
+	// Capture the services for the view once; the guard proxy resolves each
+	// property read at this point, so keep the captured object stable.
+	const services: PipelineServices = {
+		sessions: ctx.sessions,
+		uiWorkspace: ctx.uiWorkspace,
+		conversation: ctx.conversation,
+		remote: ctx.remote,
+	};
 	ctx.slots.inject("conversation.view", () =>
 		ctx.slots.register(
 			{ name: "conversation.view", id: "pipeline", order: 30, label: "Pipelines" },
-			PipelineView
+			(props: Record<string, unknown>) =>
+				PipelineView({
+					sessionId: props.sessionId as string,
+					useSessions: props.useSessions as UseSessions,
+					useWorkspaces: props.useWorkspaces as UseWorkspaces | undefined,
+					inputActions: props.inputActions as { setDraft(text: string): void },
+					openView: props.openView as (view: string, focus: string) => void,
+					services,
+				})
 		)
 	);
 }

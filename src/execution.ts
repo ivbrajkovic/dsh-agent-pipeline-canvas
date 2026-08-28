@@ -199,8 +199,12 @@ export function agentInput(agentId: string, ctx: AgentInputContext): AgentExecut
 	return inputs;
 }
 
-/** Render a value as prompt text: verbatim strings, structured values as JSON. */
-function render(value: unknown): string {
+/**
+ * Render a value as prompt text: verbatim strings, structured values as JSON.
+ * Shared with the message-composition module so the Host prompt framing and
+ * the client's result framing render values identically.
+ */
+export function renderValue(value: unknown): string {
 	if (typeof value === "string") return value;
 	if (value === undefined) return "";
 	try {
@@ -257,7 +261,7 @@ export function agentPrompt(
 
 	const keys = Object.keys(inputs ?? {});
 	for (const key of keys) {
-		const body = render(inputs[key]);
+		const body = renderValue(inputs[key]);
 		blocks.push("## " + sourceLabel(key, agentById) + (body.length > 0 ? "\n" + body : ""));
 	}
 	return blocks.join("\n\n");

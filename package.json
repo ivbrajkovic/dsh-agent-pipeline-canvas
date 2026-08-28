@@ -10,13 +10,14 @@
     "./client": "./lib/client.js",
     "./graph": "./lib/graph.js",
     "./execution": "./lib/execution.js",
+    "./message": "./lib/message.js",
     "./runner": "./lib/runner.js",
     "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "tsx test/validate.test.ts && tsx test/execution.test.ts && tsx test/runner.test.ts"
+    "test": "tsx test/validate.test.ts && tsx test/execution.test.ts && tsx test/message.test.ts && tsx test/runner.test.ts"
   },
   "dsh": {
     "client": {
