@@ -60,7 +60,7 @@
 // structured result is preferred over raw text downstream.
 // The system prompt (the harness persona slot) is NOT an override — it is a
 // first-class agent field, `Agent.systemPrompt` (see types.ts and
-// docs/SYSTEM-PROMPT.md).
+// docs/reference/system-prompt.md).
 //
 // Persistence: the graph is backed by the project's `.agent-pipeline/pipeline.json`
 // (written by the Host half via the `/dsh-agent-pipeline` route). The view

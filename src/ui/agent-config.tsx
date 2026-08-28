@@ -4,7 +4,7 @@
 // installs it as the child's scoped `deployment:persona` system-prompt
 // section (order 0), replacing that one slot for this child alone — the
 // standard prompt (identity, policies, tool explanations) is inherited
-// untouched (see docs/SYSTEM-PROMPT.md). The right column holds the agent's
+// untouched (see docs/reference/system-prompt.md). The right column holds the agent's
 // settings — agent options (provider / model / reasoning-effort / max-tokens),
 // tool filter, delegation depth, and an object-rooted JSON output schema.
 // Everything is always visible (no disclosure). Opened from the agent

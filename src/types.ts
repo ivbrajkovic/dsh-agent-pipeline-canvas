@@ -25,7 +25,7 @@
  * on a specific model, with restricted tools, a delegation-depth cap, or a
  * structured output schema. Absent fields inherit the defaults (the parent's
  * provider/model, unrestricted tools). The system prompt is NOT here — it is
- * a first-class field on Agent (see docs/SYSTEM-PROMPT.md).
+ * a first-class field on Agent (see docs/reference/system-prompt.md).
  */
 export interface AgentSettings {
 	/** Absolute delegation-depth cap for the child (`SubagentStartRequest.maxDepth`). */
@@ -68,7 +68,7 @@ export interface Agent {
 	 * section (order 0), replacing that one slot for this child alone. The rest
 	 * of the standard prompt — identity, delegation statement, policies, and
 	 * every harness tool explanation — is inherited untouched (see
-	 * docs/SYSTEM-PROMPT.md). Absent/empty keeps the deployment default (on this
+	 * docs/reference/system-prompt.md). Absent/empty keeps the deployment default (on this
 	 * deployment: unset, so just the fixed harness identity line).
 	 */
 	systemPrompt?: string;

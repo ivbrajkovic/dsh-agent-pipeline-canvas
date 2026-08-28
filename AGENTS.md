@@ -6,6 +6,8 @@ The DeepSeek Harness repository at `~/Desktop/deepseek-harness` is the reference
 
 The relevant projects are indexed by Codebase Memory. Prefer its code graph for discovery and cross-project research when possible; use graph nodes and relationships to quickly locate relevant implementations, APIs, services, and dependencies before manually searching through repositories.
 
+Project documentation lives in `docs/` — start at `docs/index.md`. The README is a short overview; the guides (`docs/guide/`) and reference documents (`docs/reference/`) carry the details, so link to them instead of growing the README.
+
 ## Development
 
 Publish local changes to the active DSH Web profile with:
