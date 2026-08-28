@@ -2,9 +2,9 @@
 
 Local DSH Web composition plugin: a visual **agent-pipeline** canvas, available
 in every session as a **Pipelines** view tab (beside Chat / Trajectory /
-Context) and from a **Pipelines** button in the left sidebar's foot — the
-sidebar route opens a frame-wide panel that works even on a brand-new session,
-where the harness shows no view tabs at all. Build a DAG of generic agents,
+Context) and from a **Pipelines** button in the composer's tool row — the
+button opens a frame-wide panel that works even on a brand-new session, where
+the harness shows no view tabs at all. Build a DAG of generic agents,
 then run it — each agent is delegated to the harness's own `subagents` service
 as a fresh one-shot child in deterministic topological order, outputs flow
 downstream, and the run returns `{ outputs: { [terminalId]: output } }`. The
@@ -53,12 +53,14 @@ Three faces over one pure core:
     [Running a pipeline](#running-a-pipeline)).
 - **Browser half** — `src/client.ts`: the Pipelines canvas, a React component
   registered into three additive slots. The per-session tab lives in
-  `conversation.view` (`id: pipeline`, `order: 30`); a **Pipelines** trigger
-  row lives in `sidebar.footer.action` (`id: pipeline-trigger`), and it opens a
-  frame-wide panel in `shell.overlay` (`id: pipeline-panel`) bound to the
-  CURRENT session — that panel is the entry that still works on a brand-new
-  session, because the harness hides the whole session body (tabs included)
-  until the first prompt. Everything is bundled by tsdown into `lib/client.js`
+  `conversation.view` (`id: pipeline`, `order: 30`); a compact **Pipelines**
+  icon button lives in the composer tool row
+  (`conversation.input.left`, `id: pipeline-trigger`) — the tool row renders on
+  the blank-session Hero too, so that button is the trigger that works on a
+  brand-new chat — and it opens a frame-wide panel in `shell.overlay`
+  (`id: pipeline-panel`) bound to the CURRENT session. The panel overlay also
+  receives the root `useWorkspaces` standard hook so the view can resolve the
+  pipeline's workspace. Everything is bundled by tsdown into `lib/client.js`
   in the `window.__ModuleLoader__.load(...)` format the browser module system
   consumes, and is picked into the browser roster because `package.json`
   declares `dsh.client` and `exports["./client"]`. The view reads the
@@ -243,9 +245,12 @@ send**; nothing is ever auto-sent:
 
 - **Continue in chat** — stages the final output into this session's composer
   (the standard `inputActions`) and opens the Chat tab.
-- **Continue in a new session** — creates/opens a session in the workspace
-  (`uiWorkspace.connectWorkspace`, falling back to `sessions.create({ cwd })`)
-  and stages the output in its composer.
+- **Continue in a new session** — resolves the pipeline's workspace (its cwd
+  first, then the session's own) and opens a session **attached** to it via
+  `uiWorkspace.connectWorkspace`, so the chat lands in `workspace.sessionIds`
+  and shows in the sidebar, then stages the output in its composer. There is
+  deliberately no `sessions.create({ cwd })` fallback — a cwd-only session is
+  an invisible orphan the sidebar tree can never render.
 - **Send to session…** — pick one of the workspace's other sessions (same cwd,
   no subagent children or blank leftovers, id-suffixed labels) and stages the
   output there.

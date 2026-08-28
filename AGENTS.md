@@ -27,15 +27,17 @@ Three faces over one pure core:
   bundled by tsdown into `lib/client.js` in the `window.__ModuleLoader__.load(...)`
   format. Registers three slots; loads/saves through the Host routes:
   - `conversation.view` (`id: pipeline`, `order: 30`) — the per-session
-    *Pipelines* tab.
-  - `sidebar.footer.action` (`id: pipeline-trigger`) — the sidebar **Pipelines**
-    row (labeled when wide, icon on the rail).
+    *Pipelines* tab (rendered by the harness only for non-blank sessions).
+  - `conversation.input.left` (`id: pipeline-trigger`, `order: 40`) — a compact
+    **Pipelines** icon button in the composer tool row. The tool row renders in
+    the blank-session Hero too, so this is the trigger that works on a
+    brand-new chat (the harness hides the title bar and tab ring there).
   - `shell.overlay` (`id: pipeline-panel`) — a frame-wide panel bound to the
-    CURRENT session (read off the root `useSessions` hook). This is the
-    always-available entry: the harness hides the whole session body (tabs
-    included) while a session is blank, so a brand-new session has NO tab —
-    the sidebar trigger → panel is the route that works everywhere. Opening
-    the panel mounts a fresh view; closing unmounts it.
+    CURRENT session (read off the root `useSessions` hook), opened by the
+    composer trigger. It renders in EVERY app state; opening the panel mounts a
+    fresh view, closing unmounts it. The overlay entry also receives the root
+    `useWorkspaces` standard hook — the view needs it to resolve the
+    pipeline's workspace for the continue route.
 - **Pure core** — `src/types.ts` / `src/graph.ts` / `src/execution.ts`, imported
   by both halves. tsdown **inlines** `validateGraph` into the client bundle, so
   there is exactly ONE implementation of the graph semantics — never re-add a
@@ -117,13 +119,19 @@ hosts the session's agent runtime. Restart is the user's job.
 
 ## Gotchas
 
+- **Never modify the harness — STRICTLY PROHIBITED**: the harness checkout at
+  `/Users/Ivan.Brajkovic/Desktop/deepseek-harness` is READ-ONLY reference.
+  Editing, patching, or configuring around any file in it to make plugin work
+  easier is forbidden — if the plugin seems to need a harness change, stop and
+  surface the constraint to the user instead. Harness behavior is a design
+  given, not a dependency to adjust.
 - **No credentials**: never embed or log API keys/credentials; keep
   execution-side credential handling on the Host side.
-- **Harness conventions**: the harness checkout at
-  `/Users/Ivan.Brajkovic/Desktop/deepseek-harness` is the source of truth for
-  DSH plugin conventions — `packages/subagent/` for the `subagents`/`spawn`/`fork`
-  seam; `packages/client/tsdown.client.ts` is the workspace-coupled preset a
-  standalone plugin must NOT reuse (this package has its own `tsdown.config.ts`).
+- **Harness conventions** (read-only, above): the harness checkout is the
+  source of truth for DSH plugin conventions — `packages/subagent/` for the
+  `subagents`/`spawn`/`fork` seam; `packages/client/tsdown.client.ts` is the
+  workspace-coupled preset a standalone plugin must NOT reuse (this package
+  has its own `tsdown.config.ts`).
 - **Import style**: source imports are spelled with `.ts` extensions
   (`allowImportingTsExtensions` + `rewriteRelativeImportExtensions` rewrite them
   to `.js` on emit) — keep new imports in that style.
@@ -142,5 +150,10 @@ hosts the session's agent runtime. Restart is the user's job.
   (`PipelinePanelEntry`) plus a body (`PipelinePanel`) that mounts fresh —
   keep that shape when editing it.
 - **The `conversation.view` tab ring is harness-gated on blank sessions** — do
-  not try to re-enable it from the plugin; the sidebar trigger + shell overlay
-  panel exist for exactly that state.
+  not try to re-enable it from the plugin; the composer tool-row trigger +
+  shell overlay panel exist for exactly that state.
+- **New chats are born attached to a workspace** (New Session goes through
+  `uiWorkspace.connectWorkspace` → `sessions.create({ workspaceId })`), so the
+  blank session's cwd is already the workspace path. Never create sessions
+  with only a `cwd` — the sidebar tree renders sessions out of
+  `workspace.sessionIds`, so a cwd-only session is an invisible orphan.

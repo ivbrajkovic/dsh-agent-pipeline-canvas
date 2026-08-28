@@ -9,12 +9,14 @@
 // before the bundle is built), so the browser's module-table require() only
 // ever answers the real externally-requested `react` row.
 //
-// It registers a "Pipelines" view tab into `conversation.view` (additive,
-// replaceRisk: none, order 30) so the canvas is available in EVERY session.
-// Because the harness hides the whole session body (tabs included) while a
-// session is blank, two more root-scope seats make the canvas reachable from
-// a brand-new session too: a "Pipelines" trigger row in `sidebar.footer.action`
-// and a frame-wide panel in `shell.overlay` bound to the CURRENT session.
+// It registers three seats: a "Pipelines" view tab into `conversation.view`
+// (additive, replaceRisk: none, order 30) for non-blank sessions, a compact
+// "Pipelines" icon button in the composer tool row (`conversation.input.left`)
+// — the tool row renders on the blank-session Hero too, so the button is the
+// trigger that works on a brand-new chat — and a frame-wide panel in
+// `shell.overlay` bound to the CURRENT session, which the trigger opens and
+// which renders in EVERY app state (the harness hides the whole session body,
+// tabs included, while a session is blank).
 // The view renders the whole node workspace: a palette with a draggable Agent,
 // a canvas, node move/select, and output→input connections with directed edges.
 //
@@ -27,7 +29,10 @@
 // remaining agents never start). On completion a RESULT MODAL offers the
 // continue routes: "Continue in chat" prefills this session's composer via the
 // standard `inputActions` and opens the chat view; "Continue in a new session"
-// creates/opens a workspace session; "Send to session…" prefills another
+// resolves the pipeline's workspace (cwd match first, then the session's own)
+// and opens a session ATTACHED to it via `uiWorkspace.connectWorkspace` — so
+// the chat lands in `workspace.sessionIds` and shows in the sidebar;
+// "Send to session…" prefills another
 // session's composer by id. Nothing ever auto-sends — every route stages the
 // text and the user presses send.
 //
@@ -134,12 +139,8 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
 		".pipeline-result-value{margin:0;padding:6px 8px;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}",
 		".pipeline-result-warn{font-size:11px;color:var(--dsw-alias-state-warning-primary)}",
 		".pipeline-result-error{font-size:11px;color:var(--dsw-alias-state-error-primary)}",
-		".pipeline-trigger{position:relative;flex:none;display:flex;align-items:center;width:100%;height:42px;margin:8px 0 0}",
-		".pipeline-trigger-btn{display:inline-flex;align-items:center;gap:8px;width:calc(100% + 4px);height:42px;margin:0 -2px;padding:0 10px 0 8px;border:none;border-radius:12px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:14px;cursor:pointer;overflow:hidden}",
-		".pipeline-trigger-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}",
-		".pipeline-trigger.rail{width:36px;height:36px;margin:0}",
-		".pipeline-trigger.rail .pipeline-trigger-btn{justify-content:center;gap:0;width:36px;height:36px;padding:0;border-radius:50%}",
-		".pipeline-trigger-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+		".pipeline-input-btn{display:inline-flex;align-items:center;justify-content:center;flex:none;width:24px;height:24px;padding:0;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}",
+		".pipeline-input-btn:hover{color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover)}",
 		".pipeline-shell-backdrop{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.5)}",
 		".pipeline-shell{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:41;width:min(1200px,94vw);height:min(860px,90vh);display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.35);overflow:hidden}",
 		".pipeline-shell-head{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);flex:none}",
@@ -226,7 +227,6 @@ interface SessionRow {
 interface SessionsService {
 	list: { getSnapshot(): { byId?: Record<string, SessionRow> } };
 	open(id: string): void;
-	create(opts: { cwd?: string; workspaceId?: string }): Promise<string>;
 }
 
 interface UiWorkspaceService {
@@ -895,19 +895,22 @@ function PipelineView({
 		setContinueBusy("new");
 		setContinueStatus(null);
 		try {
-			const sessions = services && services.sessions;
 			const uiWorkspace = services && services.uiWorkspace;
-			let newId: string | undefined;
-			if (uiWorkspace && typeof uiWorkspace.connectWorkspace === "function") {
-				// The workspace holding this session (fall back to the cwd match).
-				const ws = workspaceItems.find((w) => Array.isArray(w.sessionIds) && w.sessionIds.indexOf(sessionId) !== -1)
-					|| (cwd ? workspaceItems.find((w) => w.path === cwd) : undefined);
-				if (ws && typeof ws.workspaceId === "string") newId = await uiWorkspace.connectWorkspace(ws.workspaceId);
+			// Resolve the workspace the new chat must attach to: the pipeline's
+			// own folder (cwd) first — the chat belongs to the repo the pipeline
+			// ran on — then the session's workspace. `connectWorkspace` creates
+			// (or reuses the blank session of) a workspace-attached session, so
+			// it lands in `workspace.sessionIds` and shows in the sidebar. A
+			// cwd-only `sessions.create` would create an orphan the sidebar
+			// tree can never render, so there is deliberately NO such fallback.
+			const ws = (cwd ? workspaceItems.find((w) => w.path === cwd) : undefined)
+				|| workspaceItems.find((w) => Array.isArray(w.sessionIds) && w.sessionIds.indexOf(sessionId) !== -1);
+			if (!ws || typeof ws.workspaceId !== "string" || !uiWorkspace || typeof uiWorkspace.connectWorkspace !== "function") {
+				throw new Error("this pipeline's folder is not a connected workspace — connect the folder in the sidebar first");
 			}
-			if (newId === undefined && sessions && typeof sessions.create === "function" && cwd) {
-				newId = await sessions.create({ cwd });
-			}
+			const newId = await uiWorkspace.connectWorkspace(ws.workspaceId);
 			if (typeof newId !== "string" || newId.length === 0) throw new Error("no session could be created for this workspace");
+			const sessions = services && services.sessions;
 			if (sessions && typeof sessions.open === "function") sessions.open(newId);
 			if (!stageDraft(newId, continueText)) throw new Error("composer access unavailable");
 			setResultOpen(false);
@@ -1220,17 +1223,18 @@ function PipelineView({
 	);
 }
 
-// ---- Always-available entry: sidebar footer trigger + frame-wide panel ----
+// ---- Trigger + frame-wide panel: the route that works on a brand-new chat ----
 //
 // The harness hides the whole conversation session body (header tabs and view
 // area included) while a session is blank — a brand-new session therefore
-// shows NO Pipelines tab, and a plugin cannot change that gate. The additive
-// root-scope seats are the supported route around it: a "Pipelines" trigger in
-// `sidebar.footer.action` (the documented place to add to the sidebar) opens a
-// panel in `shell.overlay` (the documented additive frame-wide surface), which
-// renders in EVERY app state. The panel binds to the CURRENT session read off
-// the root `useSessions` standard hook (the graph itself is stored per
-// workspace cwd), so composing and running work from a brand-new session too.
+// shows NO Pipelines tab, and a plugin cannot change that gate. The supported
+// route is the compact composer tool-row trigger (`conversation.input.left`,
+// which the hero variant renders too) opening a panel in `shell.overlay` (the
+// documented additive frame-wide surface), which renders in EVERY app state.
+// The panel binds to the CURRENT session read off the root `useSessions`
+// standard hook (the graph itself is stored per workspace cwd), so composing
+// and running work from a brand-new session too — new sessions are born
+// attached to a workspace, so the cwd is already known there.
 
 /** Shared open state between the sidebar trigger and the shell-overlay panel. */
 function createPanelGate() {
@@ -1260,21 +1264,24 @@ function PipelineGlyph({ size }: { size: number }) {
 	);
 }
 
-/** The sidebar footer action: labeled row when the column is wide, icon on the rail. */
-function PipelineTriggerRow({ wide }: { wide?: boolean }) {
-	const open = React.useSyncExternalStore(panelGate.subscribe, panelGate.get);
-	return React.createElement("div", { className: "pipeline-trigger" + (wide ? "" : " rail") },
-		React.createElement("button", {
-			type: "button",
-			className: "pipeline-trigger-btn",
-			"aria-label": "Pipelines",
-			title: "Pipelines",
-			"aria-expanded": open,
-			onClick: () => { panelGate.set(true); },
-		},
-			React.createElement(PipelineGlyph, { size: wide ? 16 : 18 }),
-			wide ? React.createElement("span", { className: "pipeline-trigger-label" }, "Pipelines") : null
-		)
+/**
+ * The composer tool-row trigger (`conversation.input.left`): a compact icon
+ * button that opens the frame-wide panel. The tool row renders in the hero
+ * variant too, so this is the entry that works on a brand-new (blank) chat —
+ * the harness hides the title bar and tab ring there, and it renders nothing
+ * else of ours. Stateless: no hooks, so it cannot break the host's render
+ * contract.
+ */
+function PipelineComposerTrigger() {
+	return React.createElement("button", {
+		type: "button",
+		className: "pipeline-input-btn",
+		"aria-label": "Pipelines",
+		title: "Pipelines",
+		onMouseDown: (e: React.MouseEvent) => { e.preventDefault(); },
+		onClick: () => { panelGate.set(true); },
+	},
+		React.createElement(PipelineGlyph, { size: 14 })
 	);
 }
 
@@ -1282,14 +1289,22 @@ function PipelineTriggerRow({ wide }: { wide?: boolean }) {
  * The shell-overlay entry: a one-hook gate so the hook count never changes
  * between closed and open renders; the panel body mounts fresh when opened.
  */
-function PipelinePanelEntry({ useSessions, services }: { useSessions?: UseSessions | undefined; services?: PipelineServices | undefined }) {
+function PipelinePanelEntry({ useSessions, useWorkspaces, services }: {
+	useSessions?: UseSessions | undefined;
+	useWorkspaces?: UseWorkspaces | undefined;
+	services?: PipelineServices | undefined;
+}) {
 	const open = React.useSyncExternalStore(panelGate.subscribe, panelGate.get);
 	if (!open) return null;
-	return React.createElement(PipelinePanel, { useSessions, services });
+	return React.createElement(PipelinePanel, { useSessions, useWorkspaces, services });
 }
 
 /** The frame-wide panel hosting the canvas for the CURRENT session. */
-function PipelinePanel({ useSessions, services }: { useSessions?: UseSessions | undefined; services?: PipelineServices | undefined }) {
+function PipelinePanel({ useSessions, useWorkspaces, services }: {
+	useSessions?: UseSessions | undefined;
+	useWorkspaces?: UseWorkspaces | undefined;
+	services?: PipelineServices | undefined;
+}) {
 	const hasSessions = typeof useSessions === "function";
 	const current = hasSessions
 		? (useSessions as UseSessions)((s) => (s && s.current) as string | undefined)
@@ -1321,6 +1336,7 @@ function PipelinePanel({ useSessions, services }: { useSessions?: UseSessions | 
 				? PipelineView({
 					sessionId: current,
 					useSessions: useSessions as UseSessions,
+					useWorkspaces,
 					services,
 					onDismiss: close,
 				})
@@ -1368,11 +1384,10 @@ export function apply(ctx: PipelineCtx): void {
 				})
 		)
 	);
-	ctx.slots.inject("sidebar.footer.action", () =>
+	ctx.slots.inject("conversation.input.left", () =>
 		ctx.slots.register(
-			{ name: "sidebar.footer.action", id: "pipeline-trigger", order: 20 },
-			(props: Record<string, unknown>) =>
-				PipelineTriggerRow({ wide: props.wide as boolean | undefined })
+			{ name: "conversation.input.left", id: "pipeline-trigger", order: 40 },
+			() => PipelineComposerTrigger()
 		)
 	);
 	ctx.slots.inject("shell.overlay", () =>
@@ -1381,6 +1396,7 @@ export function apply(ctx: PipelineCtx): void {
 			(props: Record<string, unknown>) =>
 				PipelinePanelEntry({
 					useSessions: props.useSessions as UseSessions | undefined,
+					useWorkspaces: props.useWorkspaces as UseWorkspaces | undefined,
 					services,
 				})
 		)
