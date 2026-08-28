@@ -19,7 +19,7 @@
 // prefix-scoped (every class is `.pipeline-*` / `.config-*`), so the text
 // ships as written.
 import { readFile } from "node:fs/promises";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname, relative, resolve as resolvePath } from "node:path";
 import { defineConfig } from "tsdown";
 
 /** Specifiers resolved from the browser module table (never bundled). */
@@ -72,11 +72,15 @@ export default defineConfig(() => ({
 			resolveId(source: string, importer: string | undefined) {
 				if (importer === undefined) return null;
 				if (!source.endsWith(".css") || source.endsWith(".module.css")) return null;
-				return CSS_VIRTUAL_PREFIX + resolvePath(dirname(importer), source) + CSS_VIRTUAL_SUFFIX;
+				// CWD-relative: the virtual id surfaces verbatim in the bundle's
+				//#region comments, which ship in the committed lib/client.js.
+				const abs = resolvePath(dirname(importer), source);
+				return CSS_VIRTUAL_PREFIX + relative(process.cwd(), abs) + CSS_VIRTUAL_SUFFIX;
 			},
 			async load(this: { addWatchFile(id: string): void }, virtualId: string) {
 				if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null;
-				const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length);
+				const relId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length);
+				const fileId = resolvePath(process.cwd(), relId);
 				// The virtual id otherwise hides the physical sheet from the watch graph.
 				this.addWatchFile(fileId);
 				return styleInjectionModule(fileId, await readFile(fileId, "utf8"));
