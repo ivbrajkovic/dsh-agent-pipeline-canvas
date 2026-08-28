@@ -21,7 +21,10 @@
 // Running: the Run button opens an INPUT MODAL (multiline text + workspace
 // files attached as ABSOLUTE PATHS via the harness `@`-mention file-reference
 // completion or manual entry; contents are never inlined — the first agent
-// reads them with its own tools). On completion a RESULT MODAL offers the
+// reads them with its own tools). While a run is in flight a Stop button takes
+// its place in the toolbar: aborting the fetch closes the connection and the
+// Host aborts the run server-side (the in-flight agent is interrupted, the
+// remaining agents never start). On completion a RESULT MODAL offers the
 // continue routes: "Continue in chat" prefills this session's composer via the
 // standard `inputActions` and opens the chat view; "Continue in a new session"
 // creates/opens a workspace session; "Send to session…" prefills another
@@ -97,6 +100,7 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
 		".pipeline-config .config-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}",
 		".pipeline-btn-run{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}",
 		".pipeline-btn-run:disabled{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}",
+		".pipeline-btn-stop{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}",
 		".pipeline-modal{width:560px;max-width:94%;max-height:88%;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:16px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 30px rgba(0,0,0,.35);overflow:auto}",
 		".pipeline-modal h3{margin:0;font-size:14px;font-weight:600}",
 		".pipeline-modal .modal-row{display:flex;flex-direction:column;gap:4px}",
@@ -648,6 +652,8 @@ function PipelineView({
 	const [continueStatus, setContinueStatus] = React.useState<string | null>(null);
 	const runTextRef = React.useRef("");
 	const runFilesRef = React.useRef<string[]>([]);
+	/** The in-flight run's fetch AbortController; Stop aborts it (runAbortRef). */
+	const runAbortRef = React.useRef<AbortController | null>(null);
 	const canvasRef = React.useRef<HTMLDivElement | null>(null);
 	const idRef = React.useRef(0);
 	const dragRef = React.useRef<{ id: string; startClientX: number; startClientY: number; startX: number; startY: number } | null>(null);
@@ -794,11 +800,15 @@ function PipelineView({
 	// as-is, plus the composed pipeline input from the Run modal and the
 	// session id) to the Host's /run route, which executes it sequentially
 	// and returns the contract's `{ outputs: { [terminalId]: output } }` shape.
+	// The fetch rides a per-run AbortController: Stop aborts it, the browser
+	// closes the connection, and the Host aborts the run server-side.
 	function run(text: string, files: string[]) {
 		if (running) return;
 		runTextRef.current = text;
 		runFilesRef.current = files;
 		const g = buildGraph(agents, connections);
+		const controller = new AbortController();
+		runAbortRef.current = controller;
 		setRunning(true);
 		setRunResult(null);
 		setShowRunModal(false);
@@ -806,6 +816,7 @@ function PipelineView({
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ sessionId, graph: g, input: composePipelineInput(text, files) }),
+			signal: controller.signal,
 		})
 			.then((r) => {
 				return r.text().then((body) => {
@@ -815,8 +826,22 @@ function PipelineView({
 					return data || { ok: false, error: "empty response" };
 				});
 			})
-			.then((data) => { setRunning(false); setRunResult(data); setResultOpen(true); })
-			.catch((err: unknown) => { setRunning(false); setRunResult({ ok: false, error: String(err) }); setResultOpen(true); });
+			.then((data) => { runAbortRef.current = null; setRunning(false); setRunResult(data); setResultOpen(true); })
+			.catch((err: unknown) => {
+				runAbortRef.current = null;
+				setRunning(false);
+				const stopped = (err as { name?: string } | null) !== null && (err as { name?: string }).name === "AbortError";
+				setRunResult({ ok: false, error: stopped ? "Run stopped — the in-flight agent was interrupted." : String(err) });
+				setResultOpen(true);
+			});
+	}
+
+	// Stop the in-flight run: aborting the fetch closes the connection, which
+	// the Host's run route watches — it aborts the pipeline server-side (the
+	// in-flight agent is interrupted, later agents never start).
+	function stopRun() {
+		const controller = runAbortRef.current;
+		if (controller) controller.abort();
 	}
 
 	// Completion query against the harness `@`-mention file-reference source
@@ -1092,7 +1117,13 @@ function PipelineView({
 				disabled: running || !validation.ok,
 				title: running ? "Running…" : "Open the run dialog",
 				onClick: () => { setShowRunModal(true); },
-			}, running ? "Running…" : "Run")
+			}, running ? "Running…" : "Run"),
+			running ? React.createElement("button", {
+				key: "pipeline-stop",
+				className: "pipeline-btn pipeline-btn-stop",
+				title: "Stop the run — interrupts the in-flight agent and skips the rest",
+				onClick: stopRun,
+			}, "Stop") : null
 		),
 		validation.ok ? null : React.createElement(
 			"div",

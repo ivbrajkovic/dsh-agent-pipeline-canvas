@@ -227,9 +227,13 @@ persisted). The runner (`src/runner.ts`) then:
 The parent's provider/model is inherited by each child (via the harness's
 `resolveChildAgentOptions`), so pipeline agents run on the deployment's
 configured model. The `spawn` provider is the one registered by the base bundle.
-Parallel execution, retries, conditions, loops, cancellation, model/tool
-selection, and live visualization are deliberately **not** implemented; the run
-is currently a blocking synchronous POST.
+The run is currently a blocking synchronous POST, and it is **stoppable**: while
+a run is in flight the toolbar shows **Stop**, which aborts the request — the
+Host notices the dropped connection and aborts the run server-side, so the
+in-flight agent is interrupted and the remaining agents never start. Closing the
+tab or reloading has the same effect. Parallel execution, retries, conditions,
+loops, model/tool selection, and live visualization are deliberately **not**
+implemented.
 
 ### Result & continue routes
 

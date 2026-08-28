@@ -11,7 +11,9 @@
 //   POST /dsh-agent-pipeline   body { cwd, graph }
 //        -> { ok: true }                             (writes the file)
 //   POST /dsh-agent-pipeline/run  body { sessionId, graph, input }
-//        -> { ok, outputs, runs, order }             (runs the pipeline snapshot)
+//        -> { ok, outputs, runs, order }             (runs the pipeline snapshot;
+//          aborted early when the browser connection closes — see the run
+//          route's cancellation note below)
 //
 // The run route is a minimal, sequential executor: it validates the snapshot,
 // resolves the session's live Agent as the parent, and runs each pipeline agent
@@ -64,6 +66,9 @@ interface ServerRequest {
 interface ServerResponse {
 	writeHead(status: number, headers?: Record<string, string>): void;
 	end(data?: string): void;
+	on(event: string, cb: (...args: unknown[]) => void): void;
+	/** True once `end()` has been called AND the body flushed (node:http). */
+	writableEnded?: boolean;
 }
 
 type RouteHandler = (req: ServerRequest, res: ServerResponse) => void | Promise<void>;
@@ -215,6 +220,13 @@ export function apply(ctx: HostContext): void {
 	// plus the pipeline-level input and its session id. The Host validates the
 	// snapshot, runs it sequentially (see lib/runner.ts), and returns the
 	// contract's `{ outputs: { [terminalId]: output } }` shape.
+	//
+	// Cancellation: each run gets its own AbortController, aborted the moment
+	// the browser connection closes before the response completed (Stop button
+	// aborting the fetch, tab closed, page reloaded). The runner passes the
+	// signal down to the harness subagents, so the in-flight agent stops
+	// mid-run and no further agent is started. The late response to a gone
+	// client is dropped.
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: RUN_PATH,
@@ -238,11 +250,24 @@ export function apply(ctx: HostContext): void {
 					return;
 				}
 				const rec = payload as { graph?: unknown; input?: unknown; sessionId?: unknown };
+				const controller = new AbortController();
+				let clientGone = false;
+				// res "close" with a not-yet-ended body is the reliable
+				// client-disconnect signal (req "close" merely marks the
+				// end of the request body).
+				res.on("close", () => {
+					if (!res.writableEnded) {
+						clientGone = true;
+						controller.abort();
+					}
+				});
 				const result = await runPipeline(ctx, {
 					graph: rec.graph as PipelineGraph | null | undefined,
 					input: rec.input,
 					sessionId: typeof rec.sessionId === "string" ? rec.sessionId : "",
+					signal: controller.signal,
 				});
+				if (clientGone) return;
 				send(res, 200, result);
 			} catch (error) {
 				ctx.logger.warn(`agent-pipeline: ${RUN_PATH} failed: ${String(error)}`);

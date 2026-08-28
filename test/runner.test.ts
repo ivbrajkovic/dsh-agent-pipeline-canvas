@@ -137,5 +137,56 @@ function makeCtx(providerNames?: string[]) {
 	okCheck("no provider rejected", result.ok === false && /no subagent provider/.test(result.error ?? ""));
 }
 
+// --- abort mid-run: in-flight agent stops, later agents never start ------
+{
+	const { ctx, invocations } = makeCtx();
+	const controller = new AbortController();
+	// Script the FIRST agent to hold its result until the test releases it,
+	// mimicking an agent in flight when the user presses Stop.
+	let release!: (value: { output: Array<{ type: string; text: string }>; stopReason: string }) => void;
+	const held = new Promise<{ output: Array<{ type: string; text: string }>; stopReason: string }>((resolve) => { release = resolve; });
+	ctx.subagents.start = (name: string, request: { label?: string; prompt: Array<{ text: string }>; parent: unknown; signal?: unknown }) => {
+		invocations.push({ name, label: request.label, prompt: request.prompt[0].text, parent: request.parent, signal: request.signal });
+		return {
+			id: "child-" + invocations.length,
+			result: invocations.length === 1 ? held : Promise.resolve({ output: [], stopReason: "completed" }),
+			dispose: () => Promise.resolve(),
+		};
+	};
+	const pending = runPipeline(ctx, {
+		graph: graph([agent("a", "Alpha", "Extract."), agent("b", "Beta", "Summarize.")], [conn("c1", "a", "b")]),
+		input: "hello",
+		sessionId: "sess",
+		signal: controller.signal,
+	});
+	// runPipeline starts synchronously through the first start() call.
+	okCheck("abort: first agent started", invocations.length === 1 && invocations[0].label === "Alpha");
+	controller.abort();
+	release({ output: [{ type: "text", text: "partial" }], stopReason: "aborted" });
+	const result = await pending;
+	okCheck("abort: reported aborted", result.ok === true && result.aborted === true);
+	if (result.ok) {
+		okCheck("abort: in-flight agent recorded as aborted", result.runs.length === 1 && result.runs[0].status === "aborted");
+		okCheck("abort: no further agent started", invocations.length === 1);
+		okCheck("abort: no downstream outputs", Object.keys(result.outputs).length === 0);
+	}
+}
+
+// --- already-aborted signal: nothing runs at all -------------------------
+{
+	const { ctx, invocations } = makeCtx();
+	const result = await runPipeline(ctx, {
+		graph: graph([agent("a", "Alpha", "A.")], []),
+		input: "",
+		sessionId: "sess",
+		signal: AbortSignal.abort(),
+	});
+	okCheck("pre-aborted: ok with aborted flag", result.ok === true && result.aborted === true);
+	if (result.ok) {
+		okCheck("pre-aborted: no agent started", invocations.length === 0);
+		okCheck("pre-aborted: no runs recorded", result.runs.length === 0);
+	}
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

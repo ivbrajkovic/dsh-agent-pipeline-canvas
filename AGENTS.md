@@ -59,11 +59,16 @@ they are the full authoritative rules. The cross-cutting invariants:
   **sequentially** in `topoOrder`; a node runs only when EVERY upstream has run
   (the fan-in *wait-for-all-upstreams* rule). A non-`completed` stopReason is
   recorded on the run, not treated as pipeline failure.
+- **Cancellation**: each run POST owns an `AbortController`, aborted when the
+  browser connection closes before the response completes (the client Stop
+  button, tab close, reload). The signal stops the in-flight agent mid-run via
+  the harness driver (stopReason `aborted`) and the runner starts no further
+  agent; the result then carries `aborted: true`. Run state is in-memory only —
+  a profile restart kills any in-flight run.
 - **Deliberately not implemented** (deferred, do not build yet): parallel
-  execution, retries, conditions, loops, cancellation, model/tool selection,
-  live execution visualization. The planned upgrade for the blocking
-  synchronous Run POST is a background Job (`@deepseek-ai/dsh-jobs`) with a
-  run id + polling.
+  execution, retries, conditions, loops, model/tool selection, live execution
+  visualization. The planned upgrade for the blocking synchronous Run POST is a
+  background Job (`@deepseek-ai/dsh-jobs`) with a run id + polling.
 
 ## Development loop
 
@@ -72,7 +77,7 @@ they are the full authoritative rules. The cross-cutting invariants:
 
 ```
 npm run typecheck
-npm test            # 80 tests
+npm test            # 88 tests
 npm run build
 ```
 

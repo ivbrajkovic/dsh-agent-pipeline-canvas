@@ -9,6 +9,9 @@ interface ServerRequest {
 interface ServerResponse {
     writeHead(status: number, headers?: Record<string, string>): void;
     end(data?: string): void;
+    on(event: string, cb: (...args: unknown[]) => void): void;
+    /** True once `end()` has been called AND the body flushed (node:http). */
+    writableEnded?: boolean;
 }
 type RouteHandler = (req: ServerRequest, res: ServerResponse) => void | Promise<void>;
 interface WebServerService {

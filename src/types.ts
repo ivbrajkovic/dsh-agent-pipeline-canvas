@@ -126,6 +126,12 @@ export interface PipelineRunSuccess {
 	outputs: Record<string, unknown>;
 	runs: AgentRunRecord[];
 	order: string[];
+	/**
+	 * True when the run stopped early because the caller aborted the signal:
+	 * the agent in flight at abort time is recorded with status "aborted" and
+	 * the agents after it in the topological order never ran.
+	 */
+	aborted?: boolean;
 }
 
 /** Failed run: invalid graph, missing parent Agent, or no provider registered. */
