@@ -6,12 +6,12 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img alt="MIT license" src="https://shieldcn.dev/github/license/ivbrajkovic/dsh-agent-pipeline-canvas.svg?mode=dark&size=xs" /></a>
-  <a href="https://github.com/ivbrajkovic/dsh-agent-pipeline-canvas/stargazers"><img alt="GitHub stars" src="https://shieldcn.dev/github/stars/ivbrajkovic/dsh-agent-pipeline-canvas.svg?mode=dark&size=xs" /></a>
-  <a href="https://github.com/ivbrajkovic/dsh-agent-pipeline-canvas/commits"><img alt="Last commit" src="https://shieldcn.dev/github/last-commit/ivbrajkovic/dsh-agent-pipeline-canvas.svg?mode=dark&size=xs" /></a>
-  <a href="https://www.typescriptlang.org"><img alt="TypeScript strict" src="https://shieldcn.dev/badge/TypeScript-strict-3178C6.svg?logo=typescript&mode=dark&size=xs" /></a>
-  <a href="https://nodejs.org"><img alt="Node.js 18.17 or newer" src="https://shieldcn.dev/badge/node-%3E%3D18.17-339933.svg?logo=node.js&mode=dark&size=xs" /></a>
-  <a href="https://github.com/ivbrajkovic/dsh-agent-pipeline-canvas/blob/main/package.json"><img alt="Zero runtime dependencies" src="https://shieldcn.dev/badge/dependencies-0-10b981.svg?logo=npm&mode=dark&size=xs" /></a>
+  <a href="./LICENSE"><img alt="MIT license" src="https://shieldcn.dev/github/license/ivbrajkovic/dsh-agent-pipeline-canvas.svg?mode=light&size=xs" /></a>
+  <a href="https://github.com/ivbrajkovic/dsh-agent-pipeline-canvas/stargazers"><img alt="GitHub stars" src="https://shieldcn.dev/github/stars/ivbrajkovic/dsh-agent-pipeline-canvas.svg?mode=light&size=xs" /></a>
+  <a href="https://github.com/ivbrajkovic/dsh-agent-pipeline-canvas/commits"><img alt="Last commit" src="https://shieldcn.dev/github/last-commit/ivbrajkovic/dsh-agent-pipeline-canvas.svg?mode=light&size=xs" /></a>
+  <a href="https://www.typescriptlang.org"><img alt="TypeScript strict" src="https://shieldcn.dev/badge/TypeScript-strict-3178C6.svg?logo=typescript&mode=light&size=xs" /></a>
+  <a href="https://nodejs.org"><img alt="Node.js 18.17 or newer" src="https://shieldcn.dev/badge/node-%3E%3D18.17-339933.svg?logo=node.js&mode=light&size=xs" /></a>
+  <a href="https://github.com/ivbrajkovic/dsh-agent-pipeline-canvas/blob/main/package.json"><img alt="Zero runtime dependencies" src="https://shieldcn.dev/badge/dependencies-0-10b981.svg?logo=npm&mode=light&size=xs" /></a>
 </p>
 
 ---
