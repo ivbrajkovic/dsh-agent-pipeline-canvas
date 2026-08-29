@@ -1,8 +1,7 @@
 {
   "name": "dsh-agent-pipeline-canvas",
   "version": "0.1.0",
-  "private": true,
-  "description": "Local DSH Web composition plugin: a visual agent-pipeline canvas as a persistent 'Pipelines' view tab in every session. Drag an Agent from a palette onto the canvas, reposition nodes, and connect outputs to inputs with directed edges. Holds the graph as structured data and validates it as a DAG (cycles, self/duplicate/malformed connections, missing agents or ports). A minimal sequential runner runs the snapshot by delegating each agent to the harness's subagents service in topological order, passing outputs downstream and returning the { outputs } result. Parallel execution, retries, conditions, loops, cancellation, and live visualization are not implemented yet.",
+  "description": "DSH Web composition plugin: a visual agent-pipeline canvas as a persistent 'Pipelines' view tab in every session. Drag an Agent from a palette onto the canvas, reposition nodes, and connect outputs to inputs with directed edges. Holds the graph as structured data and validates it as a DAG (cycles, self/duplicate/malformed connections, missing agents or ports). A minimal sequential runner runs the snapshot by delegating each agent to the harness's subagents service in topological order, passing outputs downstream and returning the { outputs } result. Parallel execution, retries, conditions, loops, cancellation, and live visualization are not implemented yet.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -14,18 +13,39 @@
     "./runner": "./lib/runner.js",
     "./package.json": "./package.json"
   },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "docs",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "tsx test/validate.test.ts && tsx test/execution.test.ts && tsx test/message.test.ts && tsx test/runner.test.ts && tsx test/runs.test.ts",
-    "sync": "npm run typecheck && npm test && npm run build && rsync -a --delete --exclude .git --exclude node_modules ./ ~/.dsh/profiles/web/node_modules/dsh-agent-pipeline-canvas/ && echo 'Synced to the profile — hard-refresh the browser tab; restart the web profile only if host routes changed.'"
+    "sync": "npm run typecheck && npm test && npm run build && echo 'Built — hard-refresh the browser tab for client-only changes; restart the web profile host to remount Host routes.'"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "inject": []
     }
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ivbrajkovic/dsh-agent-pipeline-canvas.git"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "agent-pipeline",
+    "canvas"
+  ],
   "license": "MIT",
   "engines": {
     "node": ">=18.17"

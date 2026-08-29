@@ -1,0 +1,7 @@
+# Bundle layer for dsh-agent-pipeline-canvas, applied when a profile lists
+# this package in dsh.profile.bundles (dsh plugin add does that). The Host
+# half is a no-op row; the browser half renders the canvas — that half is
+# declared by the dsh.client manifest, not by this patch.
+- insert:
+    - id: agent-pipeline-canvas
+      name: dsh-agent-pipeline-canvas

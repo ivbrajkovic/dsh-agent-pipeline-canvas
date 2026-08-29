@@ -13,49 +13,40 @@ how to work on it. For what the plugin does, start at the
   gracefully (see
   [running-pipelines.md](running-pipelines.md#limitations-and-degradation)).
 
-## Install: one-time wiring
+## Install
 
-The plugin is deployed into the local DSH web profile as a **copy** (not a
-symlink) at `~/.dsh/profiles/web/node_modules/dsh-agent-pipeline-canvas/`.
+The package ships as a DSH bundle — `dsh.bundle` → `./cordis.patch.yml`,
+with `lib/` committed — so the public install is one command: `dsh` links
+the checkout, appends it to `dsh.profile.bundles`, and the shipped layer
+inserts the plugin row. No build step and no pnpm `allowBuilds` allowance
+are needed:
 
-1. Add the dependency to `~/.dsh/profiles/web/package.json`:
+```
+dsh plugin --profile <name> add github:ivbrajkovic/dsh-agent-pipeline-canvas
+```
 
-   ```json
-   "dsh-agent-pipeline-canvas": "file:../../../Desktop/agent-pipeline/dsh-agent-pipeline-canvas"
-   ```
+### Local profile
 
-2. Add the plugin row to `~/.dsh/profiles/web/cordis.patch.yml`:
+The local development profile installs the checkout the same way — point
+`dsh plugin add` at this directory and pnpm links it (`link:`), so the
+profile serves these very files and there is no copy step.
 
-   ```yaml
-   # Local composition plugin: agent-pipeline canvas as a Pipelines view tab.
-   - id: agent-pipeline-canvas
-     name: dsh-agent-pipeline-canvas
-   ```
+## Deploying changes
 
-## Deploying changes: the sync loop
-
-After every change, run the one-command loop — it typechecks, runs the tests,
-builds, and syncs the tree into the profile (stopping before the copy if any
-step fails):
+`npm run sync` typechecks, runs the tests, and builds:
 
 ```
 npm run sync
 ```
 
-The script wraps the plain copy, if you ever need it on its own:
-
-```
-rsync -a --delete --exclude .git --exclude node_modules ./ \
-  ~/.dsh/profiles/web/node_modules/dsh-agent-pipeline-canvas/
-```
-
-**Client-only changes** need just the sync plus a hard browser refresh (the
+**Client-only changes** need just the build plus a hard browser refresh (the
 client is served fresh, no cache). **Host changes** additionally need a web
 profile restart so the routes re-mount.
 
-`pnpm install` inside the profile is currently blocked by a pre-existing
-supply-chain policy error (`ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` for
-`dshmarket@1.34.0`); the rsync path needs no install.
+A full `pnpm install` inside the profile is blocked by a pre-existing
+supply-chain policy entry (`dshmarket@1.34.0` and the `minimumReleaseAge`
+policy); the partial installs that `dsh plugin add`/`remove` perform are not
+affected.
 
 ### Verifying the host route after a restart
 

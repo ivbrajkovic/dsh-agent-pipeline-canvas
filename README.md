@@ -16,7 +16,7 @@
 
 ---
 
-**dsh-agent-pipeline-canvas** is a local DSH Web composition plugin: a visual
+**dsh-agent-pipeline-canvas** is a DSH Web composition plugin: a visual
 **agent-pipeline** canvas in every session — a **Pipelines** view tab, plus a
 composer button that works even on a brand-new session. Build a DAG of
 generic agents, then run it: each agent is delegated to the harness's own
@@ -62,29 +62,48 @@ The full manual lives in [docs/index.md](docs/index.md). Read what you need:
 | [docs/reference/graph-and-execution.md](docs/reference/graph-and-execution.md) | The graph schema, every validation error code, and the execution contract. |
 | [docs/reference/system-prompt.md](docs/reference/system-prompt.md) | The harness system-prompt section layout and the persona slot an agent's system prompt replaces. |
 
-## Install & deploy
+## Install & uninstall
 
-Copy-deployed into the local DSH web profile at
-`~/.dsh/profiles/web/node_modules/dsh-agent-pipeline-canvas/`. One-time
-wiring:
+The package is a DSH **bundle**: its `dsh.bundle` manifest ships the plugin
+layer, and `lib/` is committed build output, so a git install needs no build
+step and no pnpm `allowBuilds` allowance.
 
-1. Add to `~/.dsh/profiles/web/package.json`:
-
-   ```json
-   "dsh-agent-pipeline-canvas": "file:../../../Desktop/agent-pipeline/dsh-agent-pipeline-canvas"
-   ```
-
-2. Add the plugin row to `~/.dsh/profiles/web/cordis.patch.yml`:
-
-   ```yaml
-   - id: agent-pipeline-canvas
-     name: dsh-agent-pipeline-canvas
-   ```
-
-Then after every change:
+Install into any profile:
 
 ```
-npm run sync   # typecheck + test + build + rsync into the profile
+dsh plugin --profile <name> add github:ivbrajkovic/dsh-agent-pipeline-canvas
+```
+
+`dsh` appends the package to the profile's `dsh.profile.bundles` list and
+applies the shipped layer — no manual patch rows needed. Verify without
+booting:
+
+```
+dsh --profile <name> --dump-config   # shows a "# == dsh-agent-pipeline-canvas" layer
+```
+
+Then start (or restart) the profile and hard-refresh the browser tab: every
+session gains a **Pipelines** view tab and a composer button. To pin a
+revision instead of tracking `main`, append a commit:
+`github:ivbrajkovic/dsh-agent-pipeline-canvas#<commit>`.
+
+Uninstall:
+
+```
+dsh plugin --profile <name> remove dsh-agent-pipeline-canvas
+```
+
+`dsh` removes both the dependency and the bundle layer; after a profile
+restart and a hard browser refresh, the **Pipelines** tab is gone.
+
+### Local development deploy
+
+The live web profile consumes this checkout directly — it was installed with
+`dsh plugin --profile web add <this checkout>`, so pnpm links it and the
+profile serves these very files. After a change:
+
+```
+npm run sync   # typecheck + test + build
 ```
 
 Client-only changes need a hard browser refresh; host changes need a profile
