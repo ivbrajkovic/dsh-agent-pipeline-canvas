@@ -22,6 +22,18 @@ that match what you need — nothing requires reading everything.
 | [reference/architecture.md](reference/architecture.md) | The three-face architecture (Host half, browser half, pure core), a route-by-route HTTP reference, the browser slot registrations and bundling, and the full project layout. |
 | [reference/graph-and-execution.md](reference/graph-and-execution.md) | The pipeline graph schema, every `validateGraph` rule and error code, and the execution contract: per-agent input shapes, root/terminal/orphan classification, prompt framing, and the final result. |
 | [reference/system-prompt.md](reference/system-prompt.md) | How the harness assembles an agent's system prompt from named sections, and the one `deployment:persona` slot that a pipeline agent's system prompt field replaces. |
+| [reference/design-principles.md](reference/design-principles.md) | The stream model — nodes, ports, messages, firings, quiescence — and the durable rules: self-similar boxes, honest wiring, cost discipline, the firing-log record. |
+
+## Proposals — agreed designs, not yet built
+
+The knowledge base for upcoming work. Guides and references describe the
+current implementation; these describe what comes next.
+
+| Document | What it covers |
+|----------|----------------|
+| [proposals/parallel-execution.md](proposals/parallel-execution.md) | The stream-model executor: the firing kernel (ports, messages, firings, quiescence), fail-fast errors, grouped pause, per-node parent anchors, abort draining. |
+| [proposals/conditional-dispatch.md](proposals/conditional-dispatch.md) | Conditional dispatch as base mechanics: named output ports, selective emission, declared any-of/all-of joins. |
+| [proposals/run-operations.md](run-operations.md) | Operational features: run reuse (rerun from node X), a run history browser, per-firing token accounting, and per-node timeouts — plus recorded known limits. |
 
 Suggested reading order for a new contributor:
 [README](../README.md) → [canvas guide](guide/canvas.md) →

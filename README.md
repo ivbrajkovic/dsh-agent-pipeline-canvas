@@ -46,8 +46,11 @@ downstream, and the durable run returns
 - **Zero runtime dependencies** — three faces (Host routes, React client,
   pure core) over one shared validation/execution contract.
 
-Deliberately not implemented yet: parallel execution, retries, conditions,
-loops, live visualization. The executor is sequential by design.
+Not yet implemented: concurrent dispatch, conditional dispatch, run
+operations, loops, and retries. The first three are designed in
+[docs/proposals/](docs/index.md#proposals--agreed-designs-not-yet-built);
+the executor is still sequential until that lands. Live visualization stays
+deferred.
 
 ## Documentation
 
@@ -60,6 +63,7 @@ The full manual lives in [docs/index.md](docs/index.md). Read what you need:
 | [docs/guide/deployment.md](docs/guide/deployment.md) | Profile wiring, the sync loop, route verification, dev scripts and change discipline. |
 | [docs/reference/architecture.md](docs/reference/architecture.md) | Host routes, browser slots and bundling, the pure core, project layout. |
 | [docs/reference/graph-and-execution.md](docs/reference/graph-and-execution.md) | The graph schema, every validation error code, and the execution contract. |
+| [docs/reference/design-principles.md](docs/reference/design-principles.md) | The durable design rules every feature must keep. |
 | [docs/reference/system-prompt.md](docs/reference/system-prompt.md) | The harness system-prompt section layout and the persona slot an agent's system prompt replaces. |
 
 ## Install & uninstall

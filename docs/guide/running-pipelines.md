@@ -70,8 +70,10 @@ on an immutable snapshot.
    with all completed outputs preserved.
 
 **One run is active (running|paused) per workspace**; a second `POST /run`
-answers `409 { ok: false, activeRunId }`. The executor is sequential by
-design: pausing at a breakpoint stops every branch, not just one.
+answers `409 { ok: false, activeRunId }`. The executor is currently
+sequential: pausing at a breakpoint stops every branch, not just one
+([concurrent dispatch is designed](../proposals/parallel-execution.md), with
+pauses gating the whole parallel section).
 
 ## Breakpoints: pause, inspect, resume / rerun / steer / abort
 
@@ -190,8 +192,15 @@ picker), all declared on the client module's `inject`.
 
 ## What is deliberately not implemented
 
-Parallel execution, retries, conditions, loops, and live visualization do not
-exist yet — by design, not omission. The executor is sequential; a pause
-halts the whole run. The graph schema needs no migration when these arrive:
-the [execution contract](../reference/graph-and-execution.md) derives
-everything from the existing `agents`/`connections` arrays.
+Loops, retries, and live visualization do not exist yet. The executor is
+currently sequential: a pause halts the whole run.
+
+Designs for execution beyond sequential runs live in
+[docs/proposals/](../proposals/parallel-execution.md): the stream-model
+executor (nodes wired through ports, firing as data arrives, cycles as
+ordinary wiring),
+[conditional dispatch](../proposals/conditional-dispatch.md) (named output
+ports with selective emission), and
+[run operations](../proposals/run-operations.md) (run reuse, history, token
+accounting). Until they are implemented, this guide describes exactly how
+runs behave today.
