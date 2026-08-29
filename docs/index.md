@@ -34,6 +34,7 @@ current implementation; these describe what comes next.
 | [proposals/parallel-execution.md](proposals/parallel-execution.md) | The stream-model executor: the firing kernel (ports, messages, firings, quiescence), fail-fast errors, grouped pause, per-node parent anchors, abort draining. |
 | [proposals/conditional-dispatch.md](proposals/conditional-dispatch.md) | Conditional dispatch as base mechanics: named output ports, selective emission, declared any-of/all-of joins. |
 | [proposals/run-operations.md](run-operations.md) | Operational features: run reuse (rerun from node X), a run history browser, per-firing token accounting, and per-node timeouts — plus recorded known limits. |
+| [proposals/implementation-plan.md](proposals/implementation-plan.md) | The phased build plan for the stream executor: schema, firing log, kernel, anchors, control plane, fail-fast, selective emission — each phase with its verification gate, plus the phase-deltas log. |
 
 Suggested reading order for a new contributor:
 [README](../README.md) → [canvas guide](guide/canvas.md) →
