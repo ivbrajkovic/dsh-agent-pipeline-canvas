@@ -416,11 +416,14 @@ export interface RunFiring {
 	 */
 	childSessionId?: string;
 	/**
-	 * Output ports (names) this firing emitted on, written at emission: every
-	 * declared port for a node WITHOUT bindings, the first matched binding's
-	 * port with bindings, and `[]` when a bound node selected nothing (no
-	 * match, or no structured result — the honest quiet). Unset for firings
-	 * that never reached emission (failed, aborted, no output).
+	 * Output ports (names) this firing SELECTED for emission, written at
+	 * emission time: every declared port for a node WITHOUT bindings, the
+	 * first matched binding's port with bindings, and `[]` when a bound node
+	 * selected nothing (no match, or no structured result — the honest quiet).
+	 * Selection is the firing's decision, not the arrival's: a selected port
+	 * whose downstream delivery a bound refused still shows here, with the
+	 * refusal recorded in the record's `dropped` list. Unset for firings that
+	 * never reached emission (failed, aborted, no output).
 	 */
 	emittedTo?: string[];
 	/** ISO timestamps: when the firing started / reached a terminal status. */

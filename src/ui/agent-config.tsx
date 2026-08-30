@@ -789,7 +789,7 @@ function AgentConfigPanel({
                 systemPrompt: assembled.systemPrompt,
                 instructions,
                 settings: assembled.settings,
-                ...(breakpoint ? { breakpoint: true } : { breakpoint: undefined }),
+                ...(breakpoint ? { breakpoint: true } : {}),
                 inputPorts: portShape.inputPorts,
                 outputPorts: portShape.outputPorts,
                 bindings: portShape.bindings,

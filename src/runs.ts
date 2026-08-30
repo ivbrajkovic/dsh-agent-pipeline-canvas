@@ -1376,6 +1376,7 @@ class RunExecutor {
 		try {
 			const record = this.record;
 			const graph = portGraph(record.graph);
+			const agentById = new Map<string, Agent>();
 			// Selective emission (conditional-dispatch §2): each node's output
 			// bindings ride the kernel as data — nodes without any emit
 			// non-selectively (the default-graph behavior).
@@ -1383,16 +1384,14 @@ class RunExecutor {
 			for (const candidate of record.graph?.agents ?? []) {
 				const entry = candidate as Agent | null | undefined;
 				if (entry == null || typeof entry !== "object" || entry.id == null) continue;
+				const id = String(entry.id);
+				agentById.set(id, entry);
 				if (Array.isArray(entry.bindings) && entry.bindings.length > 0) {
-					bindings[String(entry.id)] = entry.bindings;
+					bindings[id] = entry.bindings;
 				}
 			}
 			const kernel = new Kernel(graph, { maxInFlight: record.maxInFlight, bindings });
 			this.kernel = kernel;
-			const agentById = new Map<string, Agent>();
-			for (const agent of record.graph?.agents ?? []) {
-				if (agent != null && agent.id != null) agentById.set(String(agent.id), agent);
-			}
 			const projected = projectNodes(record);
 			// Restart guards: nodes whose projected status is done/paused never
 			// re-fire from kernel messages — the log is the truth. Kernel queue

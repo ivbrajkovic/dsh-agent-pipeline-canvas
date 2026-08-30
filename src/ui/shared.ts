@@ -223,23 +223,23 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 			y: Math.round(a.y),
 			input: a.id + ":in",
 			output: a.id + ":out",
-	// Declared port lists pass through verbatim (they supersede the legacy
-	// input/output strings during validation and execution).
-	...(a.inputPorts !== undefined ? { inputPorts: a.inputPorts } : {}),
-	...(a.outputPorts !== undefined ? { outputPorts: a.outputPorts } : {}),
-	...(a.bindings !== undefined ? { bindings: a.bindings } : {}),
-	...(a.settings ? { settings: a.settings } : {}),
-	...(a.breakpoint === true ? { breakpoint: true } : {}),
-})),
-connections: connections.map((c) => ({
-	id: c.id,
-	source: c.source,
-	target: c.target,
-	// Wire ids compose from the PORT NAMES (default out/in — byte-identical
-	// to the historical shape on default graphs).
-	sourcePort: c.source + ":" + (c.sourcePort ?? "out"),
-	targetPort: c.target + ":" + (c.targetPort ?? "in"),
-})),
+			// Declared port lists pass through verbatim (they supersede the legacy
+			// input/output strings during validation and execution).
+			...(a.inputPorts !== undefined ? { inputPorts: a.inputPorts } : {}),
+			...(a.outputPorts !== undefined ? { outputPorts: a.outputPorts } : {}),
+			...(a.bindings !== undefined ? { bindings: a.bindings } : {}),
+			...(a.settings ? { settings: a.settings } : {}),
+			...(a.breakpoint === true ? { breakpoint: true } : {}),
+		})),
+		connections: connections.map((c) => ({
+			id: c.id,
+			source: c.source,
+			target: c.target,
+			// Wire ids compose from the PORT NAMES (default out/in — byte-identical
+			// to the historical shape on default graphs).
+			sourcePort: c.source + ":" + (c.sourcePort ?? "out"),
+			targetPort: c.target + ":" + (c.targetPort ?? "in"),
+		})),
 	};
 }
 
