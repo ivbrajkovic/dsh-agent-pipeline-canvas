@@ -2,19 +2,25 @@
 //   tsx test/runs.test.ts
 // Exercises the executor and control plane against SCRIPTED services (the same
 // fake-service style as runner.test.ts): a fake subagent seam whose continuable
-// children settle when the test emits a `subagent/end` payload, a fake agents
-// service that records coordinator create/resume/dispose, and a real temp
-// directory for the per-workspace run records.
+// children settle when the test emits a `subagent/end` payload and whose
+// ONE-SHOT children settle on demand (holdOneshots + resolveOneshot — the
+// marble harness scripts one-shot interleavings too), a fake agents service
+// that records coordinator create/resume/dispose, and a real temp directory
+// for the per-workspace run records.
 //
 // The record is a FIRING LOG (recordVersion 2): per-node behavior is asserted
 // through projectNodes() + the log — a sequential run is the special case of
 // one firing per node, Rerun appends a new firing with the same verbatim
-// input, and steering updates the same firing in place. Legacy v1 records
-// (order + status slots) are covered read-only: the stale-running sweep and
-// the paused-record finalization. Asserts pause/resume ordering, rerun verbatim
-// inputs + fresh child ids, steering to the SAME child, abort preservation, the
-// sweeps, the single-active-run rule, coordinator disposal between operations,
-// and the degraded no-continuable path — all WITHOUT a live model.
+// input, and steering updates the same firing in place. The kernel cases pin
+// the concurrency semantics: fan-out/fan-in (D fires once after both), the
+// maxInFlight cap, bound overflow (drop + record, nothing fires), and
+// quiescence with an unfilled all-of port (the waiting node is reported).
+// Legacy v1 records (order + status slots) are covered read-only: the
+// stale-running sweep and the paused-record finalization. Asserts
+// pause/resume ordering, rerun verbatim inputs + fresh child ids, steering to
+// the SAME child, abort preservation, the sweeps, the single-active-run rule,
+// coordinator disposal between operations, and the degraded no-continuable
+// path — all WITHOUT a live model.
 import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
 import { validateGraph } from "../lib/graph.js";
 import { projectNodes } from "../lib/projection.js";
@@ -40,9 +46,15 @@ const conn = (id: string, source: string, target: string) => ({
 
 type EndListener = (info: { id?: string; stopReason?: string; lastAssistantMessage?: unknown }) => void;
 
+interface HeldOneshot {
+	resolve: (result: { output: Array<{ type: string; text: string }>; stopReason: string }) => void;
+	reject: (error: unknown) => void;
+}
+
 /** The scripted harness: services + recording + a settle() the test drives. */
-function makeHarness(options: { continuable?: boolean } = {}) {
+function makeHarness(options: { continuable?: boolean; holdOneshots?: boolean } = {}) {
 	const continuable = options.continuable !== false;
+	const holdOneshots = options.holdOneshots === true;
 	const listeners = new Set<EndListener>();
 	const starts: Array<{ kind: string; childId: string; label: string; prompt: string; parentId: string; request: Record<string, unknown> }> = [];
 	const followups: Array<{ childId: string; text: string; parentId: string }> = [];
@@ -51,17 +63,29 @@ function makeHarness(options: { continuable?: boolean } = {}) {
 	const coordinatorResumed: string[] = [];
 	const coordinatorDisposed: string[] = [];
 	const liveCoordinators = new Set<string>();
+	const heldOneshots = new Map<string, HeldOneshot>();
 	let seq = 0;
 
 	const subagents = {
 		list: () => ["spawn"],
-		start: (_provider: string, req: { label?: string; prompt: Array<{ text: string }>; parent: { id: string } }) => {
+		start: (_provider: string, req: { label?: string; prompt: Array<{ text: string }>; parent: { id: string }; signal?: AbortSignal }) => {
 			seq += 1;
 			starts.push({ kind: "oneshot", childId: "oneshot-" + seq, label: String(req.label), prompt: req.prompt[0].text, parentId: req.parent.id, request: req as unknown as Record<string, unknown> });
 			const id = "oneshot-" + seq;
+			let result: Promise<{ output: Array<{ type: string; text: string }>; stopReason: string }>;
+			if (holdOneshots) {
+				// Deferred: the test scripts the settlement beat (marble-style).
+				// A run-signal abort rejects, mirroring the real provider.
+				result = new Promise((resolve, reject) => {
+					heldOneshots.set(id, { resolve, reject });
+					req.signal?.addEventListener("abort", () => reject(new Error("aborted: the run signal fired")));
+				});
+			} else {
+				result = Promise.resolve({ output: [{ type: "text", text: "<out:" + req.label + ">" }], stopReason: "completed" });
+			}
 			return {
 				id,
-				result: Promise.resolve({ output: [{ type: "text", text: "<out:" + req.label + ">" }], stopReason: "completed" }),
+				result,
 				dispose: () => Promise.resolve(),
 			};
 		},
@@ -122,8 +146,25 @@ function makeHarness(options: { continuable?: boolean } = {}) {
 			const info = { runId: "run-" + childId, provider: "spawn", id: childId, local: true, stopReason, lastAssistantMessage: [{ type: "text", text: output }] };
 			for (const listener of [...listeners]) listener(info);
 		},
+		/** Settle a HELD one-shot child (holdOneshots) with a successful result. */
+		resolveOneshot(childId: string, output: string, stopReason = "completed") {
+			const deferred = heldOneshots.get(childId);
+			if (deferred === undefined) throw new Error("no held one-shot child \"" + childId + "\"");
+			heldOneshots.delete(childId);
+			deferred.resolve({ output: [{ type: "text", text: output }], stopReason });
+		},
+		/** Fail a HELD one-shot child (holdOneshots): runOneAgent records the error. */
+		failOneshot(childId: string, message: string) {
+			const deferred = heldOneshots.get(childId);
+			if (deferred === undefined) throw new Error("no held one-shot child \"" + childId + "\"");
+			heldOneshots.delete(childId);
+			deferred.reject(new Error(message));
+		},
 	};
 }
+
+/** One macrotask beat: let every pending microtask (kernel loop, writers) run. */
+const beat = () => new Promise<void>((resolve) => { setTimeout(resolve, 15); });
 
 async function withTempDir(fn: (cwd: string) => Promise<void>): Promise<void> {
 	const cwd = await mkdtemp(join(tmpdir(), "pipeline-runs-test-"));
@@ -695,6 +736,161 @@ await withTempDir(async (cwd) => {
 	okCheck("typed: unknown action rejected", badAction.ok === false);
 	const unknown = await registry.control("no-such-run", { action: "resume" }, cwd);
 	okCheck("typed: unknown run rejected", unknown.ok === false);
+});
+
+// --- GATE P3: fan-out/fan-in — B and C run together; D fires once after both
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [agent("a", "Alpha", "A."), agent("b", "Beta", "B."), agent("c", "Gamma", "C."), agent("d", "Delta", "D.")],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+		},
+		input: "hello",
+	});
+	if (!started.ok) { okCheck("fan: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	// B and C are admitted together the moment A emits.
+	await waitFor("b and c admitted together", () => harness.starts.length === 3);
+	okCheck("fan: b and c start concurrently after a, in id order",
+		harness.starts.slice(1).map((s) => s.label).join(",") === "Beta,Gamma");
+	// Settle C first: all-of holds one unconsumed message per wired source, so
+	// D's single shared port waits for Beta.
+	const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+	harness.resolveOneshot(cChild, "<out:Gamma>");
+	await beat();
+	okCheck("fan: d waits while the slower branch is pending", harness.starts.length === 3);
+	const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+	harness.resolveOneshot(bChild, "<out:Beta>");
+	await waitFor("d started once both arrived", () => harness.starts.length === 4);
+	okCheck("fan: d fires exactly once, strictly after the second settle", harness.starts[3].label === "Delta");
+	harness.resolveOneshot(harness.starts[3].childId, "<out:Delta>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("fan: run completed with four done firings",
+		done.state === "completed" && done.firings.length === 4 && done.firings.every((f) => f.status === "done"));
+	okCheck("fan: d fired exactly once", done.firings.filter((f) => f.nodeId === "d").length === 1);
+	okCheck("fan: d composed both sections in sorted order despite the out-of-order settles",
+		done.firings[3].input === "D.\n\n## Beta\n<out:Beta>\n\n## Gamma\n<out:Gamma>");
+});
+
+// --- GATE P3: a wide fan-out respects maxInFlight ----------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const wide = ["b1", "b2", "b3", "b4", "b5", "b6"].map((id, i) => agent(id, "W" + (i + 1), id + "."));
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [agent("a", "Alpha", "A."), ...wide],
+			connections: wide.map((w) => conn("wc-" + w.id, "a", w.id)),
+		},
+		input: "fan",
+		maxInFlight: 2,
+	});
+	if (!started.ok) { okCheck("cap: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	const rec = await registry.getRun(started.runId, cwd);
+	okCheck("cap: the record carries the resolved cap", rec !== null && (rec as RunRecord).maxInFlight === 2);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	await waitFor("first two branches admitted", () => harness.starts.length === 3);
+	okCheck("cap: exactly maxInFlight branches admitted, in id order",
+		harness.starts.slice(1).map((s) => s.label).sort().join(",") === "W1,W2");
+	const childOf = (label: string) => harness.starts.find((s) => s.label === label)!.childId;
+	harness.resolveOneshot(childOf("W1"), "<out:w1>");
+	await waitFor("third branch admitted after the first settle", () => harness.starts.length === 4);
+	okCheck("cap: a branch starts only once a slot frees", harness.starts[3].label === "W3");
+	harness.resolveOneshot(childOf("W2"), "<out:w2>");
+	await waitFor("fourth branch admitted", () => harness.starts.length === 5);
+	okCheck("cap: admission stays in id order", harness.starts[4].label === "W4");
+	harness.resolveOneshot(childOf("W3"), "<out:w3>");
+	harness.resolveOneshot(childOf("W4"), "<out:w4>");
+	await waitFor("last two branches admitted", () => harness.starts.length === 7);
+	okCheck("cap: the tail branches are W5 and W6",
+		harness.starts.slice(5).map((s) => s.label).sort().join(",") === "W5,W6");
+	harness.resolveOneshot(childOf("W5"), "<out:w5>");
+	harness.resolveOneshot(childOf("W6"), "<out:w6>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("cap: completes with every branch done",
+		done.state === "completed" && done.firings.length === 7 && done.firings.every((f) => f.status === "done"));
+});
+
+// --- GATE P3: bound overflow drops + records without firing the node ---------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				agent("b", "Beta", "B."),
+				agent("c", "Gamma", "C."),
+				{ ...agent("d", "Delta", "D."), inputPorts: [{ name: "in", bound: 1 }] },
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("bound: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	await waitFor("b and c admitted", () => harness.starts.length === 3);
+	const childOf = (label: string) => harness.starts.find((s) => s.label === label)!.childId;
+	// Both messages race into d's single bounded port; d cannot start between
+	// them (all-of needs both sources), so the second arrival overflows.
+	harness.resolveOneshot(childOf("Beta"), "<out:Beta>");
+	harness.resolveOneshot(childOf("Gamma"), "<out:Gamma>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("bound: the run still ends at quiescence", done.state === "completed");
+	okCheck("bound: the overflow is recorded against the port",
+		JSON.stringify(done.dropped) === JSON.stringify([{ nodeId: "d", port: "in", from: "c" }]));
+	okCheck("bound: d never fired — the dropped message fires nothing", done.firings.every((f) => f.nodeId !== "d"));
+	okCheck("bound: a, b, c all done", done.firings.length === 3 && done.firings.every((f) => f.status === "done"));
+	okCheck("bound: the starved join surfaces in the run report",
+		harness.warnings.some((w) => w.includes("waiting nodes: d")));
+});
+
+// --- GATE P3: quiescence with an unfilled all-of port reports the waiting node
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, target: string, targetPort: string) => ({
+		id, source, target, sourcePort: source + ":out", targetPort,
+	});
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				agent("f", "Failer", "F."),
+				{ ...agent("d", "Delta", "D."), inputPorts: [{ name: "p1" }, { name: "p2" }] },
+			],
+			connections: [connP("c1", "a", "d", "d:p1"), conn("c2", "a", "f"), connP("c3", "f", "d", "d:p2")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("starve: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:A>");
+	await waitFor("f started", () => harness.starts.length === 2);
+	// f fails: it records the error and emits nothing, so d's p2 never fills.
+	harness.failOneshot(harness.starts[1].childId, "boom");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("starve: the run ends at quiescence, completed", done.state === "completed");
+	okCheck("starve: d never fires with its all-of port unfilled", done.firings.every((f) => f.nodeId !== "d"));
+	okCheck("starve: the failed firing is recorded with its error (P3: not gating)",
+		done.firings.some((f) => f.nodeId === "f" && f.status === "error" && (f.error ?? "").includes("boom")));
+	okCheck("starve: the completed upstream is preserved",
+		done.firings.some((f) => f.nodeId === "a" && f.status === "done" && f.output === "<out:A>"));
+	okCheck("starve: the waiting node is reported",
+		harness.warnings.some((w) => w.includes("waiting nodes: d")));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

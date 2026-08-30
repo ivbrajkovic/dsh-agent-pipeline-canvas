@@ -317,6 +317,7 @@ export function apply(ctx: HostContext): void {
 					cwd: typeof payload.cwd === "string" ? payload.cwd : "",
 					graph: (payload.graph ?? undefined) as PipelineGraph | undefined,
 					input: payload.input,
+					maxInFlight: payload.maxInFlight,
 				});
 				if (outcome.ok) {
 					send(res, 200, { ok: true, runId: outcome.runId });

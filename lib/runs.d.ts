@@ -73,6 +73,7 @@ export declare class RunRegistry {
         cwd: string;
         graph?: PipelineGraph | null;
         input?: unknown;
+        maxInFlight?: unknown;
     }): Promise<{
         ok: true;
         runId: string;

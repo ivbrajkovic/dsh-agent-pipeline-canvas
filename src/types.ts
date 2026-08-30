@@ -439,7 +439,7 @@ export interface RunRecord {
 	graph: PipelineGraph;
 	/** The pipeline-level input the run was started with. */
 	input?: unknown;
-	/** Max firings in flight (executor spec §1); default 4. Reserved until the kernel lands. */
+	/** Max firings in flight (executor spec §1); default 4, set from POST /run. */
 	maxInFlight?: number;
 	/** The firing log — append-ordered, one entry per firing (start order). */
 	firings: RunFiring[];

@@ -22,6 +22,23 @@ node model, and the executor are REBUILT.
   from its persisted id, so with the field removed that gate is unsatisfiable.
   The field stays on the record through P2 (and P3); P4 removes it when
   `nodes[id].parentAnchorSessionId` takes over, as P4's work items already say.
+- **P3** — the plan's all-of rule ("every wired input port holds an unconsumed
+  message") is per-port, which cannot express this phase's own fan-in gate:
+  B and C share D's single default port, so a per-port rule fires D on the
+  first arrival and again on the second. The rule landed per WIRED SOURCE
+  within each port (consume the oldest message per source — exactly the input
+  contract's one-key-per-upstream shape); any-of consumes the port's single
+  head message and never blocks. Also: the quiescence starving report surfaces
+  through the executor log, not a new record field (the P2-pinned record
+  schema stays untouched), restart does not reconstruct kernel queue state
+  (nodes the log marks done never re-fire; P5's pending-pause queue owns
+  crash-safe reconstruction), and the settled-breakpoint FIFO is P5 surface
+  landed early in minimal in-memory form because concurrent branches can
+  settle while parked. En route: Windows intermittently EPERMs the atomic
+  rename's rename leg (storage.ts now retries), and terminal finalization had
+  to await its commit before the executor leaves the registry — otherwise a
+  concurrent workspace load sweeps the stale `running` disk snapshot over a
+  completed run.
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from

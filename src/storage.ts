@@ -12,6 +12,33 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 /**
+ * On Windows the rename leg intermittently fails with EPERM/EACCES: a freshly
+ * closed file can be momentarily held by the OS (Defender scans, the indexer,
+ * search indexing) and `rename()` over it is rejected for a few milliseconds.
+ * The write is retried with a small backoff — the protocol only needs the
+ * rename to EVENTUALLY land, and the temp file is fresh every attempt.
+ */
+const RENAME_RETRIES = 8;
+const RETRY_DELAY_MS = 25;
+
+function isTransientRenameError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | null)?.code;
+	return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await rename(from, to);
+			return;
+		} catch (error) {
+			if (attempt >= RENAME_RETRIES || !isTransientRenameError(error)) throw error;
+			await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+		}
+	}
+}
+
+/**
  * Durably replace `path` with `data`: write a same-directory temp file, fsync
  * it, then `rename()` over the target. A failed write cleans up the temp file.
  * Mirrors the product's JSON-storage backend write protocol.
@@ -29,7 +56,7 @@ export async function writeAtomic(path: string, data: string): Promise<void> {
 		} finally {
 			await handle.close();
 		}
-		await rename(tmp, path);
+		await renameWithRetry(tmp, path);
 	} catch (error) {
 		try { await rm(tmp, { force: true }); } catch { /* best-effort cleanup */ }
 		throw error;

@@ -84,7 +84,7 @@ function idOf(value: unknown): string {
 }
 
 /** Deterministic byte-order comparison (pure; identical across runtimes). */
-function cmp(a: string, b: string): number {
+export function cmp(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
 

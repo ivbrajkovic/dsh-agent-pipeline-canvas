@@ -15,11 +15,12 @@ function RunModal({ cwd, initialText, initialFiles, running, fileList, onRun, on
 	initialFiles: string[];
 	running: boolean;
 	fileList: ((query: string, signal: AbortSignal) => Promise<FileRefCandidate[]>) | null;
-	onRun: (text: string, files: string[]) => void;
+	onRun: (text: string, files: string[], maxInFlight: number | null) => void;
 	onClose: () => void;
 }) {
 	const [text, setText] = React.useState(initialText);
 	const [files, setFiles] = React.useState<string[]>(initialFiles);
+	const [maxInFlight, setMaxInFlight] = React.useState("4");
 	const [query, setQuery] = React.useState("");
 	const [candidates, setCandidates] = React.useState<FileRefCandidate[]>([]);
 	const [pickerState, setPickerState] = React.useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -157,12 +158,25 @@ function RunModal({ cwd, initialText, initialFiles, running, fileList, onRun, on
 				<div className="pipeline-picker-status">
 					Files attach as absolute paths only — the first agent reads them with its own tools.
 				</div>
+				<div className="modal-row">
+					<label>Max agents in flight</label>
+					<input
+						value={maxInFlight}
+						inputMode="numeric"
+						placeholder="4"
+						onChange={(e) => { setMaxInFlight(e.target.value); }}
+						onKeyDown={stopKey}
+					/>
+				</div>
 				<div className="pipeline-modal-actions">
 					<button className="pipeline-btn" onClick={onClose}>Cancel</button>
 					<button
 						className="pipeline-btn pipeline-btn-run"
 						disabled={running}
-						onClick={() => { onRun(text, files); }}
+						onClick={() => {
+							const parsed = Number.parseInt(maxInFlight, 10);
+							onRun(text, files, Number.isInteger(parsed) && parsed >= 1 ? parsed : null);
+						}}
 					>{running ? "Running…" : "Run"}</button>
 				</div>
 			</div>

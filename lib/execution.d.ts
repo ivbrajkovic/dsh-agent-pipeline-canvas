@@ -1,6 +1,8 @@
 import type { Agent, AgentExecutionInput, AgentInputContext, ClassifiedGraph, PortGraph, PipelineExecutionResult } from "./types.ts";
 /** Reserved key that carries the pipeline-level input to a root agent. */
 export declare const INPUT_KEY = "$input";
+/** Deterministic byte-order comparison (pure; identical across runtimes). */
+export declare function cmp(a: string, b: string): number;
 /**
  * Derive the runtime structure of a graph. This is the classification a runner
  * uses to decide what to run, feed, and collect. It is derived purely from the

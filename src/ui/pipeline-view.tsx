@@ -314,11 +314,12 @@ function PipelineView({
 		return { ok: true, outputs, runs, ...(rec.state === "aborted" ? { aborted: true } : {}) };
 	}
 
-	// Start a durable run: POST the snapshot the user currently sees (plus the
-	// composed pipeline input and the workspace root) and subscribe to the
-	// run's SSE stream. The Host validates, enforces the single-active-run rule
-	// (409 with the other run's id), and returns the runId immediately.
-	function run(text: string, files: string[]) {
+	// Start a durable run: POST the snapshot the user currently shows (plus the
+	// composed pipeline input, the optional concurrency cap, and the workspace
+	// root) and subscribe to the run's SSE stream. The Host validates, enforces
+	// the single-active-run rule (409 with the other run's id), and returns the
+	// runId immediately.
+	function run(text: string, files: string[], maxInFlight: number | null) {
 		if (runActive || startPending) return;
 		runTextRef.current = text;
 		runFilesRef.current = files;
@@ -337,7 +338,13 @@ function PipelineView({
 		fetch(ENDPOINT + "/run", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ sessionId, cwd: workspace, graph: g, input: composePipelineInput(text, files) }),
+			body: JSON.stringify({
+				sessionId,
+				cwd: workspace,
+				graph: g,
+				input: composePipelineInput(text, files),
+				...(maxInFlight !== null ? { maxInFlight } : {}),
+			}),
 		})
 			.then(async (r) => {
 				let data: { ok?: unknown; runId?: unknown; error?: unknown; activeRunId?: unknown } | null = null;
