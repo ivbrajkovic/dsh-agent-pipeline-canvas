@@ -16,6 +16,10 @@
 // (Resume / Rerun / Steer / Abort). On a terminal state (completed / aborted /
 // error) the result modal opens. A page reload re-discovers the active run via
 // the pipeline GET's `run` field and re-subscribes — runs outlive the tab.
+// When nothing is active, the same GET's `lastRun` (the newest record of any
+// state) restores the last run's outcome after a remount: the Result button
+// returns and the nodes keep their final statuses; the modal itself stays
+// closed (the user closed it before leaving).
 import * as React from "react";
 import { validateGraph } from "../graph.ts";
 import { classifyGraph, topoOrder } from "../execution.ts";
@@ -75,6 +79,10 @@ function PipelineView({
 	const [startPending, setStartPending] = React.useState(false);
 	const [runResult, setRunResult] = React.useState<RunResultLike | null>(null);
 	const [resultOpen, setResultOpen] = React.useState(false);
+	// The most recent TERMINAL record, kept so the canvas keeps showing the
+	// per-node statuses after the run ends (and after a remount restores it);
+	// an active run's live projection takes precedence while one exists.
+	const [doneRun, setDoneRun] = React.useState<RunRecordLike | null>(null);
 	const [continueBusy, setContinueBusy] = React.useState<string | null>(null);
 	const [continueStatus, setContinueStatus] = React.useState<string | null>(null);
 	// The paused-run inspection modal: closed per (run, agent) by the user.
@@ -246,7 +254,7 @@ function PipelineView({
 		setAgents([]); setConnections([]); setSelectedId(null); setHoverTarget(null); setConnectCursor(null);
 		dragRef.current = null; connectRef.current = null;
 		setSeq(1); idRef.current = 0;
-		setRunResult(null); setResultOpen(false); setShowRunModal(false);
+		setRunResult(null); setResultOpen(false); setShowRunModal(false); setDoneRun(null);
 		runTextRef.current = ""; runFilesRef.current = [];
 	}
 
@@ -258,10 +266,15 @@ function PipelineView({
 
 	const runActive = activeRun !== null && (activeRun.state === "running" || activeRun.state === "paused");
 	// The record is a firing log; the per-node view is computed, never stored.
-	// pausedAt points at a FIRING; the projection resolves it to its node and
-	// derives the pending-pause queue (head first) — several breakpoints may
-	// be parked at once, and the modal/label surface the head plus the depth.
-	const runProjection = runActive && activeRun !== null ? projectNodes(activeRun) : null;
+	// While a run is active its live projection drives the nodes; otherwise the
+	// last terminal record does (restored after a remount), so finished nodes
+	// keep their statuses. pausedAt points at a FIRING; the projection resolves
+	// it to its node and derives the pending-pause queue (head first) — several
+	// breakpoints may be parked at once, and the modal/label surface the head
+	// plus the depth.
+	const runProjection = runActive && activeRun !== null
+		? projectNodes(activeRun)
+		: doneRun !== null ? projectNodes(doneRun) : null;
 	const pausedNodeId = runActive && activeRun?.state === "paused" ? runProjection?.pausedNodeId ?? null : null;
 	// Fail-fast (P6): the failed firing commits while the run is still draining
 	// its in-flight siblings — surface it live on the banner (the node chip
@@ -309,6 +322,7 @@ function PipelineView({
 		}
 		disconnectRunEvents();
 		setActiveRun(null);
+		setDoneRun(rec);
 		setRunResult(recordToResult(rec));
 		setResultOpen(true);
 	}
@@ -317,14 +331,20 @@ function PipelineView({
 	// terminal id (only agents that produced an output) plus per-agent statuses,
 	// all through the projection (the record itself is a firing log). The rows
 	// walk the snapshot's topological order so never-started agents still list
-	// as "pending" — the projection only knows nodes that fired.
-	function recordToResult(rec: RunRecordLike): RunResultLike {
+	// as "pending" — the projection only knows nodes that fired. `list`
+	// overrides the current canvas agents for the label lookup — the load path
+	// calls this before the parsed agents have landed in state.
+	function recordToResult(rec: RunRecordLike, list?: CanvasAgent[]): RunResultLike {
+		const nameIn = (id: string): string => {
+			for (const a of list ?? agents) if (a.id === id) return a.name;
+			return id;
+		};
 		const projection = projectNodes(rec);
 		const runs = topoOrder(rec.graph).map((id) => {
 			const node = projection.nodes[id];
 			return {
 				id,
-				label: nameOf(id),
+				label: nameIn(id),
 				status: node?.status ?? "pending",
 				...(node?.error ? { error: node.error } : {}),
 				...(node?.childSessionId ? { childSessionId: node.childSessionId } : {}),
@@ -360,6 +380,7 @@ function PipelineView({
 		const g = buildGraph(agents, connections);
 		setStartPending(true);
 		setRunResult(null);
+		setDoneRun(null);
 		setShowRunModal(false);
 		setInspectDismissedFor(null);
 		setControlStatus(null);
@@ -595,21 +616,22 @@ function PipelineView({
 				const cs = p && Array.isArray(p.connections) ? p.connections : [];
 				skipNextPersistRef.current = true;
 				loadedRef.current = true;
-				setAgents(as.map((a: unknown) => {
-					const loaded = loadAgent(a);
+				const loaded = as.map((a: unknown) => {
+					const load = loadAgent(a);
 					const r = (a ?? {}) as { id?: unknown; name?: unknown; description?: unknown; instructions?: unknown; x?: unknown; y?: unknown; breakpoint?: unknown };
 					return {
 						id: String(r.id), name: String(r.name), description: String(r.description || ""),
-						...(loaded.systemPrompt.length > 0 ? { systemPrompt: loaded.systemPrompt } : {}),
+						...(load.systemPrompt.length > 0 ? { systemPrompt: load.systemPrompt } : {}),
 						instructions: String(r.instructions || ""),
 						x: Number(r.x) || 0, y: Number(r.y) || 0,
-						...(loaded.inputPorts !== undefined ? { inputPorts: loaded.inputPorts } : {}),
-						...(loaded.outputPorts !== undefined ? { outputPorts: loaded.outputPorts } : {}),
-						...(loaded.bindings !== undefined ? { bindings: loaded.bindings } : {}),
-						settings: loaded.settings,
+						...(load.inputPorts !== undefined ? { inputPorts: load.inputPorts } : {}),
+						...(load.outputPorts !== undefined ? { outputPorts: load.outputPorts } : {}),
+						...(load.bindings !== undefined ? { bindings: load.bindings } : {}),
+						settings: load.settings,
 						...(r.breakpoint === true ? { breakpoint: true } : {}),
 					};
-				}));
+				});
+				setAgents(loaded);
 				setConnections(cs.map((c: { id: unknown; source: unknown; target: unknown; sourcePort?: unknown; targetPort?: unknown }) => {
 					const source = String(c.source);
 					const target = String(c.target);
@@ -638,6 +660,18 @@ function PipelineView({
 				if (active !== null && (active.state === "running" || active.state === "paused") && typeof active.runId === "string") {
 					setActiveRun(active);
 					connectRunEvents(active.runId);
+				} else {
+					// Nothing active: restore the last run's outcome from the GET's
+					// `lastRun` so the Result button and the per-node statuses
+					// survive leaving and re-entering the view. The modal stays
+					// closed — the user closed it deliberately.
+					const last = data && data.ok === true && data.lastRun !== null && typeof data.lastRun === "object"
+						? data.lastRun as RunRecordLike
+						: null;
+					if (last !== null && last.state !== "running" && last.state !== "paused") {
+						setDoneRun(last);
+						setRunResult(recordToResult(last, loaded));
+					}
 				}
 			})
 			.catch(() => { loadedRef.current = true; });

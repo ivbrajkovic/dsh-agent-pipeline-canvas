@@ -44,6 +44,11 @@ tab, or even the profile's lifetime — runs outlive the tab by design (use
 - A page reload re-discovers the workspace's active run through the `run`
   field of `GET /dsh-agent-pipeline?cwd=…` — mid-run reloads re-attach and
   the run continues.
+- When nothing is active, the same GET's `lastRun` field (the newest record
+  of any state) restores the **last run's outcome** after leaving and
+  re-entering the view (or a reload): the Result button returns to the
+  toolbar and the nodes keep their final statuses. The result modal itself
+  stays closed — reopen it with the button.
 - The full record is fetchable for debugging via
   `GET /dsh-agent-pipeline/run?id=…&cwd=…`.
 

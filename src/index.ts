@@ -7,9 +7,11 @@
 // same-origin:
 //
 //   GET  /dsh-agent-pipeline?cwd=<absolute project root>
-//        -> { ok, pipeline: <graph> | null, validation, run: <active record|null> }
+//        -> { ok, pipeline: <graph> | null, validation, run, lastRun }
 //        (no file yet => null; `run` carries the workspace's active run record
-//        — running or paused — so a reload discovers it without a list route)
+//        — running or paused — so a reload discovers it without a list route;
+//        `lastRun` is the newest record of any state, null while a run is
+//        active — a remounted canvas restores the last run's result from it)
 //   POST /dsh-agent-pipeline   body { cwd, graph }
 //        -> { ok, validation }                     (writes the file)
 //   POST /dsh-agent-pipeline/run  body { sessionId, cwd, graph, input }
@@ -247,8 +249,12 @@ export function apply(ctx: HostContext): void {
 					// `run` is the workspace's active run record (running|paused) —
 					// the discovery path for a page reload; loading it also sweeps
 					// stale runs and resurrects paused ones (see lib/runs.ts).
+					// `lastRun` (only resolved when nothing is active) is the newest
+					// record of ANY state — the discovery path from which a
+					// remounted canvas restores the last run's result.
 					const run = await registry.activeRunForCwd(cwd);
-					send(res, 200, { ok: true, pipeline, validation: validateGraph(pipeline), ...(run !== null ? { run } : { run: null }) });
+					const lastRun = run === null ? await registry.latestRunForCwd(cwd) : null;
+					send(res, 200, { ok: true, pipeline, validation: validateGraph(pipeline), ...(run !== null ? { run } : { run: null }), ...(lastRun !== null ? { lastRun } : { lastRun: null }) });
 					return;
 				}
 

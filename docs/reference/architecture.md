@@ -48,7 +48,7 @@ row `agent-pipeline-canvas` and registers exact `webServer` routes:
 
 | Route | Purpose |
 |-------|---------|
-| `GET\|POST /dsh-agent-pipeline` | Persistence. `GET ?cwd=<absolute project root>` reads `<cwd>/.agent-pipeline/pipeline.json` (or `null` when absent) and also returns `run` — the workspace's active run record (or `null`). `POST { cwd, graph }` writes it atomically. A relative or empty `cwd` is refused, so the file can only land under a real project directory. Both responses carry a `validation` field (the `validateGraph` result for the graph on disk) without changing the load/save behaviour. |
+| `GET\|POST /dsh-agent-pipeline` | Persistence. `GET ?cwd=<absolute project root>` reads `<cwd>/.agent-pipeline/pipeline.json` (or `null` when absent) and also returns `run` — the workspace's active run record (or `null`) — plus `lastRun`, the newest record of any state (or `null` while a run is active), from which a remounted canvas restores the last run's result. `POST { cwd, graph }` writes it atomically. A relative or empty `cwd` is refused, so the file can only land under a real project directory. Both responses carry a `validation` field (the `validateGraph` result for the graph on disk) without changing the load/save behaviour. |
 | `POST /dsh-agent-pipeline/run` | Starts a durable run and returns `{ ok, runId }` immediately. One run is active per workspace — a second concurrent start answers `409 { ok: false, activeRunId }`. |
 | `GET /dsh-agent-pipeline/run` | One run's full record (`?id=…&cwd=…`; debug/fallback for the SSE stream). |
 | `GET /dsh-agent-pipeline/run/events` | The run's SSE stream: `event: snapshot` (full record) on every connect/reconnect, `event: update` per transition. |

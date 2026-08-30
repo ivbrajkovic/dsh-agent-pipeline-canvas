@@ -45,7 +45,11 @@
 // concurrent commits are always whole, gap-free, and never regress, and no
 // commit lands after finalization), determinism (the same scripted run twice
 // yields an identical firing structure, ready order by node id), and the
-// DEFAULT maxInFlight of 4 on a wide fan-out.
+// DEFAULT maxInFlight of 4 on a wide fan-out. The latest-run discovery
+// (`latestRunForCwd`) pins the remount path that restores the canvas's Result
+// view: the newest record of any state wins (a stale running entry sweeps to
+// aborted first), a live executor preempts the disk scan, and a settled run is
+// served from disk.
 import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
 import { validateGraph } from "../lib/graph.js";
 import { projectNodes } from "../lib/projection.js";
@@ -580,6 +584,102 @@ await withTempDir(async (cwd) => {
 	// Swept terminal run accepts no control commands.
 	const controlled = await registry.control("stale-v2", { action: "resume" }, cwd);
 	okCheck("sweep: terminal run rejects control", controlled.ok === false);
+});
+
+// --- latestRunForCwd: the remount discovery path (canvas Result restoration) -
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	okCheck("latest: no runs directory -> null", (await registry.latestRunForCwd(cwd)) === null);
+	// A completed record, then a NEWER stale-running one left by a dead process:
+	// the stale one sweeps to aborted and wins as the latest (newest updatedAt).
+	const older: RunRecord = {
+		runId: "older-done",
+		cwd,
+		sessionId: "sess",
+		createdAt: new Date(Date.now() - 120000).toISOString(),
+		updatedAt: new Date(Date.now() - 60000).toISOString(),
+		state: "completed",
+		graph: { agents: [agent("a", "Alpha", "A.")], connections: [] },
+		input: "x",
+		recordVersion: 2,
+		firings: [
+			{ firingId: "f-001", nodeId: "a", seq: 1, status: "done", input: "a prompt", output: "<out:Alpha>", stopReason: "completed", childSessionId: "oneshot-1", startedAt: "t", settledAt: "t" },
+		],
+		nodes: {},
+	};
+	const newer: RunRecord = {
+		runId: "newer-stale",
+		cwd,
+		sessionId: "sess",
+		createdAt: new Date(Date.now() - 30000).toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "running",
+		graph: { agents: [agent("a", "Alpha", "A.")], connections: [] },
+		input: "y",
+		recordVersion: 2,
+		firings: [
+			{ firingId: "f-001", nodeId: "a", seq: 1, status: "running", input: "a prompt", startedAt: "t" },
+		],
+		nodes: {},
+	};
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "older-done.json"), JSON.stringify(older, null, 2));
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "newer-stale.json"), JSON.stringify(newer, null, 2));
+	const latest = await registry.latestRunForCwd(cwd);
+	okCheck("latest: the newest record wins regardless of state", latest !== null && latest.runId === "newer-stale");
+	okCheck("latest: the stale running record is swept first", latest !== null && latest.state === "aborted");
+	okCheck("latest: the swept record's in-flight firing is honestly aborted",
+		latest !== null && projectNodes(latest).nodes.a.status === "aborted");
+	okCheck("latest: the older completed record is untouched on disk",
+		(await registry.getRun("older-done", cwd)) !== null && projectNodes((await registry.getRun("older-done", cwd)) as RunRecord).nodes.a.status === "done");
+	okCheck("latest: activeRunForCwd still reports nothing active", (await registry.activeRunForCwd(cwd)) === null);
+});
+
+// --- latestRunForCwd: a live executor is the latest run, disk after settle ---
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [agent("a", "Alpha", "A.")], connections: [] },
+		input: "hello",
+	});
+	if (!started.ok) { okCheck("latest-live: start ok", false); return; }
+	const live = await registry.latestRunForCwd(cwd);
+	okCheck("latest-live: the active run is reported while in memory",
+		live !== null && live.runId === started.runId && live.state === "running");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	const settled = await registry.latestRunForCwd(cwd);
+	okCheck("latest-live: after settlement the completed record is reported from disk",
+		done.state === "completed" && settled !== null && settled.runId === started.runId && settled.state === "completed");
+});
+
+// --- latestRunForCwd: a stampless record competes on createdAt, never pins ---
+// Only hand-edited files can lack stamps; the pick must still stay sane.
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const base = {
+		runId: "", cwd, sessionId: "sess", createdAt: "", updatedAt: "",
+		state: "completed" as const,
+		graph: { agents: [agent("a", "Alpha", "A.")], connections: [] },
+		input: "x", recordVersion: 2, firings: [], nodes: {},
+	};
+	const olderDone = { ...base, runId: "older-done", createdAt: new Date(Date.now() - 60000).toISOString(), updatedAt: new Date(Date.now() - 60000).toISOString() };
+	const newerStampless = { ...base, runId: "newer-stampless", createdAt: new Date().toISOString() };
+	delete (newerStampless as { updatedAt?: string }).updatedAt; // createdAt competes
+	const blank = { ...base, runId: "blank" };
+	delete (blank as { createdAt?: string }).createdAt;
+	delete (blank as { updatedAt?: string }).updatedAt; // no stamps: loses to everything
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	for (const rec of [olderDone, newerStampless, blank]) {
+		await writeFile(join(cwd, ".agent-pipeline", "runs", rec.runId + ".json"), JSON.stringify(rec, null, 2));
+	}
+	const latest = await registry.latestRunForCwd(cwd);
+	okCheck("latest-stamp: the stampless record wins via createdAt, the stampless blank never pins",
+		latest !== null && latest.runId === "newer-stampless");
 });
 
 // --- stale LEGACY v1 record: same sweep semantics, read-only ----------------

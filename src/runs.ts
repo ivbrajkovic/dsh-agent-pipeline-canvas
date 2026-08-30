@@ -1651,6 +1651,48 @@ export class RunRegistry {
 	}
 
 	/**
+	 * The workspace's most recent record of ANY state — the discovery path that
+	 * lets a remounted canvas restore the last run's outcome (the Result button
+	 * and the per-node statuses) after its live view is gone. Runs in a
+	 * workspace are serialized (one active run at a time, a new run starts only
+	 * after the previous one settled), so the newest `updatedAt` is the latest
+	 * run. An in-memory executor is always that run (settled executors leave
+	 * the map); on disk a stale `running` record is swept and a `paused` one
+	 * resurrected exactly like `activeRunForCwd` before the newest wins. A
+	 * parseable record missing stamps can only come from hand editing — it
+	 * compares on `createdAt`, then loses — so it can never pin the pick.
+	 */
+	async latestRunForCwd(cwd: unknown): Promise<RunRecord | LegacyRunRecord | null> {
+		if (typeof cwd !== "string" || cwd.length === 0 || !isAbsolute(cwd)) return null;
+		let best: RunRecord | LegacyRunRecord | null = null;
+		let bestStamp = "";
+		for (const executor of this.executors.values()) {
+			const rec = executor.record;
+			if (rec.cwd !== cwd) continue;
+			if (best === null || rec.updatedAt > bestStamp) { best = rec; bestStamp = rec.updatedAt; }
+		}
+		if (best !== null) return best;
+		let entries: string[];
+		try {
+			entries = await readdir(join(cwd, RUNS_DIR));
+		} catch {
+			return null; // no runs directory yet
+		}
+		for (const entry of entries) {
+			if (!entry.endsWith(".json")) continue;
+			const rec = await readRecordFile(join(cwd, RUNS_DIR, entry));
+			if (rec === null || rec.cwd !== cwd) continue;
+			if (this.executors.has(rec.runId)) continue; // in-memory state is fresher
+			if (rec.state === "running" || rec.state === "paused") await this.sweepOrResurrect(rec);
+			const stamp = typeof rec.updatedAt === "string"
+				? rec.updatedAt
+				: typeof rec.createdAt === "string" ? rec.createdAt : "";
+			if (best === null || stamp > bestStamp) { best = rec; bestStamp = stamp; }
+		}
+		return best;
+	}
+
+	/**
 	 * One run's full record: in-memory when an executor holds it, else from
 	 * disk under `cwd` (loading/sweeping the workspace first, so a stale
 	 * running record is swept and a paused one resurrected before it is read).

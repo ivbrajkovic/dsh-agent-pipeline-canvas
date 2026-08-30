@@ -89,6 +89,19 @@ export declare class RunRegistry {
      */
     activeRunForCwd(cwd: unknown): Promise<RunRecord | null>;
     /**
+     * The workspace's most recent record of ANY state — the discovery path that
+     * lets a remounted canvas restore the last run's outcome (the Result button
+     * and the per-node statuses) after its live view is gone. Runs in a
+     * workspace are serialized (one active run at a time, a new run starts only
+     * after the previous one settled), so the newest `updatedAt` is the latest
+     * run. An in-memory executor is always that run (settled executors leave
+     * the map); on disk a stale `running` record is swept and a `paused` one
+     * resurrected exactly like `activeRunForCwd` before the newest wins. A
+     * parseable record missing stamps can only come from hand editing — it
+     * compares on `createdAt`, then loses — so it can never pin the pick.
+     */
+    latestRunForCwd(cwd: unknown): Promise<RunRecord | LegacyRunRecord | null>;
+    /**
      * One run's full record: in-memory when an executor holds it, else from
      * disk under `cwd` (loading/sweeping the workspace first, so a stale
      * running record is swept and a paused one resurrected before it is read).
