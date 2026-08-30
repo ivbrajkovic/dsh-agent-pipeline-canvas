@@ -1,4 +1,4 @@
-import type { PortGraph } from "./types.ts";
+import type { OutputBinding, PortGraph } from "./types.ts";
 /** The synthetic source node's id — the key the run input composes under. */
 export declare const SOURCE_NODE_ID = "$input";
 /** Default concurrent-firing cap (executor spec §1). */
@@ -21,6 +21,12 @@ export interface KernelDrop {
 export interface KernelOptions {
     /** Max firings in flight; DEFAULT_MAX_IN_FLIGHT when absent/invalid. */
     maxInFlight?: unknown;
+    /**
+     * Output-port bindings per node id (selective emission — the node model's
+     * `bindings` field, lifted from the graph snapshot). A node absent from the
+     * map emits non-selectively (every output port).
+     */
+    bindings?: Record<string, OutputBinding[]>;
 }
 /**
  * The firing kernel over one immutable graph snapshot. The executor drives it:
@@ -33,7 +39,9 @@ export declare class Kernel {
     /** Max concurrent firings (executor spec §1); the executor enforces it. */
     readonly maxInFlight: number;
     private readonly ports;
-    private readonly outEdges;
+    /** Output ports per node, declaration order — the emission fan-out map. */
+    private readonly outPorts;
+    private readonly bindings;
     private inFlightCount;
     private haltedFlag;
     private readonly firedNodes;
@@ -52,9 +60,11 @@ export declare class Kernel {
     notify(): void;
     /**
      * Deliver one message to a node's input port (wire port id). Enforces the
-     * port's delivery bound: when the port already queues its bound, the
-     * ARRIVING message is dropped (design principle 4 — "further messages are
-     * dropped") and returned as a record entry; nothing fires for it.
+     * port's delivery bound (design principle 4 — the loop budget): when the
+     * port has already ACCEPTED its bound this run, the ARRIVING message is
+     * dropped and returned as a record entry; nothing fires for it. The count
+     * is deliveries, not backlog — a cycle's consumer drains each message
+     * before the next arrives, so only a delivery cap can overflow a loop.
      */
     deliver(targetId: string, targetPortId: string, message: KernelMessage): KernelDrop | null;
     /**
@@ -73,11 +83,25 @@ export declare class Kernel {
      */
     takeForFiring(nodeId: string): KernelMessage[];
     /**
-     * Emit one firing's output from `nodeId`: P3 emission is non-selective —
-     * the message is copied to every edge of every output port (selective
-     * emission and bindings are P7). Returns the bound overflows to record.
+     * Emit one firing's output from `nodeId` — SELECTIVE emission (conditional-
+     * dispatch §2). Without bindings the message is copied to every edge of
+     * every output port (the default-graph behavior, unchanged). With bindings,
+     * the first binding matching the firing's STRUCTURED result selects its
+     * port; no match — or no structured result at all — selects NO port (the
+     * honest quiet: starved downstream nodes surface in the run report, and the
+     * empty selection is what the firing's `emittedTo` records). Returns the
+     * selected port names plus the bound overflows to record.
      */
-    emit(nodeId: string, output: string): KernelDrop[];
+    emit(nodeId: string, output: string, structured?: unknown): {
+        ports: string[];
+        drops: KernelDrop[];
+    };
+    /**
+     * The ports one firing emits on: every declared port for an unbound node;
+     * otherwise the first matched binding's port (when the node declares it —
+     * validateGraph reports the mismatch, the kernel stays total), else none.
+     */
+    private selectEmissionPorts;
     /**
      * The run's end predicate: nothing in flight and nothing fireable outside
      * `exclude` (the executor's restart guard — nodes the log already
@@ -92,9 +116,11 @@ export declare class Kernel {
      * messages never (all) arrived, or they declare no input ports at all
      * (a port-less node can never fire — surfaced as starvation, not an error).
      * Sorted; the executor subtracts nodes already satisfied by the log before
-     * reporting. Known limitation (fine until P7's cycles): a node that DID
-     * fire but now waits on an unsatisfied re-firing round is not reported —
-     * extend this to unsatisfied all-of ports generally when re-firing lands.
+     * reporting. Known shape of the report (fine in practice): a node that DID
+     * fire but now waits on an unsatisfied re-firing round is not listed —
+     * harmless because the executor's completed-finalize filter excludes every
+     * done/paused node anyway, and a run whose fired node is left non-done
+     * finalizes through fail-fast, not here.
      */
     starvingCandidates(): string[];
     /**

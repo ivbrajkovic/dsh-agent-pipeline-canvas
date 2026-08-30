@@ -69,6 +69,7 @@ import type {
 	AgentExecutionInput,
 	AgentInputContext,
 	ClassifiedGraph,
+	OutputBinding,
 	PortGraph,
 	PortNode,
 	ResolvedInputPort,
@@ -303,6 +304,40 @@ export function portGraph(graph: unknown): PortGraph {
 	}
 
 	return { ids, byId };
+}
+
+/**
+ * Evaluate a node's output-port bindings against one firing's structured
+ * result (conditional-dispatch §2 — the executor-side comparison, no extra
+ * model call). Bindings hold in declaration order and the FIRST match wins:
+ * its `port` is the emission port. A binding without `value` is the
+ * catch-all — it matches any structured result regardless of the field, so
+ * the author orders it last. Field equality is strict with a String-coerced
+ * fallback (a schema number matches a "1"-typed binding value). Returns the
+ * matched PORT NAME, or null when there are no bindings, no structured
+ * result, or no match — a bound node emits on no port (the honest quiet; the
+ * starved downstream nodes surface in the run report).
+ *
+ * Total over malformed entries (a binding that names no field or port is
+ * skipped, never thrown) — validateGraph reports the declarations.
+ */
+export function evaluateBindings(bindings: readonly OutputBinding[] | undefined | null, structured: unknown): string | null {
+	if (!Array.isArray(bindings) || bindings.length === 0) return null;
+	if (structured === undefined || structured === null) return null;
+	const record = typeof structured === "object" ? (structured as Record<string, unknown>) : {};
+	for (const binding of bindings) {
+		if (binding === null || typeof binding !== "object") continue;
+		const port = typeof binding.port === "string" && binding.port.length > 0 ? binding.port : null;
+		if (port === null) continue;
+		if (binding.value === undefined) return port;
+		const field = typeof binding.field === "string" ? binding.field : "";
+		if (field.length === 0) continue;
+		const actual = record[field];
+		if (actual === binding.value || (actual !== undefined && actual !== null && String(actual) === String(binding.value))) {
+			return port;
+		}
+	}
+	return null;
 }
 
 /**

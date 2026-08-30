@@ -30,6 +30,10 @@
 //     optional delivery bound; `outputPorts` declares named output ports; a
 //     present list replaces the single default. Wire port ids are
 //     `<agentId>:<portName>`.
+//   - A node's `bindings` list (conditional dispatch) makes its emission
+//     selective: each rule maps a structured-output field to a port
+//     (`field == value → port`, first match wins; `value` omitted = catch-all).
+//     The executor compares the fields — no extra model call decides routing.
 //   - Fan-out is allowed: an output port may feed many targets (a source id may
 //     appear in many connections).
 //   - Fan-in is allowed: an input port may receive from many sources (all edges
@@ -124,6 +128,41 @@ export function validateGraph(graph: unknown): ValidationResult {
 	// One shared derivation with the run kernel: which ports exist, their wire
 	// ids, and which edges attach where.
 	const ports = portGraph(graph);
+
+	// ---- Output bindings (selective emission — conditional-dispatch §2) ----
+	// A binding is data on the node: an array of { field, port, value? } rules
+	// the executor evaluates against the firing's structured result. The
+	// declaration must be well-shaped and each binding's port must name one of
+	// the agent's DECLARED (or default) output ports — the same membership a
+	// connection's source port must satisfy. Whether a binding will actually
+	// match a run's result is data, not shape: never validated here.
+	for (const agent of agents) {
+		if (agent == null || typeof agent !== "object") continue;
+		const rec = agent as { id?: unknown; bindings?: unknown };
+		if (rec.bindings === undefined) continue;
+		const id = rec.id == null ? "" : String(rec.id);
+		const declared = ports.byId[id]?.outputs.map((p) => p.name) ?? [];
+		if (!Array.isArray(rec.bindings)) {
+			errors.push({ code: "agent-binding-invalid", message: `agent "${id}" has an invalid bindings declaration (must be an array)` });
+			continue;
+		}
+		(rec.bindings as unknown[]).forEach((entry, index) => {
+			const binding = entry as { field?: unknown; port?: unknown; value?: unknown } | null | undefined;
+			const field = binding != null && typeof binding === "object" && typeof binding.field === "string" ? binding.field : "";
+			if (field.length === 0) {
+				errors.push({ code: "agent-binding-invalid", message: `agent "${id}" has an output binding without a field (binding #${index + 1})` });
+				return;
+			}
+			const port = binding != null && typeof binding === "object" && typeof binding.port === "string" ? binding.port : "";
+			if (port.length === 0) {
+				errors.push({ code: "agent-binding-invalid", message: `agent "${id}" binding "${field}" names no output port` });
+				return;
+			}
+			if (!declared.includes(port)) {
+				errors.push({ code: "agent-binding-port-mismatch", message: `agent "${id}" binding "${field}" targets port "${port}" but "${id}" declares output ports: ${declared.length > 0 ? declared.join(", ") : "none"}` });
+			}
+		});
+	}
 
 	// ---- Connections -------------------------------------------------------
 	const seenEdges = new Set<string>();

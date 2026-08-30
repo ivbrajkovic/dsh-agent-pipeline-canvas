@@ -15,7 +15,11 @@
 // ports need one unconsumed message per wired source (the fan-in rule: D fires
 // once after both of B and C), any-of ports fire per arriving message — and
 // every firing emits to its output ports, whose messages queue downstream.
-// Firings run CONCURRENTLY as separate Harness children, capped by the run's
+// Emission is SELECTIVE (conditional-dispatch.md): a node's output bindings
+// map a structured result field to a port (first match wins; no match — or no
+// structured result — emits nowhere, the honest quiet), and a port bound is a
+// delivery budget whose overflows are dropped and recorded. Firings run
+// CONCURRENTLY as separate Harness children, capped by the run's
 // `maxInFlight` (default 4); ready firings start in deterministic node-id
 // order. FAIL-FAST (executor spec §2 — one rule, no continue-on-error): a
 // firing that settles as anything but `completed` records its error + stop
@@ -134,6 +138,7 @@ import type {
 	Agent,
 	AgentExecutionInput,
 	LegacyRunRecord,
+	OutputBinding,
 	PipelineGraph,
 	PortGraph,
 	RunFiring,
@@ -873,9 +878,10 @@ class RunExecutor {
 	 * runs: parked heads' mailboxes stay armed and their commands valid, so
 	 * there is deliberately no `state` flip (unlike a head Rerun, which
 	 * disarms THE mailbox and must therefore flip the state). Returns the
-	 * adopted firing when it produced an output to emit, else null.
+	 * adopted firing with its structured result (selective emission evaluates
+	 * bindings against it), or null when nothing was produced to emit.
 	 */
-	private async refirePlain(orphan: RunFiring, agent: Agent, agentById: Map<string, Agent>, inputs: AgentExecutionInput): Promise<RunFiring | null> {
+	private async refirePlain(orphan: RunFiring, agent: Agent, agentById: Map<string, Agent>, inputs: AgentExecutionInput): Promise<{ firing: RunFiring; structured?: unknown } | null> {
 		const fresh = await this.transition(() => this.openFiring(orphan.nodeId, orphan, orphan.input as string));
 		if (this.signal.aborted) return null;
 		const parent = this.resolveSessionAgent();
@@ -890,7 +896,7 @@ class RunExecutor {
 		// the parked heads it was re-fired behind.
 		const failed = await this.settleOneShotFiring(fresh, outcome);
 		if (failed) this.failRun();
-		return failed ? null : fresh;
+		return failed ? null : { firing: fresh, structured: outcome.structured };
 	}
 
 	// ---- The control plane's pending-pause queue -------------------------------
@@ -1169,17 +1175,25 @@ class RunExecutor {
 	// ---- The NodeRunner and the kernel driver ----------------------------------
 
 	/**
-	 * Emit a terminal firing's output into the kernel (P3 emission is
-	 * non-selective — every output port), recording any bound overflows.
+	 * Emit a terminal firing's output into the kernel — SELECTIVE emission
+	 * (conditional-dispatch §2): the kernel picks the ports (every declared
+	 * port without bindings; the first matched binding's port with bindings;
+	 * none when nothing matched), and the firing's `emittedTo` records the
+	 * selection. `structured` is the one-shot child's structured result, when
+	 * one came back — the only thing bindings evaluate against (a continuable
+	 * firing has none, so a bound breakpointed node always emits quietly).
 	 * Only reached for `completed` firings: a failed firing returns before
 	 * this point (P6 — nothing downstream of a failure runs), and a firing
 	 * without an output emits nothing — downstream starves and is reported at
 	 * quiescence.
 	 */
-	private async emitOutput(nodeId: string, firing: RunFiring): Promise<void> {
+	private async emitOutput(nodeId: string, firing: RunFiring, structured?: unknown): Promise<void> {
 		if (typeof firing.output !== "string") return;
-		const drops = this.kernel?.emit(nodeId, firing.output) ?? [];
-		await this.recordDrops(drops);
+		const emission = this.kernel !== null
+			? this.kernel.emit(nodeId, firing.output, structured)
+			: { ports: [] as string[], drops: [] as KernelDrop[] };
+		await this.transition(() => { firing.emittedTo = emission.ports; });
+		await this.recordDrops(emission.drops);
 	}
 
 	/**
@@ -1218,6 +1232,9 @@ class RunExecutor {
 		}
 		try {
 			const useContinuable = this.canContinuable && agent.breakpoint === true;
+			// The structured result bindings evaluate against: a one-shot child
+			// with an outputSchema produces one; a continuable firing never does.
+			let structured: unknown = undefined;
 			if (useContinuable) {
 				const end = await this.runContinuableEpoch(firing, agent, agentById, prompt);
 				if (end === null) return; // aborted mid-flight; finalization marks the firing
@@ -1248,6 +1265,7 @@ class RunExecutor {
 				}
 				const outcome = await runOneAgent(this.services, { agent, agentById, inputs, parent, signal: this.signal });
 				if (this.signal.aborted) return; // finalization marks the firing aborted
+				structured = outcome.structured;
 				const failed = await this.settleOneShotFiring(firing, outcome);
 				if (failed) {
 					this.failRun();
@@ -1261,8 +1279,9 @@ class RunExecutor {
 				const released = await this.pauseAt(firing, agent, agentById, inputs);
 				if (released === null) return;
 				firing = released; // Rerun replaced the firing; the release emits ITS output
+				structured = undefined; // a parked firing's child is continuable — never structured
 			}
-			await this.emitOutput(nodeId, firing);
+			await this.emitOutput(nodeId, firing, structured);
 		} catch (error) {
 			if (this.signal.aborted) return;
 			await this.transition(() => {
@@ -1357,7 +1376,18 @@ class RunExecutor {
 		try {
 			const record = this.record;
 			const graph = portGraph(record.graph);
-			const kernel = new Kernel(graph, { maxInFlight: record.maxInFlight });
+			// Selective emission (conditional-dispatch §2): each node's output
+			// bindings ride the kernel as data — nodes without any emit
+			// non-selectively (the default-graph behavior).
+			const bindings: Record<string, OutputBinding[]> = {};
+			for (const candidate of record.graph?.agents ?? []) {
+				const entry = candidate as Agent | null | undefined;
+				if (entry == null || typeof entry !== "object" || entry.id == null) continue;
+				if (Array.isArray(entry.bindings) && entry.bindings.length > 0) {
+					bindings[String(entry.id)] = entry.bindings;
+				}
+			}
+			const kernel = new Kernel(graph, { maxInFlight: record.maxInFlight, bindings });
 			this.kernel = kernel;
 			const agentById = new Map<string, Agent>();
 			for (const agent of record.graph?.agents ?? []) {
@@ -1433,7 +1463,7 @@ class RunExecutor {
 							return undefined;
 						})()
 						: this.refirePlain(firing, agent, agentById, inputs)
-							.then((adopted) => { if (adopted !== null) return this.emitOutput(firing.nodeId, adopted); }))
+							.then((adopted) => { if (adopted !== null) return this.emitOutput(firing.nodeId, adopted.firing, adopted.structured); }))
 						.finally(() => { kernel.endFiring(firing.nodeId); });
 					this.runners.add(task);
 					void task.catch((error: unknown) => {

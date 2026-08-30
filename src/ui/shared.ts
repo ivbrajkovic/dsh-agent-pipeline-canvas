@@ -8,7 +8,7 @@
 // (src/client.tsx): the dynamic ctx proxy rejects property reads of undeclared
 // services, and nested Remote namespaces need their own dotted entry.
 
-import type { AgentSettings, InputPortSpec, PipelineGraph, RunFiring } from "../types.ts";
+import type { AgentSettings, InputPortSpec, OutputBinding, PipelineGraph, RunFiring } from "../types.ts";
 
 export const ENDPOINT = "/dsh-agent-pipeline";
 export const SAVE_DEBOUNCE_MS = 250;
@@ -30,24 +30,38 @@ export interface CanvasAgent {
 	x: number;
 	y: number;
 	/**
-	 * Declared port lists, carried through untouched. The canvas cannot author
-	 * them yet (the ports editor is P7), but a hand-edited pipeline.json must
+	 * Declared port lists, carried through untouched. Authored in the agent
+	 * config panel's ports editor (P7); a hand-edited pipeline.json must
 	 * survive a load-and-save round trip without losing data — the same rule
 	 * loadAgent applies to settings shapes.
 	 */
 	inputPorts?: InputPortSpec[];
 	outputPorts?: string[];
+	/**
+	 * Output-port bindings (selective emission): `field == value → port`,
+	 * first match wins, no `value` = catch-all. See OutputBinding in types.ts.
+	 */
+	bindings?: OutputBinding[];
 	/** The agent's settings (see AgentSettings); absent fields inherit defaults. */
 	settings?: AgentSettings;
 	/** Pause-on-output breakpoint: the run parks after this agent settles. */
 	breakpoint?: boolean;
 }
 
-/** A connection as held in React state (ports derived from source/target). */
+/**
+ * A connection as held in React state. The ports are PORT NAMES (not wire
+ * ids), defaulting to "out"/"in" — buildGraph composes the wire ids
+ * `<agentId>:<name>` the graph and kernel resolve against. Undeclared port
+ * names on an agent mean its single default port.
+ */
 export interface CanvasConnection {
 	id: string;
 	source: string;
 	target: string;
+	/** The source agent's output PORT NAME this edge leaves (default "out"). */
+	sourcePort?: string;
+	/** The target agent's input PORT NAME this edge enters (default "in"). */
+	targetPort?: string;
 }
 
 /** The run-result object returned by the Host's /run route. */
@@ -209,31 +223,35 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 			y: Math.round(a.y),
 			input: a.id + ":in",
 			output: a.id + ":out",
-			// Declared port lists pass through verbatim (they supersede the legacy
-			// input/output strings during validation and, later, execution).
-			...(a.inputPorts !== undefined ? { inputPorts: a.inputPorts } : {}),
-			...(a.outputPorts !== undefined ? { outputPorts: a.outputPorts } : {}),
-			...(a.settings ? { settings: a.settings } : {}),
-			...(a.breakpoint === true ? { breakpoint: true } : {}),
-		})),
-		connections: connections.map((c) => ({
-			id: c.id,
-			source: c.source,
-			target: c.target,
-			sourcePort: c.source + ":out",
-			targetPort: c.target + ":in",
-		})),
+	// Declared port lists pass through verbatim (they supersede the legacy
+	// input/output strings during validation and execution).
+	...(a.inputPorts !== undefined ? { inputPorts: a.inputPorts } : {}),
+	...(a.outputPorts !== undefined ? { outputPorts: a.outputPorts } : {}),
+	...(a.bindings !== undefined ? { bindings: a.bindings } : {}),
+	...(a.settings ? { settings: a.settings } : {}),
+	...(a.breakpoint === true ? { breakpoint: true } : {}),
+})),
+connections: connections.map((c) => ({
+	id: c.id,
+	source: c.source,
+	target: c.target,
+	// Wire ids compose from the PORT NAMES (default out/in — byte-identical
+	// to the historical shape on default graphs).
+	sourcePort: c.source + ":" + (c.sourcePort ?? "out"),
+	targetPort: c.target + ":" + (c.targetPort ?? "in"),
+})),
 	};
 }
 
 /**
  * Read one persisted agent back into React state: the first-class
- * `systemPrompt`, the settings, and any declared port lists. Legacy on-disk
- * shapes are lifted so older pipeline.json files lose nothing: `settings` was
- * named `overrides`, the system prompt was the top-level `persona` and before
- * that `overrides.persona`. Object-shaped setting values and the port lists
- * round-trip untouched (a hand-edited file must not lose data); the edit form
- * canonicalizes a shape only when that agent is saved again.
+ * `systemPrompt`, the settings, the declared port lists, and the output
+ * bindings. Legacy on-disk shapes are lifted so older pipeline.json files lose
+ * nothing: `settings` was named `overrides`, the system prompt was the
+ * top-level `persona` and before that `overrides.persona`. Object-shaped
+ * setting values, the port lists, and the bindings round-trip untouched (a
+ * hand-edited file must not lose data); the edit form canonicalizes a shape
+ * only when that agent is saved again.
  */
 export function loadAgent(raw: unknown): {
 	systemPrompt: string;
@@ -241,6 +259,7 @@ export function loadAgent(raw: unknown): {
 	breakpoint?: boolean;
 	inputPorts?: InputPortSpec[];
 	outputPorts?: string[];
+	bindings?: OutputBinding[];
 } {
 	const rawAgent = (raw ?? {}) as Record<string, unknown>;
 	const rawSettings = loadSettingsShape(rawAgent.settings !== undefined ? rawAgent.settings : rawAgent.overrides);
@@ -259,16 +278,18 @@ export function loadAgent(raw: unknown): {
 					? legacySettingsPersona
 					: "";
 	const breakpoint = rawAgent.breakpoint === true;
-	// Declared port lists round-trip untouched (see CanvasAgent): the canvas
-	// cannot author them yet, but a hand-written file must not lose them.
+	// Declared port lists and bindings round-trip untouched (see CanvasAgent):
+	// a hand-written file must not lose them.
 	const inputPorts = Array.isArray(rawAgent.inputPorts) ? (rawAgent.inputPorts as InputPortSpec[]) : undefined;
 	const outputPorts = Array.isArray(rawAgent.outputPorts) ? (rawAgent.outputPorts as string[]) : undefined;
+	const bindings = Array.isArray(rawAgent.bindings) ? (rawAgent.bindings as OutputBinding[]) : undefined;
 	return {
 		systemPrompt,
 		settings,
 		...(breakpoint ? { breakpoint: true } : {}),
 		...(inputPorts !== undefined ? { inputPorts } : {}),
 		...(outputPorts !== undefined ? { outputPorts } : {}),
+		...(bindings !== undefined ? { bindings } : {}),
 	};
 }
 

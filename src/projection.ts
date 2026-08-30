@@ -79,6 +79,22 @@ export interface NodeProjection {
 }
 
 /**
+ * Deterministic FIRING-ID order, numeric on the id suffix ("f-999" < "f-1000"
+ * — the P5 scrutiny note: lexicographic order flips past 999, and loops can
+ * exceed that). Ids without a numeric tail (or with equal tails) fall back to
+ * byte order, so the result stays total and stable over malformed ids.
+ */
+export function compareFiringIds(a: string, b: string): number {
+	const ma = /(\d+)$/.exec(a);
+	const mb = /(\d+)$/.exec(b);
+	if (ma !== null && mb !== null) {
+		const delta = parseInt(ma[1], 10) - parseInt(mb[1], 10);
+		if (delta !== 0) return delta;
+	}
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
  * Every firing with `status` that no later firing of the same node supersedes,
  * in firing-id order — the log's unresolved work of that kind. For "paused"
  * these are the settled-but-unresolved breakpoints: the pending-pause queue
@@ -95,7 +111,7 @@ export function unresolvedFirings(firings: readonly RunFiring[], status: RunFiri
 		all.some((later) => later.nodeId === f.nodeId && typeof later.seq === "number" && typeof f.seq === "number" && later.seq > f.seq);
 	return all
 		.filter((f) => f.status === status && !superseded(f))
-		.sort((a, b) => (a.firingId < b.firingId ? -1 : a.firingId > b.firingId ? 1 : 0));
+		.sort((a, b) => compareFiringIds(a.firingId, b.firingId));
 }
 
 /**

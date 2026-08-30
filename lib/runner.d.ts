@@ -106,6 +106,13 @@ export declare function agentLabel(agent: Agent | null | undefined, id: string):
 export interface OneAgentOutcome {
     /** Adopted output string (rendered JSON when structured, else joined text). */
     output: string;
+    /**
+     * The validated structured result when the harness returned one
+     * (`SubagentResult.structured` — a one-shot child with `outputSchema`).
+     * Selective emission (P7) evaluates a node's output-port bindings against
+     * it; continuable children never produce one.
+     */
+    structured?: unknown;
     /** Harness stop reason of the run ("aborted"/"error" on failure). */
     stopReason?: string;
     /** The published child session id; absent when the start itself failed. */

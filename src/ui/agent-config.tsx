@@ -6,7 +6,10 @@
 // standard prompt (identity, policies, tool explanations) is inherited
 // untouched (see docs/reference/system-prompt.md). The right column holds the agent's
 // settings — agent options (provider / model / reasoning-effort / max-tokens),
-// tool filter, delegation depth, and an object-rooted JSON output schema.
+// tool filter, delegation depth, an object-rooted JSON output schema, and the
+// stream-node port surface (P7): named input ports with policy + delivery
+// bound, named output ports, and the output bindings that make emission
+// selective (field == value → port, first match wins, no value = catch-all).
 // Everything is always visible (no disclosure). Opened from the agent
 // node's edit button; local state is seeded from the agent on mount (the
 // component is keyed by the agent id, so opening a different agent remounts
@@ -27,7 +30,7 @@
 // stale saved id, a failed fetch) is kept as an extra option, so it stays
 // visible and savable; any failure just shrinks the lists.
 import * as React from 'react';
-import type { AgentSettings } from '../types.ts';
+import type { AgentSettings, InputPortSpec, OutputBinding } from '../types.ts';
 import { ENDPOINT, type CanvasAgent } from './shared.ts';
 import './agent-config.css';
 
@@ -65,9 +68,24 @@ function AgentConfigPanel({
     instructions: string;
     settings?: AgentSettings;
     breakpoint?: boolean;
+    inputPorts?: InputPortSpec[];
+    outputPorts?: string[];
+    bindings?: OutputBinding[];
   }) => void;
   onClose: () => void;
 }) {
+  /** One editable input-port row (bound as text until save canonicalizes). */
+  interface InputPortRow {
+    name: string;
+    policy: 'all-of' | 'any-of';
+    bound: string;
+  }
+  /** One editable binding row (`value` empty = catch-all). */
+  interface BindingRow {
+    field: string;
+    value: string;
+    port: string;
+  }
   const [name, setName] = React.useState(agent.name);
   const [description, setDescription] = React.useState(agent.description);
   const [systemPrompt, setSystemPrompt] = React.useState(
@@ -109,6 +127,33 @@ function AgentConfigPanel({
     settings?.outputSchema != null
       ? JSON.stringify(settings.outputSchema, null, 2)
       : '',
+  );
+  // The stream-node port surface (P7): declared input ports (name / policy /
+  // bound rows), declared output ports (comma-separated), and the output
+  // bindings that route the structured result to a port. Empty editors keep
+  // the single default in/out ports — the historical shape.
+  const [inputPortRows, setInputPortRows] = React.useState<InputPortRow[]>(
+    Array.isArray(agent.inputPorts)
+      ? agent.inputPorts
+          .filter((p) => p != null && typeof p.name === 'string')
+          .map((p) => ({
+            name: p.name,
+            policy: p.policy === 'any-of' ? 'any-of' : ('all-of' as const),
+            bound: p.bound != null ? String(p.bound) : '',
+          }))
+      : [],
+  );
+  const [outputPortsText, setOutputPortsText] = React.useState(
+    Array.isArray(agent.outputPorts) ? agent.outputPorts.join(', ') : '',
+  );
+  const [bindingRows, setBindingRows] = React.useState<BindingRow[]>(
+    Array.isArray(agent.bindings)
+      ? agent.bindings.map((b) => ({
+          field: typeof b.field === 'string' ? b.field : '',
+          value: b.value === undefined ? '' : String(b.value),
+          port: typeof b.port === 'string' ? b.port : '',
+        }))
+      : [],
   );
   // The provider/model directory (loaded on mount, aborted on unmount).
   const [catalog, setCatalog] = React.useState<OptionsCatalog | null>(null);
@@ -282,6 +327,59 @@ function AgentConfigPanel({
   }
   const providers = catalog?.providers ?? [];
   const models = catalog?.models ?? [];
+
+  // Canonicalize the port surface: named rows survive; a bound is a positive
+  // integer; binding rows need both a field and a port (a row's empty value
+  // means the catch-all). Empty editors yield undefined — the single default
+  // in/out ports, exactly the historical shape.
+  function assemblePorts(): {
+    inputPorts?: InputPortSpec[];
+    outputPorts?: string[];
+    bindings?: OutputBinding[];
+  } {
+    const ports = inputPortRows
+      .map((row): InputPortSpec | null => {
+        const portName = row.name.trim();
+        if (portName.length === 0) return null;
+        const spec: InputPortSpec = {
+          name: portName,
+          ...(row.policy === 'any-of' ? { policy: 'any-of' } : {}),
+        };
+        const bound = row.bound.trim();
+        if (/^\d+$/.test(bound) && parseInt(bound, 10) >= 1) {
+          spec.bound = parseInt(bound, 10);
+        }
+        return spec;
+      })
+      .filter((s): s is InputPortSpec => s !== null);
+    const outs = outputPortsText
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const rules = bindingRows
+      .map((row): OutputBinding | null => {
+        const fieldName = row.field.trim();
+        const port = row.port.trim();
+        if (fieldName.length === 0 || port.length === 0) return null;
+        const value = row.value.trim();
+        return { field: fieldName, port, ...(value.length > 0 ? { value } : {}) };
+      })
+      .filter((b): b is OutputBinding => b !== null);
+    return {
+      ...(ports.length > 0 ? { inputPorts: ports } : {}),
+      ...(outs.length > 0 ? { outputPorts: outs } : {}),
+      ...(rules.length > 0 ? { bindings: rules } : {}),
+    };
+  }
+  const portShape = assemblePorts();
+  const hasBindings = portShape.bindings !== undefined;
+  // The schema that WILL save (parseable object text) — bindings evaluate
+  // against it; without one a bound node emits on no port (honest quiet).
+  const schemaWillSave = schemaTrimmed.length > 0 && schemaError === null;
+  // The binding port picker offers the declared output ports; undeclared,
+  // the node's single default port is "out". A saved port missing from the
+  // list stays visible as an extra option (stale-safe, like provider/model).
+  const declaredOutPorts = portShape.outputPorts ?? ['out'];
   return (
     <div
       className='pipeline-config-overlay'
@@ -474,6 +572,200 @@ function AgentConfigPanel({
                 <div className='config-error'>{schemaError}</div>
               ) : null}
             </div>
+            <div className='config-row'>
+              <label>Input ports</label>
+              {inputPortRows.length === 0 ? (
+                <div className='config-hint'>
+                  Default: one "in" port (all-of, unbounded).
+                </div>
+              ) : (
+                inputPortRows.map((row, index) => (
+                  <div
+                    key={index}
+                    className='config-mini-row'
+                  >
+                    <input
+                      value={row.name}
+                      placeholder='port name'
+                      title='Input port name — connections enter "<agentId>:<name>"'
+                      style={{ flex: '1 1 40%' }}
+                      onChange={(e) => {
+                        setInputPortRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, name: e.target.value } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    />
+                    <select
+                      value={row.policy}
+                      title='Firing policy — all-of waits for every wired source; any-of fires per arriving message'
+                      aria-label='Input port policy'
+                      style={{ flex: '0 0 auto', width: 'auto' }}
+                      onChange={(e) => {
+                        const policy = e.target.value === 'any-of' ? 'any-of' : 'all-of';
+                        setInputPortRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, policy } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    >
+                      <option value='all-of'>all-of</option>
+                      <option value='any-of'>any-of</option>
+                    </select>
+                    <input
+                      value={row.bound}
+                      placeholder='bound'
+                      title='Delivery bound — max messages the port accepts this run (a loop budget); further arrivals are dropped and recorded. Empty = unbounded.'
+                      aria-label='Input port bound'
+                      style={{ flex: '0 0 64px' }}
+                      onChange={(e) => {
+                        setInputPortRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, bound: e.target.value } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    />
+                    <button
+                      className='pipeline-btn config-mini-btn'
+                      title='Remove this input port'
+                      aria-label={'Remove input port ' + (row.name || String(index + 1))}
+                      onClick={() => {
+                        setInputPortRows((prev) => prev.filter((_, i) => i !== index));
+                      }}
+                    >×</button>
+                  </div>
+                ))
+              )}
+              <button
+                className='pipeline-btn config-mini-btn'
+                title='Declare a named input port'
+                onClick={() => {
+                  setInputPortRows((prev) => prev.concat([{ name: '', policy: 'all-of', bound: '' }]));
+                }}
+              >+ Add input port</button>
+            </div>
+            <div className='config-row'>
+              <label>Output ports</label>
+              <input
+                value={outputPortsText}
+                placeholder='comma-separated names — empty keeps the default "out" port'
+                title='Named output ports. A firing emits on some of them and not on others (per the bindings below), or on all of them without bindings.'
+                onChange={(e) => {
+                  setOutputPortsText(e.target.value);
+                }}
+                onKeyDown={stopKey}
+              />
+            </div>
+            <div className='config-row'>
+              <label>Output bindings</label>
+              {bindingRows.length === 0 ? (
+                <div className='config-hint'>
+                  Without bindings a firing emits on every output port. Add
+                  rules to route the structured output — first match wins; an
+                  empty value is the catch-all, keep it last.
+                </div>
+              ) : (
+                bindingRows.map((row, index) => (
+                  <div
+                    key={index}
+                    className='config-mini-row'
+                  >
+                    <input
+                      value={row.field}
+                      placeholder='field'
+                      title='Structured-output field to compare'
+                      style={{ flex: '1 1 28%' }}
+                      onChange={(e) => {
+                        setBindingRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, field: e.target.value } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    />
+                    <span className='config-mini-op'>==</span>
+                    <input
+                      value={row.value}
+                      placeholder='value — empty = catch-all'
+                      title='Value the field must equal (compared as text). Empty matches any structured result.'
+                      style={{ flex: '1 1 28%' }}
+                      onChange={(e) => {
+                        setBindingRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, value: e.target.value } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    />
+                    <span className='config-mini-op'>→</span>
+                    <select
+                      value={row.port}
+                      title='Output port to emit on when the field matches'
+                      aria-label='Binding output port'
+                      style={{ flex: '0 0 auto', width: 'auto' }}
+                      onChange={(e) => {
+                        setBindingRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, port: e.target.value } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    >
+                      <option value=''>port…</option>
+                      {declaredOutPorts.map((portName) => (
+                        <option
+                          key={portName}
+                          value={portName}
+                        >
+                          {portName}
+                        </option>
+                      ))}
+                      {row.port.length > 0 &&
+                      !declaredOutPorts.includes(row.port) ? (
+                        <option value={row.port}>{row.port}</option>
+                      ) : null}
+                    </select>
+                    <button
+                      className='pipeline-btn config-mini-btn'
+                      title='Remove this binding'
+                      aria-label={'Remove binding ' + (row.field || String(index + 1))}
+                      onClick={() => {
+                        setBindingRows((prev) => prev.filter((_, i) => i !== index));
+                      }}
+                    >×</button>
+                  </div>
+                ))
+              )}
+              <button
+                className='pipeline-btn config-mini-btn'
+                title='Add a field → port routing rule'
+                onClick={() => {
+                  setBindingRows((prev) => prev.concat([{ field: '', value: '', port: '' }]));
+                }}
+              >+ Add binding</button>
+              {breakpoint && hasBindings ? (
+                <div className='config-warning'>
+                  A breakpointed agent runs as a continuable child, which cannot
+                  produce structured output — its bindings never match and it
+                  emits on no port.
+                </div>
+              ) : null}
+              {hasBindings && !schemaWillSave ? (
+                <div className='config-warning'>
+                  Bindings evaluate against the structured output — set an
+                  output schema above, or this agent emits on no port.
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
 
@@ -497,7 +789,10 @@ function AgentConfigPanel({
                 systemPrompt: assembled.systemPrompt,
                 instructions,
                 settings: assembled.settings,
-                ...(breakpoint ? { breakpoint: true } : {}),
+                ...(breakpoint ? { breakpoint: true } : { breakpoint: undefined }),
+                inputPorts: portShape.inputPorts,
+                outputPorts: portShape.outputPorts,
+                bindings: portShape.bindings,
               });
             }}
           >

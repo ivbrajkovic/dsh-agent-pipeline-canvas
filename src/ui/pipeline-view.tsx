@@ -81,6 +81,9 @@ function PipelineView({
 	const [inspectDismissedFor, setInspectDismissedFor] = React.useState<string | null>(null);
 	const [controlBusy, setControlBusy] = React.useState<string | null>(null);
 	const [controlStatus, setControlStatus] = React.useState<string | null>(null);
+	// A connection drafted between two multi-port endpoints: the edge needs
+	// its port names before it is added (the picker overlay completes it).
+	const [edgeDraft, setEdgeDraft] = React.useState<{ id: string; source: string; target: string; sourcePort: string; targetPort: string } | null>(null);
 	const runTextRef = React.useRef("");
 	const runFilesRef = React.useRef<string[]>([]);
 	/** The live SSE subscription for the active run's record. */
@@ -191,7 +194,21 @@ function PipelineView({
 		if (target != null && target !== c.from) {
 			const exists = connections.some((conn) => conn.source === c.from && conn.target === target);
 			if (!exists) {
-				setConnections((prev) => prev.concat([{ id: newId("conn"), source: c.from, target }]));
+				const conn = { id: newId("conn"), source: c.from, target };
+				// Named ports (P7): when either endpoint declares several, the
+				// edge must say which ones — the picker completes it. A node
+				// with a single (or default) port wires without ceremony.
+				const srcPorts = outputPortNamesOf(c.from);
+				const tgtPorts = inputPortNamesOf(target);
+				if (srcPorts.length > 1 || tgtPorts.length > 1) {
+					setEdgeDraft({ ...conn, sourcePort: srcPorts[0], targetPort: tgtPorts[0] });
+				} else {
+					setConnections((prev) => prev.concat([{
+						...conn,
+						...(srcPorts[0] !== "out" ? { sourcePort: srcPorts[0] } : {}),
+						...(tgtPorts[0] !== "in" ? { targetPort: tgtPorts[0] } : {}),
+					}]));
+				}
 			}
 		}
 		connectRef.current = null;
@@ -428,6 +445,41 @@ function PipelineView({
 		for (const a of agents) if (a.id === id) return a.name;
 		return id;
 	}
+
+	// ---- Named ports (P7) ----------------------------------------------------
+	// Edges carry PORT NAMES ("mail → data"); default graphs keep the implicit
+	// "out"/"in". The name lists come from the declared port lists, falling
+	// back to the single default port when undeclared.
+
+	/** The node's output port names (declared, else the single "out"). */
+	function outputPortNamesOf(id: string): string[] {
+		const a = agents.find((x) => x.id === id);
+		return a && Array.isArray(a.outputPorts) && a.outputPorts.length > 0 ? a.outputPorts : ["out"];
+	}
+	/** The node's input port names (declared, else the single "in"). */
+	function inputPortNamesOf(id: string): string[] {
+		const a = agents.find((x) => x.id === id);
+		return a && Array.isArray(a.inputPorts) && a.inputPorts.length > 0 ? a.inputPorts.map((p) => p.name) : ["in"];
+	}
+	/** The port NAME a persisted wire id carries ("<agentId>:<name>" → name). */
+	function portNameOf(wire: unknown, agentId: string, fallback: string): string {
+		const s = String(wire ?? "");
+		return s.startsWith(agentId + ":") ? s.slice(agentId.length + 1) : fallback;
+	}
+	/** Complete a drafted connection with the picked port names. */
+	function confirmEdgeDraft() {
+		const d = edgeDraft;
+		if (!d) return;
+		setEdgeDraft(null);
+		setConnections((prev) => prev.concat([{
+			id: d.id,
+			source: d.source,
+			target: d.target,
+			// Default names stay unwritten — buildGraph composes the same wire id.
+			...(d.sourcePort !== "out" ? { sourcePort: d.sourcePort } : {}),
+			...(d.targetPort !== "in" ? { targetPort: d.targetPort } : {}),
+		}]));
+	}
 	const continueText = runResult && runResult.ok ? finalOutputText(runResult.outputs || {}, nameOf) : "";
 
 	// Stage text into a session's composer WITHOUT sending. The current
@@ -553,13 +605,23 @@ function PipelineView({
 						x: Number(r.x) || 0, y: Number(r.y) || 0,
 						...(loaded.inputPorts !== undefined ? { inputPorts: loaded.inputPorts } : {}),
 						...(loaded.outputPorts !== undefined ? { outputPorts: loaded.outputPorts } : {}),
+						...(loaded.bindings !== undefined ? { bindings: loaded.bindings } : {}),
 						settings: loaded.settings,
 						...(r.breakpoint === true ? { breakpoint: true } : {}),
 					};
 				}));
-				setConnections(cs.map((c: { id: unknown; source: unknown; target: unknown }) => ({
-					id: String(c.id), source: String(c.source), target: String(c.target),
-				})));
+				setConnections(cs.map((c: { id: unknown; source: unknown; target: unknown; sourcePort?: unknown; targetPort?: unknown }) => {
+					const source = String(c.source);
+					const target = String(c.target);
+					return {
+						id: String(c.id), source, target,
+						// The wire ids carry the port names ("<agentId>:<name>");
+						// the reverse of buildGraph keeps named-port wiring
+						// editable on the canvas across a reload.
+						sourcePort: portNameOf(c.sourcePort, source, "out"),
+						targetPort: portNameOf(c.targetPort, target, "in"),
+					};
+				}));
 				let maxId = 0;
 				as.forEach((a: { id: unknown }) => { const n = numericSuffix(a.id); if (n > maxId) maxId = n; });
 				cs.forEach((c: { id: unknown }) => { const n = numericSuffix(c.id); if (n > maxId) maxId = n; });
@@ -613,7 +675,25 @@ function PipelineView({
 			if (agents[i].id === c.target) tgt = agents[i];
 		}
 		if (!src || !tgt) return null;
-		return <path key={c.id} d={edgePath(outPoint(src), inPoint(tgt))} className="pipeline-edge" markerEnd="url(#pipeline-arrow)" />;
+		const s = outPoint(src);
+		const t = inPoint(tgt);
+		const sourceName = c.sourcePort ?? "out";
+		const targetName = c.targetPort ?? "in";
+		// A non-default port name is labeled at the edge midpoint — the canvas
+		// shows the real dataflow (design principle 2). A quiet port (its
+		// binding simply never matched) needs no extra rendering: an edge is
+		// only labeled wiring, never a promise the message arrived.
+		const labeled = sourceName !== "out" || targetName !== "in";
+		return (
+			<g key={c.id}>
+				<path d={edgePath(s, t)} className="pipeline-edge" markerEnd="url(#pipeline-arrow)" />
+				{labeled ? (
+					<text x={(s.x + t.x) / 2} y={(s.y + t.y) / 2 - 5} className="pipeline-edge-label" textAnchor="middle">
+						{sourceName + " → " + targetName}
+					</text>
+				) : null}
+			</g>
+		);
 	});
 	let tempEdge: React.ReactNode = null;
 	if (gesture) {
@@ -828,6 +908,12 @@ function PipelineView({
 									systemPrompt: updated.systemPrompt,
 									instructions: updated.instructions,
 									settings: updated.settings,
+									// Port lists and bindings save as authored — an
+									// emptied editor clears (undefined drops the
+									// field from the persisted graph).
+									inputPorts: updated.inputPorts,
+									outputPorts: updated.outputPorts,
+									bindings: updated.bindings,
 									...(updated.breakpoint === true ? { breakpoint: true } : { breakpoint: undefined }),
 								}
 								: a
@@ -836,6 +922,42 @@ function PipelineView({
 					}}
 					onClose={() => { setConfigAgentId(null); }}
 				/>
+			) : null}
+			{edgeDraft ? (
+				<div
+					className="pipeline-config-overlay"
+					onPointerDown={(e) => { e.stopPropagation(); }}
+				>
+					<div className="pipeline-edge-picker">
+						<h3>Connect ports</h3>
+						<div className="picker-row">
+							<label>{"From " + nameOf(edgeDraft.source) + " (output port)"}</label>
+							<select
+								value={edgeDraft.sourcePort}
+								onChange={(e) => { setEdgeDraft((d) => (d ? { ...d, sourcePort: e.target.value } : d)); }}
+							>
+								{outputPortNamesOf(edgeDraft.source).map((portName) => (
+									<option key={portName} value={portName}>{portName}</option>
+								))}
+							</select>
+						</div>
+						<div className="picker-row">
+							<label>{"To " + nameOf(edgeDraft.target) + " (input port)"}</label>
+							<select
+								value={edgeDraft.targetPort}
+								onChange={(e) => { setEdgeDraft((d) => (d ? { ...d, targetPort: e.target.value } : d)); }}
+							>
+								{inputPortNamesOf(edgeDraft.target).map((portName) => (
+									<option key={portName} value={portName}>{portName}</option>
+								))}
+							</select>
+						</div>
+						<div className="picker-actions">
+							<button className="pipeline-btn" onClick={() => { setEdgeDraft(null); }}>Cancel</button>
+							<button className="pipeline-btn" onClick={confirmEdgeDraft}>Connect</button>
+						</div>
+					</div>
+				</div>
 			) : null}
 			{showRunModal ? (
 				<RunModal

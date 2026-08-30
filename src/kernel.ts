@@ -41,8 +41,8 @@
 // roots always did. A declared input port with no edges on a node that HAS
 // other wired ports is inert: it receives nothing and does not block.
 
-import { INPUT_KEY, cmp } from "./execution.ts";
-import type { OutgoingEdge, PortGraph, ResolvedInputPort } from "./types.ts";
+import { INPUT_KEY, cmp, evaluateBindings } from "./execution.ts";
+import type { OutgoingEdge, OutputBinding, PortGraph, ResolvedInputPort } from "./types.ts";
 
 /** The synthetic source node's id — the key the run input composes under. */
 export const SOURCE_NODE_ID = INPUT_KEY;
@@ -70,9 +70,18 @@ export interface KernelDrop {
 export interface KernelOptions {
 	/** Max firings in flight; DEFAULT_MAX_IN_FLIGHT when absent/invalid. */
 	maxInFlight?: unknown;
+	/**
+	 * Output-port bindings per node id (selective emission — the node model's
+	 * `bindings` field, lifted from the graph snapshot). A node absent from the
+	 * map emits non-selectively (every output port).
+	 */
+	bindings?: Record<string, OutputBinding[]>;
 }
 
-/** One input port's runtime queue: arrived, unconsumed messages (FIFO). */
+/**
+ * One input port's runtime queue: arrived, unconsumed messages (FIFO) plus the
+ * port's DELIVERY count — the total messages it has accepted this run.
+ */
 interface PortQueue {
 	/** Ports keep their declaration order from the resolved port graph. */
 	spec: ResolvedInputPort;
@@ -84,6 +93,13 @@ interface PortQueue {
 	 * ports) tracks nothing and neither blocks nor receives.
 	 */
 	sources: string[];
+	/**
+	 * Messages accepted so far (deliveries, not backlog — design principle 4
+	 * pins the bound as a DELIVERY count, the loop budget: a free-running
+	 * consumer drains each message before the next arrives, so only a
+	 * delivery cap can ever overflow a cycle's port).
+	 */
+	delivered: number;
 }
 
 /**
@@ -97,7 +113,9 @@ export class Kernel {
 	/** Max concurrent firings (executor spec §1); the executor enforces it. */
 	readonly maxInFlight: number;
 	private readonly ports = new Map<string, PortQueue[]>();
-	private readonly outEdges = new Map<string, OutgoingEdge[][]>();
+	/** Output ports per node, declaration order — the emission fan-out map. */
+	private readonly outPorts = new Map<string, Array<{ name: string; edges: OutgoingEdge[] }>>();
+	private readonly bindings: Record<string, OutputBinding[]>;
 	private inFlightCount = 0;
 	private haltedFlag = false;
 	private readonly firedNodes = new Set<string>();
@@ -105,6 +123,7 @@ export class Kernel {
 
 	constructor(graph: PortGraph, options: KernelOptions = {}) {
 		this.maxInFlight = normalizeMaxInFlight(options.maxInFlight);
+		this.bindings = options.bindings ?? {};
 		for (const id of graph.ids) {
 			const node = graph.byId[id];
 			// Source-fed: no incoming edge anywhere — the run input feeds every
@@ -118,9 +137,10 @@ export class Kernel {
 					sources: sourceFed
 						? [SOURCE_NODE_ID]
 						: [...new Set(spec.edges.map((edge) => edge.source))].sort(cmp),
+					delivered: 0,
 				})),
 			);
-			this.outEdges.set(id, node.outputs.map((port) => port.edges));
+			this.outPorts.set(id, node.outputs.map((port) => ({ name: port.name, edges: port.edges })));
 		}
 	}
 
@@ -165,16 +185,19 @@ export class Kernel {
 
 	/**
 	 * Deliver one message to a node's input port (wire port id). Enforces the
-	 * port's delivery bound: when the port already queues its bound, the
-	 * ARRIVING message is dropped (design principle 4 — "further messages are
-	 * dropped") and returned as a record entry; nothing fires for it.
+	 * port's delivery bound (design principle 4 — the loop budget): when the
+	 * port has already ACCEPTED its bound this run, the ARRIVING message is
+	 * dropped and returned as a record entry; nothing fires for it. The count
+	 * is deliveries, not backlog — a cycle's consumer drains each message
+	 * before the next arrives, so only a delivery cap can overflow a loop.
 	 */
 	deliver(targetId: string, targetPortId: string, message: KernelMessage): KernelDrop | null {
 		const port = this.ports.get(targetId)?.find((candidate) => candidate.spec.portId === targetPortId);
 		if (port === undefined) return null;
-		if (port.spec.bound !== undefined && port.queue.length >= port.spec.bound) {
+		if (port.spec.bound !== undefined && port.delivered >= port.spec.bound) {
 			return { nodeId: targetId, port: port.spec.name, from: message.from };
 		}
+		port.delivered += 1;
 		port.queue.push(message);
 		this.wake();
 		return null;
@@ -220,22 +243,44 @@ export class Kernel {
 	}
 
 	/**
-	 * Emit one firing's output from `nodeId`: P3 emission is non-selective —
-	 * the message is copied to every edge of every output port (selective
-	 * emission and bindings are P7). Returns the bound overflows to record.
+	 * Emit one firing's output from `nodeId` — SELECTIVE emission (conditional-
+	 * dispatch §2). Without bindings the message is copied to every edge of
+	 * every output port (the default-graph behavior, unchanged). With bindings,
+	 * the first binding matching the firing's STRUCTURED result selects its
+	 * port; no match — or no structured result at all — selects NO port (the
+	 * honest quiet: starved downstream nodes surface in the run report, and the
+	 * empty selection is what the firing's `emittedTo` records). Returns the
+	 * selected port names plus the bound overflows to record.
 	 */
-	emit(nodeId: string, output: string): KernelDrop[] {
+	emit(nodeId: string, output: string, structured?: unknown): { ports: string[]; drops: KernelDrop[] } {
+		const ports = this.outPorts.get(nodeId);
+		const selected = this.selectEmissionPorts(nodeId, structured);
 		const message: KernelMessage = { from: nodeId, output };
 		const drops: KernelDrop[] = [];
-		const ports = this.outEdges.get(nodeId);
-		if (ports === undefined) return drops;
-		for (const edges of ports) {
-			for (const edge of edges) {
+		if (ports === undefined) return { ports: selected, drops };
+		for (const name of selected) {
+			const port = ports.find((candidate) => candidate.name === name);
+			if (port === undefined) continue;
+			for (const edge of port.edges) {
 				const drop = this.deliver(edge.target, edge.targetPort, message);
 				if (drop !== null) drops.push(drop);
 			}
 		}
-		return drops;
+		return { ports: selected, drops };
+	}
+
+	/**
+	 * The ports one firing emits on: every declared port for an unbound node;
+	 * otherwise the first matched binding's port (when the node declares it —
+	 * validateGraph reports the mismatch, the kernel stays total), else none.
+	 */
+	private selectEmissionPorts(nodeId: string, structured: unknown): string[] {
+		const ports = this.outPorts.get(nodeId);
+		if (ports === undefined) return [];
+		const bindings = this.bindings[nodeId];
+		if (bindings === undefined || bindings.length === 0) return ports.map((port) => port.name);
+		const matched = evaluateBindings(bindings, structured);
+		return matched !== null && ports.some((port) => port.name === matched) ? [matched] : [];
 	}
 
 	// ---- Quiescence ------------------------------------------------------------
@@ -262,9 +307,11 @@ export class Kernel {
 	 * messages never (all) arrived, or they declare no input ports at all
 	 * (a port-less node can never fire — surfaced as starvation, not an error).
 	 * Sorted; the executor subtracts nodes already satisfied by the log before
-	 * reporting. Known limitation (fine until P7's cycles): a node that DID
-	 * fire but now waits on an unsatisfied re-firing round is not reported —
-	 * extend this to unsatisfied all-of ports generally when re-firing lands.
+	 * reporting. Known shape of the report (fine in practice): a node that DID
+	 * fire but now waits on an unsatisfied re-firing round is not listed —
+	 * harmless because the executor's completed-finalize filter excludes every
+	 * done/paused node anyway, and a run whose fired node is left non-done
+	 * finalizes through fail-fast, not here.
 	 */
 	starvingCandidates(): string[] {
 		const waiting: string[] = [];

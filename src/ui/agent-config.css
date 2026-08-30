@@ -148,4 +148,31 @@
   margin: 0;
   accent-color: var(--dsw-alias-brand-primary);
 }
+/* The ports editor's compact rows (input ports, bindings): several small
+   controls on one line, plus muted hints and the remove/add mini buttons. */
+.pipeline-config .config-mini-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pipeline-config .config-mini-row input,
+.pipeline-config .config-mini-row select {
+  min-width: 0;
+}
+.pipeline-config .config-mini-op {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+.pipeline-config .config-mini-btn {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  font-size: 11px;
+  width: auto;
+}
+.pipeline-config .config-hint {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
 

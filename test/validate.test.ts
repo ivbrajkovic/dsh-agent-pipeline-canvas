@@ -89,6 +89,37 @@ check("inputPorts not an array", { agents: [{ id: "a", name: "a", description: "
 check("input port spec missing name", { agents: [portsAgent("a", [{ policy: "any-of" }])], connections: [] }, false, ["agent-port-invalid"]);
 check("outputPorts entry not a string", { agents: [portsAgent("a", undefined, [7])], connections: [] }, false, ["agent-port-invalid"]);
 
+// --- bindings (selective emission, P7) ---------------------------------
+check("binding to a declared output port validates", { agents: [portsAgent("a", undefined, ["mail", "slack"])], connections: [] }, true, []);
+// portsAgent has no settings slot; the raw agent spread carries bindings.
+{
+	const result = validateGraph({
+		agents: [{
+			id: "a", name: "a", description: "", instructions: "", x: 0, y: 0,
+			outputPorts: ["mail", "slack"],
+			bindings: [{ field: "action", value: "mail", port: "mail" }, { field: "action", port: "slack" }],
+		}],
+		connections: [],
+	});
+	deepStrictEqual(result.ok, true, "named bindings (incl. catch-all) validate");
+	passed++;
+	console.log("ok    named bindings (incl. catch-all) validate");
+}
+check("binding to the default out port validates", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "ok", value: true, port: "out" }] }], connections: [] }, true, []);
+check("binding to an undeclared port", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["mail"], bindings: [{ field: "action", value: "mail", port: "slack" }] }], connections: [] }, false, ["agent-binding-port-mismatch"]);
+{
+	const result = validateGraph({
+		agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: [], bindings: [{ field: "action", value: "x", port: "out" }] }],
+		connections: [],
+	});
+	deepStrictEqual(result.errors.map((e) => e.code), ["agent-binding-port-mismatch"], "binding on an emits-nowhere node mismatches");
+	passed++;
+	console.log("ok    binding on an emits-nowhere node mismatches");
+}
+check("bindings not an array", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: "nope" }], connections: [] }, false, ["agent-binding-invalid"]);
+check("binding without a field", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["out"], bindings: [{ port: "out" }] }], connections: [] }, false, ["agent-binding-invalid"]);
+check("binding without a port", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "action" }] }], connections: [] }, false, ["agent-binding-invalid"]);
+
 // --- duplicate ids / connections -----------------------------------
 check("duplicate agent id", { agents: [agent("a"), agent("a")], connections: [] }, false, ["agent-duplicate-id"]);
 check("duplicate connection", { agents: [agent("a"), agent("b")], connections: [conn("c1", "a", "b"), conn("c2", "a", "b")] }, false, ["connection-duplicate"]);

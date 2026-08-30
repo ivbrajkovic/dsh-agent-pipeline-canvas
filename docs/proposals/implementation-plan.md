@@ -108,6 +108,18 @@ node model, and the executor are REBUILT.
   bounded write-beat window where a just-armed head publishes paused before
   its retirement lands (self-healing by the flip; cheap fix if it matters:
   skip the paused-state writes when the run already failed).
+- **P7** — the bound-semantics decision the P3-scrutiny note demanded: the
+  port bound is a DELIVERY count (max messages the port accepts over the run,
+  the synthetic source's seed included), not a backlog cap — principle 4's
+  "maximum delivery count / a loop budget is a port bound" wording wins,
+  because a free-running cycle never overflows a backlog cap (the consumer
+  drains each message before the next arrives) and this phase's loop-budget
+  gate is unsatisfiable under the P1 reading. The P3 fan-in overflow case is
+  behaviorally unchanged (the second racing arrival is still the dropped one;
+  the all-of join still starves). Also discovered en route: a cycle never
+  self-starts (the source feeds edge-less nodes only), so the gate's
+  Coder→Review loop is authored with a task root wired into the coder's
+  any-of port — one firing per arrival; loop graphs need an outside seed.
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from

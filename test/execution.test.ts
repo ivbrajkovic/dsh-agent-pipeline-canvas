@@ -3,8 +3,11 @@
 // Imports the canonical pure implementation from lib/execution.js (the built
 // output of src/execution.ts; the Host and the runner import the same module).
 // This exercises the runtime input/output shapes, NOT scheduling/invocation —
-// those are out of scope.
-import { classifyGraph, agentInput, agentPrompt, pipelineResult, topoOrder, portGraph, INPUT_KEY } from "../lib/execution.js";
+// those are out of scope. The selective-emission contract (evaluateBindings)
+// and the projection's deterministic firing-id order (compareFiringIds) are
+// pinned here too.
+import { classifyGraph, agentInput, agentPrompt, pipelineResult, topoOrder, portGraph, evaluateBindings, INPUT_KEY } from "../lib/execution.js";
+import { compareFiringIds } from "../lib/projection.js";
 import { deepStrictEqual } from "node:assert";
 
 let passed = 0;
@@ -212,6 +215,65 @@ const graph = (agents: unknown[], connections: unknown[]) => ({ agents, connecti
 	const pg = portGraph({ agents: [a], connections: [] });
 	eq("legacy input string is the port id", pg.byId.a.inputs[0].portId, "a:custom-in");
 	eq("legacy output string is the port id", pg.byId.a.outputs[0].portId, "a:custom-out");
+}
+
+// --- evaluateBindings (selective emission, P7) ---------------------------
+{
+	// First match wins: the structured field routes to its port.
+	const bindings = [
+		{ field: "action", value: "mail", port: "mail" },
+		{ field: "action", value: "slack", port: "slack" },
+	];
+	eq("bindings: first match selects the port", evaluateBindings(bindings, { action: "mail" }), "mail");
+	eq("bindings: second rule matches when the first does not", evaluateBindings(bindings, { action: "slack" }), "slack");
+	eq("bindings: no match emits on no port", evaluateBindings(bindings, { action: "archive" }), null);
+	eq("bindings: a missing field matches nothing", evaluateBindings(bindings, {}), null);
+}
+{
+	// The catch-all (no value) matches any structured result, wherever the
+	// field is present or absent — the author orders it last.
+	const bindings = [{ field: "action", value: "mail", port: "mail" }, { field: "action", port: "other" }];
+	eq("bindings: the catch-all catches the no-match case", evaluateBindings(bindings, { action: "archive" }), "other");
+	eq("bindings: the catch-all matches a field-less result too", evaluateBindings(bindings, { other: 1 }), "other");
+	eq("bindings: the match before the catch-all wins", evaluateBindings(bindings, { action: "mail" }), "mail");
+	eq("bindings: a lone catch-all is the everything-goes-to rule", evaluateBindings([{ port: "out" }], { x: 1 }), "out");
+}
+{
+	// Bindings evaluate ONLY against a structured result.
+	eq("bindings: no structured result — null even with a catch-all", evaluateBindings([{ port: "out" }], undefined), null);
+	eq("bindings: null structured — null", evaluateBindings([{ port: "out" }], null), null);
+	eq("bindings: no bindings — null (non-selective emission is the kernel's default)", evaluateBindings(undefined, { action: "mail" }), null);
+	eq("bindings: empty list — null", evaluateBindings([], { a: 1 }), null);
+}
+{
+	// Field equality is strict with a String-coerced fallback (schema numbers
+	// match "1"-typed bindings).
+	const bindings = [{ field: "code", value: "200", port: "ok" }];
+	eq("bindings: string equals string", evaluateBindings(bindings, { code: "200" }), "ok");
+	eq("bindings: a schema number matches a string-typed value", evaluateBindings(bindings, { code: 200 }), "ok");
+	eq("bindings: distinct values stay distinct", evaluateBindings(bindings, { code: 404 }), null);
+	eq("bindings: strict-only for objects (String fallback is [object Object])", evaluateBindings([{ field: "a", value: "x", port: "p" }], { a: { x: 1 } }), null);
+}
+{
+	// Malformed entries are skipped, never thrown; the first WELL-SHAPED match
+	// wins. A value-less entry is the catch-all whatever its field (validation
+	// reports the shape; the evaluation stays total).
+	const malformed = [null, "junk", { field: "action", value: "mail", port: "mail" }] as unknown as Array<{ field: string; port: string; value?: unknown }>;
+	eq("bindings: malformed entries skipped", evaluateBindings(malformed, { action: "mail" }), "mail");
+	eq("bindings: binding to an empty port is skipped", evaluateBindings([{ field: "action", value: "mail", port: "" }], { action: "mail" }), null);
+	eq("bindings: a value-less entry is the catch-all whatever its field", evaluateBindings([{ field: "", port: "p" }], { action: "mail" }), "p");
+}
+
+// --- compareFiringIds (the projection's deterministic firing order) -------
+{
+	eq("firing ids: numeric order beyond 999 (the P5 scrutiny note)",
+		["f-1000", "f-999", "f-1001", "f-998"].sort(compareFiringIds),
+		["f-998", "f-999", "f-1000", "f-1001"]);
+	eq("firing ids: lexicographic would flip past 999",
+		["f-1000", "f-999"].sort(compareFiringIds).join(), "f-999,f-1000");
+	eq("firing ids: single vs multi digit", ["f-10", "f-9"].sort(compareFiringIds).join(), "f-9,f-10");
+	eq("firing ids: equal tails fall back to byte order", compareFiringIds("f-007", "f-7"), -1);
+	eq("firing ids: non-numeric ids sort by bytes", ["g", "f"].sort(compareFiringIds).join(), "f,g");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

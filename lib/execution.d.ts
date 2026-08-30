@@ -1,4 +1,4 @@
-import type { Agent, AgentExecutionInput, AgentInputContext, ClassifiedGraph, PortGraph, PipelineExecutionResult } from "./types.ts";
+import type { Agent, AgentExecutionInput, AgentInputContext, ClassifiedGraph, OutputBinding, PortGraph, PipelineExecutionResult } from "./types.ts";
 /** Reserved key that carries the pipeline-level input to a root agent. */
 export declare const INPUT_KEY = "$input";
 /** Deterministic byte-order comparison (pure; identical across runtimes). */
@@ -53,6 +53,22 @@ export declare function topoOrder(graph: unknown): string[];
  * @returns the port graph: agent ids (array order) and per-agent port views.
  */
 export declare function portGraph(graph: unknown): PortGraph;
+/**
+ * Evaluate a node's output-port bindings against one firing's structured
+ * result (conditional-dispatch §2 — the executor-side comparison, no extra
+ * model call). Bindings hold in declaration order and the FIRST match wins:
+ * its `port` is the emission port. A binding without `value` is the
+ * catch-all — it matches any structured result regardless of the field, so
+ * the author orders it last. Field equality is strict with a String-coerced
+ * fallback (a schema number matches a "1"-typed binding value). Returns the
+ * matched PORT NAME, or null when there are no bindings, no structured
+ * result, or no match — a bound node emits on no port (the honest quiet; the
+ * starved downstream nodes surface in the run report).
+ *
+ * Total over malformed entries (a binding that names no field or port is
+ * skipped, never thrown) — validateGraph reports the declarations.
+ */
+export declare function evaluateBindings(bindings: readonly OutputBinding[] | undefined | null, structured: unknown): string | null;
 /**
  * Build the structured input an agent receives. This is THE input contract:
  * always an object keyed by source.

@@ -31,7 +31,13 @@
 // drained sibling's emission would make it fireable), in-flight siblings drain
 // with their outputs preserved, the failed firing carries error + stopReason,
 // a parked control wait unwinds instead of hanging, and the record byte-stabilizes
-// after finalization.
+// after finalization. The P7 selective-emission cases pin conditional dispatch:
+// a bound node emits only on the first matched port (the unselected branch
+// never fires), the catch-all catches the no-match case, a node with bindings
+// and no structured result emits on no port (honest quiet, starved downstream
+// reported), the any-of join fires on whichever branch ran, the feedback/
+// verdict loop ends on verdict (quiescence), and the feedback port's delivery
+// bound caps the loop (drop recorded, nothing downstream of the drop).
 import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
 import { validateGraph } from "../lib/graph.js";
 import { projectNodes } from "../lib/projection.js";
@@ -58,7 +64,7 @@ const conn = (id: string, source: string, target: string) => ({
 type EndListener = (info: { id?: string; stopReason?: string; lastAssistantMessage?: unknown }) => void;
 
 interface HeldOneshot {
-	resolve: (result: { output: Array<{ type: string; text: string }>; stopReason: string }) => void;
+	resolve: (result: { output: Array<{ type: string; text: string }>; stopReason: string; structured?: unknown }) => void;
 	reject: (error: unknown) => void;
 }
 
@@ -157,12 +163,21 @@ function makeHarness(options: { continuable?: boolean; holdOneshots?: boolean } 
 			const info = { runId: "run-" + childId, provider: "spawn", id: childId, local: true, stopReason, lastAssistantMessage: [{ type: "text", text: output }] };
 			for (const listener of [...listeners]) listener(info);
 		},
-		/** Settle a HELD one-shot child (holdOneshots) with a successful result. */
-		resolveOneshot(childId: string, output: string, stopReason = "completed") {
+		/**
+		 * Settle a HELD one-shot child (holdOneshots) with a successful result.
+		 * `structured` is the provider's validated structured value (what an
+		 * outputSchema child returns) — selective emission evaluates a node's
+		 * output bindings against it.
+		 */
+		resolveOneshot(childId: string, output: string, stopReason = "completed", structured?: unknown) {
 			const deferred = heldOneshots.get(childId);
 			if (deferred === undefined) throw new Error("no held one-shot child \"" + childId + "\"");
 			heldOneshots.delete(childId);
-			deferred.resolve({ output: [{ type: "text", text: output }], stopReason });
+			deferred.resolve({
+				output: [{ type: "text", text: output }],
+				stopReason,
+				...(structured !== undefined ? { structured } : {}),
+			});
 		},
 		/** Fail a HELD one-shot child (holdOneshots): runOneAgent records the error. */
 		failOneshot(childId: string, message: string) {
@@ -1647,6 +1662,273 @@ await withTempDir(async (cwd) => {
 	okCheck("refire-bp: completes with the re-fired output; the old parked firing stays history",
 		done.state === "completed" && done.firings.find((f) => f.seq === 3)?.status === "done"
 		&& done.firings.find((f) => f.seq === 1)?.status === "paused" && done.firings.find((f) => f.seq === 2)?.status === "aborted");
+});
+
+// --- GATE P7: selective emission (conditional-dispatch.md) — the analyze node
+// routes on its structured result: the unselected branch never fires, the
+// catch-all catches the no-match case, the any-of join fires on whichever
+// branch ran, and emittedTo records the port selection -------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				{
+					...agent("n", "Analyze", "Decide the channel."),
+					outputPorts: ["mail", "slack"],
+					bindings: [
+						{ field: "action", value: "mail", port: "mail" },
+						{ field: "action", value: "slack", port: "slack" },
+					],
+					settings: { outputSchema: { type: "object" } },
+				},
+				agent("m", "Mail", "M."),
+				agent("s", "Slack", "S."),
+				{ ...agent("j", "Join", "J."), inputPorts: [{ name: "p1", policy: "any-of" }, { name: "p2", policy: "any-of" }] },
+			],
+			connections: [connP("c1", "n", "n:mail", "m", "m:in"), connP("c2", "n", "n:slack", "s", "s:in"), connP("c3", "m", "m:out", "j", "j:p1"), connP("c4", "s", "s:out", "j", "j:p2")],
+		},
+		input: "doc",
+	});
+	if (!started.ok) { okCheck("emit: start ok", false); return; }
+	await waitFor("n started", () => harness.starts.length === 1);
+	// The structured result selects the mail port; the slack branch never starts.
+	harness.resolveOneshot(harness.starts[0].childId, "<out:n>", "completed", { action: "mail" });
+	await waitFor("m started on the mail branch", () => harness.starts.length === 2);
+	okCheck("emit: only the selected branch starts (no model call on slack)", harness.starts[1].label === "Mail");
+	const mid = await registry.getRun(started.runId, cwd) as RunRecord;
+	okCheck("emit: the firing recorded emittedTo [mail]", mid.firings[0].emittedTo?.join() === "mail");
+	harness.resolveOneshot(harness.starts[1].childId, "<out:mail>");
+	await waitFor("the any-of join fired on the branch that ran", () => harness.starts.length === 3);
+	okCheck("emit: the join composed from the mail branch alone", harness.starts[2].prompt === "J.\n\n## Mail\n<out:mail>");
+	harness.resolveOneshot(harness.starts[2].childId, "<out:joined>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("emit: completes with three done firings (slack has none)",
+		done.state === "completed" && done.firings.length === 3 && done.firings.every((f) => f.status === "done")
+		&& done.firings.every((f) => f.nodeId !== "s"));
+	okCheck("emit: the quiet slack branch surfaces in the run report",
+		harness.warnings.some((w) => w.includes("waiting nodes: s")));
+});
+
+// --- GATE P7: the catch-all binding catches the no-match case -----------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				{
+					...agent("n", "Analyze", "Decide."),
+					outputPorts: ["mail", "other"],
+					bindings: [{ field: "action", value: "mail", port: "mail" }, { field: "action", port: "other" }],
+					settings: { outputSchema: { type: "object" } },
+				},
+				agent("m", "Mail", "M."),
+				agent("o", "Other", "O."),
+			],
+			connections: [connP("c1", "n", "n:mail", "m", "m:in"), connP("c2", "n", "n:other", "o", "o:in")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("catchall: start ok", false); return; }
+	await waitFor("n started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:n>", "completed", { action: "archive" });
+	await waitFor("the catch-all branch started", () => harness.starts.length === 2);
+	okCheck("catchall: the no-match result fell to the catch-all port", harness.starts[1].label === "Other");
+	harness.resolveOneshot(harness.starts[1].childId, "<out:other>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("catchall: completes with the catch-all branch done, mail quiet",
+		done.state === "completed" && done.firings.length === 2
+		&& done.firings[0].emittedTo?.join() === "other" && done.firings.every((f) => f.nodeId !== "m"));
+});
+
+// --- GATE P7: bindings without a structured result emit on no port — the
+// honest quiet: nothing downstream starts, the starvation report names it ------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				{
+					...agent("n", "Analyze", "Decide."),
+					outputPorts: ["mail", "slack"],
+					bindings: [{ field: "action", value: "mail", port: "mail" }],
+					// No outputSchema: the one-shot child returns plain text —
+					// nothing for the bindings to evaluate against.
+				},
+				agent("m", "Mail", "M."),
+			],
+			connections: [connP("c1", "n", "n:mail", "m", "m:in")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("quiet: start ok", false); return; }
+	await waitFor("n started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:n>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("quiet: the run completes with n done and m never started",
+		done.state === "completed" && done.firings.length === 1 && done.firings[0].status === "done"
+		&& harness.starts.length === 1);
+	okCheck("quiet: the empty selection is recorded on the firing", done.firings[0].emittedTo?.length === 0);
+	okCheck("quiet: the starved downstream node is reported", harness.warnings.some((w) => w.includes("waiting nodes: m")));
+});
+
+// --- GATE P7: the feedback/verdict loop — emitting feedback continues the
+// loop, emitting only the verdict ends it (quiescence); the loop composes for
+// free (conditional-dispatch §3). The cycle is seeded by the task root (the
+// source feeds edge-less nodes only), whose message enters the coder's any-of
+// port; the feedback re-feeds the same port — one firing per arrival. --------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("k", "Task", "Task."),
+				{ ...agent("c", "Coder", "Code."), inputPorts: [{ name: "in", policy: "any-of" }] },
+				{
+					...agent("r", "Review", "Review."),
+					outputPorts: ["feedback", "verdict"],
+					bindings: [
+						{ field: "decision", value: "feedback", port: "feedback" },
+						{ field: "decision", value: "verdict", port: "verdict" },
+					],
+					settings: { outputSchema: { type: "object" } },
+				},
+				agent("t", "Terminal", "T."),
+			],
+			connections: [connP("c0", "k", "k:out", "c", "c:in"), connP("c1", "c", "c:out", "r", "r:in"), connP("c2", "r", "r:feedback", "c", "c:in"), connP("c3", "r", "r:verdict", "t", "t:in")],
+		},
+		input: "build",
+	});
+	if (!started.ok) { okCheck("loop: start ok", false); return; }
+	// The task root seeds the cycle; the coder composes round 1 from it alone.
+	await waitFor("task started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<task:1>");
+	await waitFor("coder round 1", () => harness.starts.length === 2);
+	okCheck("loop: the coder fired from the task seed", harness.starts[1].prompt === "Code.\n\n## Task\n<task:1>");
+	harness.resolveOneshot(harness.starts[1].childId, "<code:1>");
+	await waitFor("review round 1", () => harness.starts.length === 3);
+	// Feedback: the loop continues — the coder re-fires on the feedback arrival.
+	// The review's STRUCTURED result is what flows downstream, rendered as JSON
+	// (the one-shot adoption prefers it over the raw text).
+	harness.resolveOneshot(harness.starts[2].childId, "<review:1>", "completed", { decision: "feedback" });
+	await waitFor("coder round 2 (the feedback re-fed the coder)", () => harness.starts.length === 4);
+	okCheck("loop: the coder re-fired from the feedback port on the rendered structured result",
+		harness.starts[3].prompt === "Code.\n\n## Review\n" + JSON.stringify({ decision: "feedback" }, null, 2));
+	harness.resolveOneshot(harness.starts[3].childId, "<code:2>");
+	await waitFor("review round 2", () => harness.starts.length === 5);
+	// Verdict: the feedback port goes quiet and the loop ends.
+	harness.resolveOneshot(harness.starts[4].childId, "<review:2>", "completed", { decision: "verdict" });
+	await waitFor("the terminal started on the verdict branch", () => harness.starts.length === 6);
+	okCheck("loop: the verdict branch fed the terminal", harness.starts[5].label === "Terminal");
+	harness.resolveOneshot(harness.starts[5].childId, "<final>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("loop: run completed at quiescence with coder×2, review×2, terminal×1",
+		done.state === "completed" && done.firings.length === 6
+		&& done.firings.filter((f) => f.nodeId === "c").map((f) => f.seq).join() === "1,2"
+		&& done.firings.filter((f) => f.nodeId === "r").length === 2
+		&& done.firings.filter((f) => f.nodeId === "t").length === 1);
+	okCheck("loop: the verdict firing recorded emittedTo [verdict]",
+		done.firings.find((f) => f.nodeId === "r" && f.seq === 2)?.emittedTo?.join() === "verdict");
+});
+
+// --- GATE P7: the loop BUDGET — the feedback entry's delivery bound caps the
+// iterations: the overflowing message is dropped + recorded (design principle
+// 4), nothing downstream of the drop fires, and the run still ends cleanly ----
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("k", "Task", "Task."),
+				// bound 2: the task seed + ONE feedback round; the second
+				// feedback delivery overflows and is dropped.
+				{ ...agent("c", "Coder", "Code."), inputPorts: [{ name: "in", policy: "any-of", bound: 2 }] },
+				{
+					...agent("r", "Review", "Review."),
+					outputPorts: ["feedback", "verdict"],
+					bindings: [{ field: "decision", value: "feedback", port: "feedback" }, { field: "decision", value: "verdict", port: "verdict" }],
+					settings: { outputSchema: { type: "object" } },
+				},
+				agent("t", "Terminal", "T."),
+			],
+			connections: [connP("c0", "k", "k:out", "c", "c:in"), connP("c1", "c", "c:out", "r", "r:in"), connP("c2", "r", "r:feedback", "c", "c:in"), connP("c3", "r", "r:verdict", "t", "t:in")],
+		},
+		input: "build",
+	});
+	if (!started.ok) { okCheck("budget: start ok", false); return; }
+	await waitFor("task started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<task:1>");
+	await waitFor("coder round 1", () => harness.starts.length === 2);
+	harness.resolveOneshot(harness.starts[1].childId, "<code:1>");
+	await waitFor("review round 1", () => harness.starts.length === 3);
+	harness.resolveOneshot(harness.starts[2].childId, "<review:1>", "completed", { decision: "feedback" });
+	await waitFor("coder round 2", () => harness.starts.length === 4);
+	harness.resolveOneshot(harness.starts[3].childId, "<code:2>");
+	await waitFor("review round 2", () => harness.starts.length === 5);
+	// The second feedback overflows the coder's bound (seed + 1 accepted).
+	harness.resolveOneshot(harness.starts[4].childId, "<review:2>", "completed", { decision: "feedback" });
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("budget: the run ends completed at the bound (a dropped loop message is not a failure)",
+		done.state === "completed");
+	okCheck("budget: the overflow is recorded against the port",
+		JSON.stringify(done.dropped) === JSON.stringify([{ nodeId: "c", port: "in", from: "r" }]));
+	okCheck("budget: the coder fired exactly twice; the terminal never fired",
+		done.firings.filter((f) => f.nodeId === "c").length === 2
+		&& done.firings.every((f) => f.nodeId !== "t") && harness.starts.length === 5);
+	okCheck("budget: the overflowing firing still recorded its port selection",
+		done.firings.find((f) => f.nodeId === "r" && f.seq === 2)?.emittedTo?.join() === "feedback");
+});
+
+// --- P7: a multi-port node WITHOUT bindings still emits everywhere (the P3
+// default); declared output ports do not change an unbound node's behavior ----
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				{ ...agent("n", "Broad", "B."), outputPorts: ["a", "b"] },
+				agent("x", "X", "X."),
+				agent("y", "Y", "Y."),
+			],
+			connections: [connP("c1", "n", "n:a", "x", "x:in"), connP("c2", "n", "n:b", "y", "y:in")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("allports: start ok", false); return; }
+	await waitFor("n started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:n>");
+	await waitFor("both branches started", () => harness.starts.length === 3);
+	harness.resolveOneshot(harness.starts[1].childId, "<out:x>");
+	harness.resolveOneshot(harness.starts[2].childId, "<out:y>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("allports: an unbound node emits on every declared port",
+		done.state === "completed" && done.firings.length === 3
+		&& done.firings[0].emittedTo?.join() === "a,b"
+		&& done.firings.every((f) => f.status === "done"));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

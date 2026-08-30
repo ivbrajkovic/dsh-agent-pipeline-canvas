@@ -47,6 +47,13 @@ export interface NodeProjection {
     pausedQueue: RunFiring[];
 }
 /**
+ * Deterministic FIRING-ID order, numeric on the id suffix ("f-999" < "f-1000"
+ * — the P5 scrutiny note: lexicographic order flips past 999, and loops can
+ * exceed that). Ids without a numeric tail (or with equal tails) fall back to
+ * byte order, so the result stays total and stable over malformed ids.
+ */
+export declare function compareFiringIds(a: string, b: string): number;
+/**
  * Every firing with `status` that no later firing of the same node supersedes,
  * in firing-id order — the log's unresolved work of that kind. For "paused"
  * these are the settled-but-unresolved breakpoints: the pending-pause queue

@@ -68,10 +68,35 @@ export interface InputPortSpec {
 	 */
 	policy?: "all-of" | "any-of";
 	/**
-	 * Max unconsumed messages the port queues before overflow drops one
-	 * (positive integer); absent = unbounded.
+	 * Delivery bound (design principle 4 — a loop budget): the max number of
+	 * messages the port ACCEPTS over the run (the synthetic source's seed
+	 * counts); further arrivals are dropped and recorded in the run record's
+	 * `dropped` list. Positive integer; absent = unbounded. (The delivery-count
+	 * reading is what makes a loop bound meaningful — a free-running consumer
+	 * never overflows a backlog cap because it drains each message before the
+	 * next arrives.)
 	 */
 	bound?: number;
+}
+
+/**
+ * One output-port binding (selective emission — conditional-dispatch §2): maps
+ * a structured-output field to a port (`field == value → port`). A binding
+ * without `value` is the CATCH-ALL — it matches any structured result, so it
+ * belongs last. Bindings evaluate in declaration order and the FIRST match
+ * selects the emission port; no match emits on no port. They evaluate only
+ * against a STRUCTURED result (`settings.outputSchema` — a one-shot child's
+ * `SubagentResult.structured`), so a node with bindings and no structured
+ * output emits on no port; the edit panel warns when bindings are set without
+ * a schema (and when a breakpoint makes structured output impossible).
+ */
+export interface OutputBinding {
+	/** The structured-result field to compare (top-level property name). */
+	field: string;
+	/** The output PORT NAME to emit on when the predicate holds. */
+	port: string;
+	/** The value the field must equal; omitted = catch-all (matches any result). */
+	value?: unknown;
 }
 
 /** One pipeline agent node on the canvas. */
@@ -117,6 +142,13 @@ export interface Agent {
 	 * (selective emission); an empty list means it emits nowhere.
 	 */
 	outputPorts?: string[];
+	/**
+	 * Output-port bindings (see OutputBinding): the node-field that makes
+	 * emission selective — `field == value → port`, first match wins. Absent →
+	 * non-selective emission (every output port, the default-graph behavior).
+	 * Requires a structured result; see the warnings on the edit panel.
+	 */
+	bindings?: OutputBinding[];
 	/** The agent's settings (see AgentSettings); absent fields inherit defaults. */
 	settings?: AgentSettings;
 	/**
@@ -383,7 +415,13 @@ export interface RunFiring {
 	 * child session id).
 	 */
 	childSessionId?: string;
-	/** Output ports this firing emitted on (selective emission). Reserved. */
+	/**
+	 * Output ports (names) this firing emitted on, written at emission: every
+	 * declared port for a node WITHOUT bindings, the first matched binding's
+	 * port with bindings, and `[]` when a bound node selected nothing (no
+	 * match, or no structured result — the honest quiet). Unset for firings
+	 * that never reached emission (failed, aborted, no output).
+	 */
 	emittedTo?: string[];
 	/** ISO timestamps: when the firing started / reached a terminal status. */
 	startedAt?: string;
@@ -445,7 +483,11 @@ export interface RunRecord {
 	/** Durable executor control state per node (see RunNodeControlState) — the
 	 * parent anchor session ids. Empty for one-shot-only runs. */
 	nodes: Record<string, RunNodeControlState>;
-	/** Bound-overflow record (design principle 4): messages dropped at a port bound. Reserved. */
+	/**
+	 * Bound-overflow record (design principle 4): each message a port's
+	 * delivery bound refused, in drop order. Written by the executor at
+	 * emission; absent until the first drop.
+	 */
 	dropped?: Array<{ nodeId: string; port: string; from: string }>;
 }
 
