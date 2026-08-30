@@ -1,5 +1,5 @@
 import { type RunnerContext, type SubagentRunEndInfoLike } from "./runner.ts";
-import type { PipelineGraph, RunRecord } from "./types.ts";
+import type { LegacyRunRecord, PipelineGraph, RunRecord } from "./types.ts";
 /** The live-Agent fields the coordinator machinery reads. */
 interface LiveAgentLike {
     id: string;
@@ -91,8 +91,9 @@ export declare class RunRegistry {
      * One run's full record: in-memory when an executor holds it, else from
      * disk under `cwd` (loading/sweeping the workspace first, so a stale
      * running record is swept and a paused one resurrected before it is read).
+     * A legacy v1 record is served read-only.
      */
-    getRun(runId: unknown, cwd?: unknown): Promise<RunRecord | null>;
+    getRun(runId: unknown, cwd?: unknown): Promise<RunRecord | LegacyRunRecord | null>;
     /**
      * Subscribe to a run's transitions. Returns a disposer, or null when the
      * run has no live executor (a terminal record will never update again).
@@ -116,6 +117,19 @@ export declare class RunRegistry {
      * (or null). In-memory executors always win over their disk copies.
      */
     private loadFromDisk;
+    /**
+     * First contact with an active record after a (re)load. v2 `running`
+     * records are stale (their executor died with the previous process) and
+     * sweep to `aborted` — in-flight firings aborted, completed outputs
+     * preserved; v2 `paused` records resurrect as fully controllable
+     * executors. Legacy v1 records are read-only: a stale `running` one sweeps
+     * to `aborted` exactly as before; a `paused` one finalizes `aborted` with
+     * an explanatory error — the v2 executor cannot drive the old shape, and a
+     * paused run has nothing in flight, so its remaining cost is zero.
+     */
+    private sweepOrResurrect;
+    /** Persist a swept record (best effort — a failed sweep is logged, not fatal). */
+    private persistSwept;
 }
 export {};
 //# sourceMappingURL=runs.d.ts.map

@@ -346,17 +346,28 @@ export type PipelineRunResult = PipelineRunSuccess | PipelineRunFailure;
 /** Terminal-or-not lifecycle state of a whole run. */
 export type RunState = "running" | "paused" | "completed" | "aborted" | "error";
 
-/** Per-agent status inside a run record. */
-export type RunNodeStatus = "pending" | "running" | "done" | "paused" | "aborted" | "error";
+/** Lifecycle status of one firing (and of a node slot in a legacy v1 record). */
+export type RunFiringStatus = "pending" | "running" | "paused" | "done" | "aborted" | "error";
 
-/** One agent's durable state within a run record. */
-export interface RunNodeState {
-	status: RunNodeStatus;
+/**
+ * One firing in the run record's FIRING LOG: one start of one node's agent
+ * with one composed input. The log is the run's truth — there is deliberately
+ * NO parallel per-node status/output bookkeeping (design principle 5); the
+ * per-node view the UI shows is computed by projectNodes() in ./projection.ts.
+ * A node that re-fires (Rerun) gets one firing per start, numbered by `seq`;
+ * steering continues the SAME firing's child and updates its output in place.
+ */
+export interface RunFiring {
+	/** Stable, start-ordered id ("f-001", "f-002", …) — log order by start. */
+	firingId: string;
+	nodeId: string;
+	/** 1-based firing number within the node (increments on Rerun). */
+	seq: number;
+	status: RunFiringStatus;
 	/**
-	 * The composed prompt string this agent was (or would be) started with.
-	 * Written ONCE, when the executor first reaches the node, and immutable for
-	 * the run's lifetime — Rerun restarts the agent with this verbatim input,
-	 * never with any steering conversation content.
+	 * The composed prompt this firing started with. Written once at start and
+	 * immutable — every re-firing of the node carries the SAME verbatim input,
+	 * never any steering conversation content.
 	 */
 	input?: string;
 	/** The adopted output (text, or rendered JSON for a structured one-shot result). */
@@ -365,18 +376,39 @@ export interface RunNodeState {
 	/** The harness stop reason of the settling epoch (completed/aborted/error/…). */
 	stopReason?: string;
 	/**
-	 * The agent's child session id. For a breakpointed (continuable) agent this
-	 * is the durable continuable child id — stable across steering and restarts,
-	 * and the transcript address for inspection. For a one-shot agent it is the
-	 * published run id (the child session id).
+	 * The firing's child session id. For a continuable firing this is the
+	 * durable continuable child id — stable across steering and the transcript
+	 * address for inspection; a Rerun starts a NEW child, so the new firing
+	 * carries a new id. For a one-shot firing it is the published run id (the
+	 * child session id).
 	 */
 	childSessionId?: string;
+	/** Output ports this firing emitted on (selective emission). Reserved. */
+	emittedTo?: string[];
+	/** ISO timestamps: when the firing started / reached a terminal status. */
+	startedAt?: string;
+	settledAt?: string;
+	/** Reserved for per-firing token accounting (run-operations §3 — out of scope). */
+	usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 }
 
 /**
- * The durable per-run record, persisted per workspace and streamed to the
- * browser over SSE. `graph` is the immutable snapshot the run was started
- * from; canvas edits during a run affect only the NEXT run.
+ * Durable EXECUTOR CONTROL state for one node — the only per-node data the
+ * record still carries. Everything the UI shows is projected from the firing
+ * log (./projection.ts), never stored beside it. Empty until per-node parent
+ * anchors land (the executor spec §5), which moves the anchor id in here.
+ */
+export interface RunNodeControlState {
+	/** The node's own parent anchor session id (per-node coordinator; P4). */
+	parentAnchorSessionId?: string;
+}
+
+/**
+ * The durable per-run record (recordVersion 2 — the firing log), persisted per
+ * workspace and streamed to the browser over SSE. `graph` is the immutable
+ * snapshot the run was started from; canvas edits during a run affect only the
+ * NEXT run. The executor derives its walk order from that snapshot — the order
+ * is no longer persisted.
  */
 export interface RunRecord {
 	runId: string;
@@ -388,20 +420,70 @@ export interface RunRecord {
 	 * The disposable per-run coordinator session id (hidden `origin: "subagent"`
 	 * agent that parents the run's continuable children so settlement notices
 	 * never reach the user's chat). Absent until the first continuable start.
+	 * Kept until the per-node parent anchors land, which replace the shared
+	 * coordinator and move the durable address into `nodes[id]`.
 	 */
 	coordinatorSessionId?: string;
+	/** The record schema version (2 = the firing log). */
+	recordVersion: 2;
 	createdAt: string;
 	updatedAt: string;
 	state: RunState;
-	/** The agent the run is paused at (when `state === "paused"`). */
+	/**
+	 * The FIRING the run is paused at (when `state === "paused"`). The client
+	 * derives the node via the projection; Rerun parks a NEW firing, so the
+	 * pointer moves with the queue head.
+	 */
 	pausedAt?: string;
 	/** Immutable graph snapshot. */
 	graph: PipelineGraph;
 	/** The pipeline-level input the run was started with. */
 	input?: unknown;
-	/** Deterministic topological order the executor follows. */
+	/** Max firings in flight (executor spec §1); default 4. Reserved until the kernel lands. */
+	maxInFlight?: number;
+	/** The firing log — append-ordered, one entry per firing (start order). */
+	firings: RunFiring[];
+	/** Durable executor control state per node (see RunNodeControlState). */
+	nodes: Record<string, RunNodeControlState>;
+	/** Bound-overflow record (design principle 4): messages dropped at a port bound. Reserved. */
+	dropped?: Array<{ nodeId: string; port: string; from: string }>;
+}
+
+// ---- Legacy v1 record (pre-firing-log) — read-only --------------------------------
+// Records without `recordVersion` were written by the sequential executor
+// before the firing log. They are READ ONLY: the registry sweeps a stale v1
+// `running` record to `aborted` exactly as before, finalizes a v1 `paused`
+// record to `aborted` with an explanatory error (the v2 executor cannot drive
+// the old shape, and a paused run has nothing in flight — the remaining cost
+// is zero), and never resurrects one. Rendering goes through the projection,
+// which reads both shapes.
+
+/** Per-node status slot inside a legacy v1 record. */
+export interface LegacyRunNodeState {
+	status: RunFiringStatus;
+	input?: string;
+	output?: string;
+	error?: string;
+	stopReason?: string;
+	childSessionId?: string;
+}
+
+/** A run record written before the firing log (no `recordVersion`). */
+export interface LegacyRunRecord {
+	runId: string;
+	cwd: string;
+	sessionId: string;
+	coordinatorSessionId?: string;
+	createdAt: string;
+	updatedAt: string;
+	state: RunState;
+	/** The NODE the run was paused at (the v1 pointer is a node id). */
+	pausedAt?: string;
+	graph: PipelineGraph;
+	input?: unknown;
+	/** Deterministic topological order the v1 executor followed. */
 	order: string[];
-	nodes: Record<string, RunNodeState>;
+	nodes: Record<string, LegacyRunNodeState>;
 }
 
 /** One control command for a run (POST /dsh-agent-pipeline/control). */

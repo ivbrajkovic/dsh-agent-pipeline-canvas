@@ -10,9 +10,15 @@
 //
 // Execution model (sequential by design — a pause halts the whole run, not
 // just one branch): the executor walks the immutable snapshot's topological
-// order, skipping nodes already done. Each node's composed prompt is written
-// ONCE when first reached and is immutable for the run's lifetime (Rerun
-// restarts the agent with this verbatim input, never with steering content).
+// order (derived on demand, never persisted), one FIRING per node start —
+// the sequential run is the special case of one firing per node, and the
+// record is the firing log (recordVersion 2; the per-node view the UI shows
+// is projected from it by lib/projection.ts, never stored). A firing's
+// composed prompt is written ONCE at start and is immutable for the run's
+// lifetime; Rerun appends a NEW firing with the SAME verbatim input (a fresh
+// child; the superseded firing stays in the log), never with steering
+// content. Steering continues the same firing's child and updates its
+// output in place.
 //
 //   - Non-breakpointed agents run through the historical one-shot path
 //     (runOneAgent), parented to the user's session agent — unchanged.
@@ -60,6 +66,7 @@ import { randomUUID } from "node:crypto";
 import { writeAtomic } from "./storage.ts";
 import { validateGraph } from "./graph.ts";
 import { agentInput, agentPrompt, classifyGraph, topoOrder } from "./execution.ts";
+import { projectNodes } from "./projection.ts";
 import {
 	PROVIDER,
 	continuableSupported,
@@ -70,7 +77,7 @@ import {
 	type RunnerContext,
 	type SubagentRunEndInfoLike,
 } from "./runner.ts";
-import type { Agent, PipelineGraph, RunNodeState, RunRecord } from "./types.ts";
+import type { Agent, LegacyRunRecord, PipelineGraph, RunFiring, RunRecord } from "./types.ts";
 
 const RUNS_DIR = ".agent-pipeline/runs";
 
@@ -196,8 +203,17 @@ function recordPath(cwd: string, runId: string): string {
 	return join(cwd, RUNS_DIR, runId + ".json");
 }
 
-/** Parse one record file, or null when missing/corrupt (a bad file is skipped, not fatal). */
-async function readRecordFile(path: string): Promise<RunRecord | null> {
+/** True when the parsed record is the v2 firing-log shape (legacy v1 otherwise). */
+function isV2Record(rec: RunRecord | LegacyRunRecord): rec is RunRecord {
+	return (rec as RunRecord).recordVersion === 2;
+}
+
+/**
+ * Parse one record file, or null when missing/corrupt (a bad file is skipped,
+ * not fatal). Accepts BOTH record versions: v2 (the firing log) and legacy v1
+ * (read-only — swept or finalized, never resurrected or run).
+ */
+async function readRecordFile(path: string): Promise<RunRecord | LegacyRunRecord | null> {
 	let text: string;
 	try {
 		text = await readFile(path, "utf8");
@@ -208,9 +224,15 @@ async function readRecordFile(path: string): Promise<RunRecord | null> {
 		const parsed = JSON.parse(text) as unknown;
 		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
 		const rec = parsed as RunRecord;
-		if (typeof rec.runId !== "string" || typeof rec.cwd !== "string") return null;
-		if (typeof rec.state !== "string" || typeof rec.order !== "object" || rec.order === null) return null;
-		return rec;
+		if (typeof rec.runId !== "string" || typeof rec.cwd !== "string" || typeof rec.state !== "string") return null;
+		if (rec.recordVersion === 2) {
+			if (!Array.isArray(rec.firings)) return null;
+			return rec;
+		}
+		// Legacy v1: the walk order + per-node status slots.
+		const legacy = parsed as LegacyRunRecord;
+		if (legacy.order === null || typeof legacy.order !== "object") return null;
+		return legacy;
 	} catch {
 		return null;
 	}
@@ -238,7 +260,8 @@ class RunExecutor {
 	private coordinatorHandle: AgentHandleLike | null = null;
 	/** The continuable child that may currently have a turn in flight (abort target). */
 	private activeChildId: string | null = null;
-	private currentNodeId: string | null = null;
+	/** The firing any in-flight work is attributed to (executor-failure bookkeeping). */
+	private currentFiringId: string | null = null;
 
 	constructor(services: RunRegistryServices, record: RunRecord, options: { sessionAgent?: unknown; resume?: boolean; onSettle?: (record: RunRecord) => void } = {}) {
 		this.services = services;
@@ -277,11 +300,11 @@ class RunExecutor {
 		return this.controlWaiter !== null;
 	}
 
-	/** Whether a steer command can currently be accepted for the paused node. */
+	/** Whether a steer command can currently be accepted for the paused firing. */
 	canSteer(): boolean {
 		if (!this.canContinuable) return false;
-		const node = this.pausedNode();
-		return node !== null && typeof node.childSessionId === "string" && node.childSessionId.length > 0;
+		const firing = this.pausedFiring();
+		return firing !== null && typeof firing.childSessionId === "string" && firing.childSessionId.length > 0;
 	}
 
 	/** Deposit a command into the mailbox; false when the executor is not waiting. */
@@ -303,10 +326,45 @@ class RunExecutor {
 		return () => { this.listeners.delete(fn); };
 	}
 
-	private pausedNode(): RunNodeState | null {
-		const id = this.record.pausedAt;
-		if (id === undefined) return null;
-		return this.record.nodes[id] ?? null;
+	private pausedFiring(): RunFiring | null {
+		const firingId = this.record.pausedAt;
+		if (firingId === undefined) return null;
+		return this.record.firings.find((f) => f.firingId === firingId) ?? null;
+	}
+
+	/** The next stable firing id: start-ordered, zero-padded ("f-001"…). */
+	private nextFiringId(): string {
+		return "f-" + String(this.record.firings.length + 1).padStart(3, "0");
+	}
+
+	/**
+	 * Open a firing for `nodeId` and append it to the log: the node's first
+	 * firing (`previous === null`, seq 1) or a re-firing superseding
+	 * `previous` (Rerun — one past its seq, same verbatim input).
+	 */
+	private openFiring(nodeId: string, previous: RunFiring | null, input: string): RunFiring {
+		const firing: RunFiring = {
+			firingId: this.nextFiringId(),
+			nodeId,
+			seq: previous !== null ? previous.seq + 1 : 1,
+			status: "running",
+			input,
+			startedAt: new Date().toISOString(),
+		};
+		this.record.firings.push(firing);
+		return firing;
+	}
+
+	/**
+	 * Adopt a settled continuable epoch into its firing: the epoch's
+	 * `lastAssistantMessage` is epoch-relative (only the new answer), so it is
+	 * adopted directly. A successful adoption clears a prior steering error.
+	 */
+	private adoptEpoch(firing: RunFiring, end: SubagentRunEndInfoLike): void {
+		delete firing.error;
+		firing.output = toText(end.lastAssistantMessage);
+		firing.stopReason = end.stopReason;
+		firing.settledAt = new Date().toISOString();
 	}
 
 	private awaitControl(): Promise<ControlCommand> {
@@ -425,13 +483,12 @@ class RunExecutor {
 	// ---- Execution ----
 
 	/**
-	 * Run one continuable epoch for node `id`: ensure the coordinator, start a
-	 * FRESH child with the node's verbatim prompt, dispose the coordinator
+	 * Run one continuable epoch for `firing`: ensure the coordinator, start a
+	 * FRESH child with the firing's verbatim prompt, dispose the coordinator
 	 * immediately after acceptance, and await the child's first settlement.
 	 * Returns the end info, or null when the run was aborted mid-flight.
 	 */
-	private async runContinuableEpoch(id: string, agent: Agent, agentById: Map<string, Agent>, prompt: string): Promise<SubagentRunEndInfoLike | null> {
-		const node = this.record.nodes[id];
+	private async runContinuableEpoch(firing: RunFiring, agent: Agent, agentById: Map<string, Agent>, prompt: string): Promise<SubagentRunEndInfoLike | null> {
 		try {
 			const coordinator = await this.ensureCoordinator();
 			let childId = "";
@@ -448,7 +505,7 @@ class RunExecutor {
 				// parent are dropped instead of burning a model turn.
 				await this.releaseCoordinator();
 			}
-			node.childSessionId = childId;
+			firing.childSessionId = childId;
 			this.activeChildId = childId;
 			await this.commit();
 			const end = await this.endWaiter.wait(childId, this.signal);
@@ -462,13 +519,13 @@ class RunExecutor {
 	}
 
 	/**
-	 * Steer the paused node's SAME child with user feedback and adopt the
-	 * steering epoch's (epoch-relative) output. Throws on failure; the caller
-	 * keeps the run paused so the user can retry or take another action.
+	 * Steer the paused firing's SAME child with user feedback and adopt the
+	 * steering epoch's (epoch-relative) output into the firing. Throws on
+	 * failure; the caller keeps the run paused so the user can retry or take
+	 * another action.
 	 */
-	private async steerNode(id: string, feedback: string): Promise<void> {
-		const node = this.record.nodes[id];
-		const childId = node.childSessionId as string;
+	private async steerNode(firing: RunFiring, feedback: string): Promise<void> {
+		const childId = firing.childSessionId as string;
 		try {
 			const coordinator = await this.ensureCoordinator();
 			try {
@@ -485,8 +542,8 @@ class RunExecutor {
 			const end = await this.endWaiter.wait(childId, this.signal);
 			if (this.signal.aborted) return;
 			if (end !== null) {
-				node.output = toText(end.lastAssistantMessage);
-				node.stopReason = end.stopReason;
+				firing.output = toText(end.lastAssistantMessage);
+				firing.stopReason = end.stopReason;
 			}
 		} finally {
 			this.activeChildId = null;
@@ -494,59 +551,66 @@ class RunExecutor {
 	}
 
 	/**
-	 * The paused control loop for a breakpointed node. Returns true when the
-	 * node was released ("resume") and the topo loop should continue; false
-	 * when the run aborted. Rerun and Steer return to paused when done (or on
-	 * failure, with the failure recorded on the node).
+	 * The paused control loop for a breakpointed node's firing. Returns true
+	 * when the run should continue past the node ("resume"); false when it
+	 * aborted. Rerun appends a NEW firing for the node (a fresh child started
+	 * with the verbatim input; the superseded firing stays in the log with its
+	 * parked output preserved) and parks again on the new one. Steer continues
+	 * the SAME firing's child and returns to paused with the adopted output.
 	 */
-	private async pauseLoop(id: string, agent: Agent, agentById: Map<string, Agent>, upstream: readonly string[], outputsById: Record<string, unknown>): Promise<boolean> {
-		const node = this.record.nodes[id];
+	private async pauseLoop(firing: RunFiring, agent: Agent, agentById: Map<string, Agent>, upstream: readonly string[], outputsById: Record<string, unknown>): Promise<boolean> {
+		let current = firing;
 		while (true) {
-			node.status = "paused";
+			current.status = "paused";
 			this.record.state = "paused";
-			this.record.pausedAt = id;
+			this.record.pausedAt = current.firingId;
 			// Arm the mailbox BEFORE the paused state becomes visible (the commit
 			// persists + publishes it): a client that observes the record as
 			// paused can never hit a window where its command is rejected.
 			const cmdPromise = new Promise<ControlCommand>((resolve) => { this.controlWaiter = resolve; });
 			await this.commit();
 			const cmd = await cmdPromise;
+			const nodeId = current.nodeId;
 			if (cmd.action === "abort") return false;
 			if (cmd.action === "resume") {
-				node.status = "done";
+				current.status = "done";
+				current.settledAt = new Date().toISOString();
 				this.record.state = "running";
 				delete this.record.pausedAt;
 				await this.commit();
 				return true;
 			}
 			if (cmd.action === "rerun") {
-				// Fresh child, verbatim original input — never steering content.
-				this.currentNodeId = id;
+				let rerunFiring: RunFiring | null = null;
 				try {
 					if (this.canContinuable) {
-						node.status = "running";
+						// Fresh child, verbatim original input — never steering content.
+						rerunFiring = this.openFiring(nodeId, current, current.input as string);
 						this.record.state = "running";
+						this.currentFiringId = rerunFiring.firingId;
 						await this.commit();
-						const end = await this.runContinuableEpoch(id, agent, agentById, node.input as string);
+						const end = await this.runContinuableEpoch(rerunFiring, agent, agentById, rerunFiring.input as string);
 						if (end === null) return false;
-						node.output = toText(end.lastAssistantMessage);
-						node.stopReason = end.stopReason;
-						outputsById[id] = node.output;
+						this.adoptEpoch(rerunFiring, end);
+						outputsById[nodeId] = rerunFiring.output;
 					} else {
 						// Degraded deployment: rerun as a fresh one-shot child. The
 						// structured inputs are recomposed deterministically from the
-						// immutable snapshot, so the prompt is `node.input` verbatim.
+						// immutable snapshot, so the prompt is the firing's input
+						// verbatim. Without a live parent the SAME firing re-parks
+						// with the error (nothing new started).
 						const parent = this.resolveSessionAgent();
 						if (parent === undefined) {
-							node.status = "paused";
-							node.error = "the session agent is not live — reopen the conversation, then rerun";
-							this.services.logger.warn(`agent-pipeline: rerun of agent "${id}" has no live session agent`);
+							current.status = "paused";
+							current.error = "the session agent is not live — reopen the conversation, then rerun";
+							this.services.logger.warn(`agent-pipeline: rerun of agent "${nodeId}" has no live session agent`);
 							continue;
 						}
-						node.status = "running";
+						rerunFiring = this.openFiring(nodeId, current, current.input as string);
 						this.record.state = "running";
 						await this.commit();
-						const inputs = agentInput(id, { upstream: [...upstream], upstreamOutputs: outputsById, pipelineInput: this.record.input });
+						this.currentFiringId = rerunFiring.firingId;
+						const inputs = agentInput(nodeId, { upstream: [...upstream], upstreamOutputs: outputsById, pipelineInput: this.record.input });
 						const outcome = await runOneAgent(this.services, {
 							agent,
 							agentById,
@@ -554,58 +618,65 @@ class RunExecutor {
 							parent,
 							signal: this.signal,
 						});
+						rerunFiring.settledAt = new Date().toISOString();
 						if (this.signal.aborted) return false;
 						if (outcome.error) {
-							node.error = outcome.error;
-							node.stopReason = outcome.stopReason;
+							rerunFiring.error = outcome.error;
+							rerunFiring.stopReason = outcome.stopReason;
 						} else {
-							delete node.error;
-							node.output = outcome.output;
-							node.stopReason = outcome.stopReason;
-							node.childSessionId = outcome.childSessionId;
-							outputsById[id] = node.output;
+							delete rerunFiring.error;
+							rerunFiring.output = outcome.output;
+							rerunFiring.stopReason = outcome.stopReason;
+							if (outcome.childSessionId !== undefined) rerunFiring.childSessionId = outcome.childSessionId;
+							outputsById[nodeId] = rerunFiring.output;
 						}
 					}
 				} catch (error) {
 					if (this.signal.aborted) return false;
-					node.status = "paused";
-					node.error = String(error);
-					this.services.logger.warn(`agent-pipeline: rerun of agent "${id}" failed: ${String(error)}`);
+					if (rerunFiring !== null) {
+						rerunFiring.status = "paused";
+						rerunFiring.error = String(error);
+					}
+					this.services.logger.warn(`agent-pipeline: rerun of agent "${nodeId}" failed: ${String(error)}`);
 				} finally {
-					this.currentNodeId = null;
+					this.currentFiringId = null;
 				}
+				if (rerunFiring !== null) current = rerunFiring;
 				continue; // back to paused — the user decides again
 			}
 			if (cmd.action === "steer") {
-				this.currentNodeId = id;
+				this.currentFiringId = current.firingId;
 				try {
-					node.status = "running";
+					current.status = "running";
 					// record.state stays "paused" with pausedAt intact: a crash or
 					// restart mid-steer must resurrect the pause, not sweep the run.
 					await this.commit();
-					await this.steerNode(id, cmd.feedback);
+					await this.steerNode(current, cmd.feedback);
 					if (this.signal.aborted) return false;
-					delete node.error;
-					outputsById[id] = node.output;
+					delete current.error;
+					outputsById[nodeId] = current.output;
 				} catch (error) {
 					if (this.signal.aborted) return false;
-					node.error = String(error);
-					this.services.logger.warn(`agent-pipeline: steering agent "${id}" failed: ${String(error)}`);
+					current.error = String(error);
+					this.services.logger.warn(`agent-pipeline: steering agent "${nodeId}" failed: ${String(error)}`);
 				} finally {
-					this.currentNodeId = null;
+					this.currentFiringId = null;
 				}
 				continue; // still paused with the adopted output
 			}
 		}
 	}
 
-	/** Mark the in-flight/paused node aborted, keep completed outputs, and finalize. */
+	/**
+	 * Mark every in-flight or parked firing aborted (its output preserved — a
+	 * paused firing never released its output into the pipeline flow), keep
+	 * completed firings as they are, and finalize.
+	 */
 	private async finalizeAborted(): Promise<void> {
-		for (const id of this.record.order) {
-			const node = this.record.nodes[id];
-			// A paused node never released its output into the pipeline flow —
-			// the run was aborted AT it, so it reads aborted (output preserved).
-			if (node !== undefined && (node.status === "running" || node.status === "paused")) node.status = "aborted";
+		const now = new Date().toISOString();
+		for (const firing of this.record.firings) {
+			if (firing.status === "running" || firing.status === "paused") firing.status = "aborted";
+			if (firing.status === "aborted" && firing.settledAt === undefined) firing.settledAt = now;
 		}
 		this.record.state = "aborted";
 		delete this.record.pausedAt;
@@ -622,7 +693,7 @@ class RunExecutor {
 		this.onSettle?.(this.record);
 	}
 
-	/** The executor's main loop. */
+	/** The executor's main loop: the topological walk, one firing per start. */
 	private async run(resumeFromPause: boolean): Promise<void> {
 		try {
 			const record = this.record;
@@ -631,56 +702,58 @@ class RunExecutor {
 			for (const agent of record.graph?.agents ?? []) {
 				if (agent != null && agent.id != null) agentById.set(String(agent.id), agent);
 			}
-			// Rebuild downstream inputs from every node that already has an
+			// The walk order is derived from the immutable snapshot — deterministic,
+			// so a resurrected executor re-derives exactly the order it followed.
+			const order = topoOrder(record.graph);
+			// Rebuild downstream inputs from the projection: every node with an
 			// adopted output (done nodes, and the paused node's current output).
+			const projected = projectNodes(record);
 			const outputsById: Record<string, unknown> = {};
-			for (const id of Object.keys(record.nodes)) {
-				const node = record.nodes[id];
+			for (const id of projected.order) {
+				const node = projected.nodes[id];
 				if ((node.status === "done" || node.status === "paused") && typeof node.output === "string") {
 					outputsById[id] = node.output;
 				}
 			}
 
-			const pausedIndex = resumeFromPause && record.pausedAt !== undefined ? record.order.indexOf(record.pausedAt) : -1;
+			const pausedFiring = resumeFromPause ? projected.pausedFiring : undefined;
+			const pausedIndex = pausedFiring !== undefined ? order.indexOf(pausedFiring.nodeId) : -1;
 
-			for (let i = 0; i < record.order.length; i++) {
+			for (let i = 0; i < order.length; i++) {
 				if (this.signal.aborted) break;
-				const id = record.order[i];
+				const id = order[i];
 				const agent = agentById.get(id);
-				const node = record.nodes[id];
-				if (agent === undefined || node === undefined) continue;
-				if (node.status === "done") continue;
+				if (agent === undefined) continue;
+				// Done nodes never re-fire (the log is the truth).
+				if (projected.nodes[id]?.status === "done") continue;
 				// A resurrected executor must not re-run anything before the pause.
 				if (pausedIndex >= 0 && i < pausedIndex) continue;
 
-				// Compose the node's input ONCE — immutable for the run's lifetime.
-				if (typeof node.input !== "string") {
-					const upstream = classified.upstream[id] ?? [];
-					const inputs = agentInput(id, { upstream, upstreamOutputs: outputsById, pipelineInput: record.input });
-					node.input = agentPrompt(agent, inputs, agentById);
-					await this.commit();
+				if (pausedIndex === i) {
+					// Resurrected at the pause point: re-enter the control wait
+					// on the paused firing, running nothing.
+					if (!(await this.pauseLoop(pausedFiring as RunFiring, agent, agentById, classified.upstream[id] ?? [], outputsById))) break;
+					continue;
 				}
 
-				this.currentNodeId = id;
-				try {
-					if (pausedIndex === i) {
-						// Resurrected at the pause point: re-enter the control wait
-						// with the existing output/child, running nothing.
-						if (!(await this.pauseLoop(id, agent, agentById, classified.upstream[id] ?? [], outputsById))) break;
-						continue;
-					}
+				// Open the node's firing: compose the input ONCE — immutable for
+				// the run's lifetime; every re-firing repeats it verbatim.
+				const upstream = classified.upstream[id] ?? [];
+				const inputs = agentInput(id, { upstream, upstreamOutputs: outputsById, pipelineInput: record.input });
+				const firing = this.openFiring(id, null, agentPrompt(agent, inputs, agentById));
+				await this.commit();
 
+				this.currentFiringId = firing.firingId;
+				try {
 					const useContinuable = this.canContinuable && agent.breakpoint === true;
 					if (useContinuable) {
-						node.status = "running";
-						await this.commit();
-						const end = await this.runContinuableEpoch(id, agent, agentById, node.input as string);
+						const end = await this.runContinuableEpoch(firing, agent, agentById, firing.input as string);
 						if (end === null) break;
-						node.output = toText(end.lastAssistantMessage);
-						node.stopReason = end.stopReason;
-						outputsById[id] = node.output;
+						this.adoptEpoch(firing, end);
+						outputsById[id] = firing.output;
+						await this.commit();
 						// Breakpoint armed (useContinuable implies breakpoint): park.
-						if (!(await this.pauseLoop(id, agent, agentById, classified.upstream[id] ?? [], outputsById))) break;
+						if (!(await this.pauseLoop(firing, agent, agentById, upstream, outputsById))) break;
 						continue;
 					}
 
@@ -690,56 +763,55 @@ class RunExecutor {
 						// Typed failure instead of a harness TypeError: the session
 						// agent is not (yet) live — matches the runner's
 						// continue-on-error semantics for the remaining nodes.
-						node.status = "error";
-						node.error = "the session agent is not live — reopen the conversation and start a new run";
+						firing.status = "error";
+						firing.error = "the session agent is not live — reopen the conversation and start a new run";
+						firing.settledAt = new Date().toISOString();
 						await this.commit();
 						continue;
 					}
-					node.status = "running";
-					await this.commit();
-					const upstream = classified.upstream[id] ?? [];
-					const inputs = agentInput(id, { upstream, upstreamOutputs: outputsById, pipelineInput: record.input });
 					const outcome = await runOneAgent(this.services, { agent, agentById, inputs, parent, signal: this.signal });
+					firing.settledAt = new Date().toISOString();
 					if (this.signal.aborted) {
-						node.status = "aborted";
-						node.stopReason = outcome.stopReason;
+						firing.status = "aborted";
+						firing.stopReason = outcome.stopReason;
 						break;
 					}
 					if (outcome.error) {
 						// Runner parity: a failed agent is recorded, the loop continues.
-						node.status = "error";
-						node.error = outcome.error;
-						node.stopReason = outcome.stopReason;
+						firing.status = "error";
+						firing.error = outcome.error;
+						firing.stopReason = outcome.stopReason;
 					} else {
-						node.status = "done";
-						delete node.error;
-						node.output = outcome.output;
-						node.stopReason = outcome.stopReason;
-						if (outcome.childSessionId !== undefined) node.childSessionId = outcome.childSessionId;
+						firing.status = "done";
+						delete firing.error;
+						firing.output = outcome.output;
+						firing.stopReason = outcome.stopReason;
+						if (outcome.childSessionId !== undefined) firing.childSessionId = outcome.childSessionId;
 						outputsById[id] = outcome.output;
 					}
 					await this.commit();
 					// Degraded breakpoints still pause (steering unavailable; the
 					// pause loop's rerun works, its steer is rejected upstream).
 					if (agent.breakpoint === true && this.canContinuable !== true) {
-						if (!(await this.pauseLoop(id, agent, agentById, classified.upstream[id] ?? [], outputsById))) break;
+						if (!(await this.pauseLoop(firing, agent, agentById, upstream, outputsById))) break;
 					}
 				} finally {
-					this.currentNodeId = null;
+					this.currentFiringId = null;
 				}
 			}
 
 			if (this.signal.aborted) await this.finalizeAborted();
 			else await this.finalizeCompleted();
 		} catch (error) {
-			// Unforeseen executor failure: record it on the current node (when one
-			// is attributable) and finalize as an errored run.
+			// Unforeseen executor failure: record it on the firing in flight
+			// (when one is attributable) and finalize as an errored run.
 			this.services.logger.warn(`agent-pipeline: run "${this.record.runId}" executor failed: ${String(error)}`);
-			if (this.currentNodeId !== null) {
-				const node = this.record.nodes[this.currentNodeId];
-				if (node !== undefined) {
-					node.status = "error";
-					node.error = String(error);
+			if (this.currentFiringId !== null) {
+				const firing = this.record.firings.find((f) => f.firingId === this.currentFiringId);
+				if (firing !== undefined) {
+					firing.status = "error";
+					firing.error = String(error);
+					if (firing.settledAt === undefined) firing.settledAt = new Date().toISOString();
 				}
 			}
 			try {
@@ -821,10 +893,10 @@ export class RunRegistry {
 			return { ok: false, error: "another run is already active in this workspace", activeRunId: diskActive.runId };
 		}
 
-		const order = topoOrder(graph);
-		const nodes: Record<string, RunNodeState> = {};
-		for (const id of order) nodes[id] = { status: "pending" };
 		const now = new Date().toISOString();
+		// The executor derives its walk order from the immutable snapshot; the
+		// firing log fills as nodes fire. Per-node control state is empty until
+		// per-node parent anchors land.
 		const record: RunRecord = {
 			runId: randomUUID(),
 			cwd,
@@ -834,8 +906,9 @@ export class RunRegistry {
 			state: "running",
 			graph,
 			...(request.input === undefined ? {} : { input: request.input }),
-			order,
-			nodes,
+			recordVersion: 2,
+			firings: [],
+			nodes: {},
 		};
 		await mkdir(join(cwd, RUNS_DIR), { recursive: true });
 		await writeAtomic(recordPath(cwd, record.runId), `${JSON.stringify(record, null, 2)}\n`);
@@ -869,8 +942,9 @@ export class RunRegistry {
 	 * One run's full record: in-memory when an executor holds it, else from
 	 * disk under `cwd` (loading/sweeping the workspace first, so a stale
 	 * running record is swept and a paused one resurrected before it is read).
+	 * A legacy v1 record is served read-only.
 	 */
-	async getRun(runId: unknown, cwd?: unknown): Promise<RunRecord | null> {
+	async getRun(runId: unknown, cwd?: unknown): Promise<RunRecord | LegacyRunRecord | null> {
 		if (typeof runId !== "string" || runId.length === 0) return null;
 		const executor = this.executors.get(runId);
 		if (executor !== undefined) return executor.record;
@@ -956,40 +1030,75 @@ export class RunRegistry {
 			const rec = await readRecordFile(join(cwd, RUNS_DIR, entry));
 			if (rec === null || rec.cwd !== cwd) continue;
 			if (this.executors.has(rec.runId)) continue; // in-memory state is fresher
-			let isActive = false;
-			if (rec.state === "running") {
-				// Stale: the executor died with the previous process. Abort the
-				// in-flight node, preserve completed outputs.
-				for (const id of rec.order) {
-					const node = rec.nodes?.[id];
-					if (node !== undefined && node.status === "running") node.status = "aborted";
-				}
-				rec.state = "aborted";
-				delete rec.pausedAt;
-				rec.updatedAt = new Date().toISOString();
-				try {
-					await writeAtomic(recordPath(cwd, rec.runId), `${JSON.stringify(rec, null, 2)}\n`);
-				} catch (error) {
-					this.services.logger.warn(`agent-pipeline: sweeping stale run "${rec.runId}" failed: ${String(error)}`);
-				}
-			} else if (rec.state === "paused") {
-				// Fully controllable across the restart: resurrect the executor;
-				// it re-enters the control wait without re-running anything.
-				// Re-resolve the session agent so remaining ONE-SHOT nodes (and a
-				// degraded Rerun) can still start; continuable steer/rerun work
-				// through the cold-resumed coordinator even when it is not live.
-				const executor = new RunExecutor(this.services, rec, {
-					resume: true,
-					sessionAgent: this.services.agents.get(rec.sessionId),
-					onSettle: () => { this.executors.delete(rec.runId); },
-				});
-				this.executors.set(rec.runId, executor);
-				isActive = true;
+			if (rec.state === "running" || rec.state === "paused") {
+				await this.sweepOrResurrect(rec);
 			}
-			if (isActive) {
-				if (best === null || rec.updatedAt > best.updatedAt) best = rec;
+			if (rec.state === "running" || rec.state === "paused") {
+				if (best === null || rec.updatedAt > best.updatedAt) best = rec as RunRecord;
 			}
 		}
 		return best;
+	}
+
+	/**
+	 * First contact with an active record after a (re)load. v2 `running`
+	 * records are stale (their executor died with the previous process) and
+	 * sweep to `aborted` — in-flight firings aborted, completed outputs
+	 * preserved; v2 `paused` records resurrect as fully controllable
+	 * executors. Legacy v1 records are read-only: a stale `running` one sweeps
+	 * to `aborted` exactly as before; a `paused` one finalizes `aborted` with
+	 * an explanatory error — the v2 executor cannot drive the old shape, and a
+	 * paused run has nothing in flight, so its remaining cost is zero.
+	 */
+	private async sweepOrResurrect(rec: RunRecord | LegacyRunRecord): Promise<void> {
+		if (isV2Record(rec)) {
+			if (rec.state === "running") {
+				const now = new Date().toISOString();
+				for (const firing of rec.firings) {
+					if (firing.status === "running") { firing.status = "aborted"; firing.settledAt = now; }
+				}
+				rec.state = "aborted";
+				delete rec.pausedAt;
+				rec.updatedAt = now;
+				await this.persistSwept(rec);
+				return;
+			}
+			// Fully controllable across the restart: resurrect the executor;
+			// it re-enters the control wait without re-running anything.
+			// Re-resolve the session agent so remaining ONE-SHOT nodes (and a
+			// degraded Rerun) can still start; continuable steer/rerun work
+			// through the cold-resumed coordinator even when it is not live.
+			const executor = new RunExecutor(this.services, rec, {
+				resume: true,
+				sessionAgent: this.services.agents.get(rec.sessionId),
+				onSettle: () => { this.executors.delete(rec.runId); },
+			});
+			this.executors.set(rec.runId, executor);
+			return;
+		}
+		// Legacy v1: read-only — swept or finalized, never resurrected.
+		const now = new Date().toISOString();
+		for (const id of rec.order) {
+			const node = rec.nodes?.[id];
+			if (node === undefined) continue;
+			if (node.status === "running") node.status = "aborted";
+			if (rec.state === "paused" && id === rec.pausedAt && node.status === "paused") {
+				node.status = "aborted";
+				node.error = "this paused run predates the firing-log executor and cannot be resumed — start a new run";
+			}
+		}
+		rec.state = "aborted";
+		delete rec.pausedAt;
+		rec.updatedAt = now;
+		await this.persistSwept(rec);
+	}
+
+	/** Persist a swept record (best effort — a failed sweep is logged, not fatal). */
+	private async persistSwept(rec: RunRecord | LegacyRunRecord): Promise<void> {
+		try {
+			await writeAtomic(recordPath(rec.cwd, rec.runId), `${JSON.stringify(rec, null, 2)}\n`);
+		} catch (error) {
+			this.services.logger.warn(`agent-pipeline: sweeping stale run "${rec.runId}" failed: ${String(error)}`);
+		}
 	}
 }

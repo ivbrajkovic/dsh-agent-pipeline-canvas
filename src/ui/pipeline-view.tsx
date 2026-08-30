@@ -18,7 +18,8 @@
 // the pipeline GET's `run` field and re-subscribes — runs outlive the tab.
 import * as React from "react";
 import { validateGraph } from "../graph.ts";
-import { classifyGraph } from "../execution.ts";
+import { classifyGraph, topoOrder } from "../execution.ts";
+import { projectNodes, type ProjectedNode } from "../projection.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
 import type { ValidationResult } from "../types.ts";
 import { AgentConfigPanel } from "./agent-config.tsx";
@@ -239,11 +240,14 @@ function PipelineView({
 	// was taken at POST time — canvas edits never touch the in-flight run.
 
 	const runActive = activeRun !== null && (activeRun.state === "running" || activeRun.state === "paused");
-	const pausedAt = runActive && activeRun.state === "paused" ? activeRun.pausedAt ?? null : null;
-	const inspectOpen = pausedAt !== null
+	// The record is a firing log; the per-node view is computed, never stored.
+	// pausedAt points at a FIRING; the projection resolves it to its node.
+	const runProjection = runActive && activeRun !== null ? projectNodes(activeRun) : null;
+	const pausedNodeId = runActive && activeRun?.state === "paused" ? runProjection?.pausedNodeId ?? null : null;
+	const inspectOpen = pausedNodeId !== null
 		&& activeRun !== null
 		&& typeof activeRun.runId === "string"
-		&& inspectDismissedFor !== (activeRun.runId + ":" + pausedAt);
+		&& inspectDismissedFor !== (activeRun.runId + ":" + (activeRun.pausedAt ?? pausedNodeId));
 
 	function disconnectRunEvents() {
 		if (sseRef.current !== null) { sseRef.current.close(); sseRef.current = null; }
@@ -282,12 +286,14 @@ function PipelineView({
 	}
 
 	// Terminal record → the result modal's shape: the contract outputs keyed by
-	// terminal id (only agents that produced an output) plus per-agent statuses.
+	// terminal id (only agents that produced an output) plus per-agent statuses,
+	// all through the projection (the record itself is a firing log). The rows
+	// walk the snapshot's topological order so never-started agents still list
+	// as "pending" — the projection only knows nodes that fired.
 	function recordToResult(rec: RunRecordLike): RunResultLike {
-		const nodes = rec.nodes ?? {};
-		const order = Array.isArray(rec.order) ? rec.order : [];
-		const runs = order.map((id) => {
-			const node = nodes[id];
+		const projection = projectNodes(rec);
+		const runs = topoOrder(rec.graph).map((id) => {
+			const node = projection.nodes[id];
 			return {
 				id,
 				label: nameOf(id),
@@ -302,7 +308,7 @@ function PipelineView({
 		const terminals = classifyGraph(rec.graph).terminals;
 		const outputs: Record<string, unknown> = {};
 		for (const id of terminals) {
-			const output = nodes[id]?.output;
+			const output = projection.nodes[id]?.output;
 			if (typeof output === "string") outputs[id] = output;
 		}
 		return { ok: true, outputs, runs, ...(rec.state === "aborted" ? { aborted: true } : {}) };
@@ -603,11 +609,10 @@ function PipelineView({
 		}
 	}
 
-	const runNodes = runActive && activeRun?.nodes ? activeRun.nodes : null;
 	const nodes = agents.map((agent) => {
 		const selected = agent.id === selectedId;
 		const hoveredIn = hoverTarget === agent.id && gesture;
-		const nodeState = runNodes !== null ? runNodes[agent.id] : undefined;
+		const nodeState = runProjection !== null ? runProjection.nodes[agent.id] : undefined;
 		const status = nodeState?.status;
 		const showStatus = status !== undefined && status !== "pending";
 		return (
@@ -679,7 +684,7 @@ function PipelineView({
 	let configAgent: CanvasAgent | null = null;
 	for (let k = 0; k < agents.length; k++) if (agents[k].id === configAgentId) configAgent = agents[k];
 
-	const inspectNode = pausedAt !== null && activeRun?.nodes ? activeRun.nodes[pausedAt] : undefined;
+	const inspectNode: ProjectedNode | undefined = pausedNodeId !== null && runProjection ? runProjection.nodes[pausedNodeId] : undefined;
 
 	return (
 		<div
@@ -705,7 +710,7 @@ function PipelineView({
 				</span>
 				{runActive ? (
 					<span className="pipeline-run-live" title="A run is active in this workspace — canvas edits affect the NEXT run only">
-						{activeRun?.state === "paused" ? "Paused at " + nameOf(pausedAt as string) : "Running…"}
+						{activeRun?.state === "paused" ? "Paused at " + nameOf(pausedNodeId as string) : "Running…"}
 					</span>
 				) : null}
 				<button className="pipeline-btn" onClick={addAgentFromToolbar}>+ Add Agent</button>
@@ -816,9 +821,9 @@ function PipelineView({
 					onClose={() => { setShowRunModal(false); }}
 				/>
 			) : null}
-			{inspectOpen && pausedAt !== null && inspectNode !== undefined && activeRun !== null ? (
+			{inspectOpen && pausedNodeId !== null && inspectNode !== undefined && activeRun !== null ? (
 				<InspectModal
-					agentName={nameOf(pausedAt)}
+					agentName={nameOf(pausedNodeId)}
 					node={inspectNode}
 					busy={controlBusy}
 					status={controlStatus}
@@ -828,7 +833,7 @@ function PipelineView({
 					onRerun={() => { controlRun("rerun"); }}
 					onSteer={(feedback) => { controlRun("steer", feedback); }}
 					onAbort={() => { controlRun("abort"); }}
-					onClose={() => { setInspectDismissedFor((activeRun.runId ?? "") + ":" + pausedAt); }}
+					onClose={() => { setInspectDismissedFor((activeRun.runId ?? "") + ":" + (activeRun.pausedAt ?? pausedNodeId)); }}
 				/>
 			) : null}
 			{runResult && resultOpen ? (

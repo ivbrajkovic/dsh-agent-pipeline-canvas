@@ -9,6 +9,7 @@
     "./client": "./lib/client.js",
     "./graph": "./lib/graph.js",
     "./execution": "./lib/execution.js",
+    "./projection": "./lib/projection.js",
     "./message": "./lib/message.js",
     "./runner": "./lib/runner.js",
     "./package.json": "./package.json"

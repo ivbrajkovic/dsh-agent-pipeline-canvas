@@ -1,13 +1,14 @@
 // The paused-run inspection modal: when a run parks at a breakpoint, this shows
-// the paused agent's composed input (immutable for the run), its adopted
+// the paused firing's composed input (immutable for the run), its adopted
 // output, and the settlement status, and offers the control actions — Resume
-// (continue the pipeline with this output), Rerun (a fresh child with the same
+// (continue the pipeline with this output), Rerun (a fresh firing with the same
 // input), Steer (deliver feedback to the SAME child; it keeps its transcript),
-// and Abort (stop the whole run). The Transcript route opens the agent's
-// durable child session. Steer requires text; the other buttons are always
-// available while paused.
+// and Abort (stop the whole run). The node view is the projection of the run's
+// firing log (../projection.ts). The Transcript route opens the agent's durable
+// child session. Steer requires text; the other buttons are always available
+// while paused.
 import * as React from "react";
-import type { RunNodeStateLike } from "./shared.ts";
+import type { ProjectedNode } from "../projection.ts";
 import "./inspect-modal.css";
 
 function InspectModal({
@@ -15,7 +16,7 @@ function InspectModal({
 	onResume, onRerun, onSteer, onAbort, onClose,
 }: {
 	agentName: string;
-	node: RunNodeStateLike;
+	node: ProjectedNode;
 	busy: string | null;
 	status: string | null;
 	/** False on a degraded deployment (no continuable runtime): steering is unavailable. */

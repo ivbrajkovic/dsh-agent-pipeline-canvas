@@ -8,7 +8,7 @@
 // (src/client.tsx): the dynamic ctx proxy rejects property reads of undeclared
 // services, and nested Remote namespaces need their own dotted entry.
 
-import type { AgentSettings, InputPortSpec, PipelineGraph } from "../types.ts";
+import type { AgentSettings, InputPortSpec, PipelineGraph, RunFiring } from "../types.ts";
 
 export const ENDPOINT = "/dsh-agent-pipeline";
 export const SAVE_DEBOUNCE_MS = 250;
@@ -63,7 +63,11 @@ export interface RunResultLike {
 
 // ---- Durable run state (mirrors the Host's RunRecord; type-only import) ----
 
-/** One agent's state inside a run record (mirrors the Host's RunNodeState). */
+/**
+ * A LEGACY v1 record's per-node status slot (the pre-firing-log shape). The
+ * v2 record carries no such slots — its `nodes` map is executor control state
+ * only — so live rendering always goes through projectNodes (../projection.ts).
+ */
 export interface RunNodeStateLike {
 	status?: "pending" | "running" | "done" | "paused" | "aborted" | "error";
 	input?: string;
@@ -73,20 +77,29 @@ export interface RunNodeStateLike {
 	childSessionId?: string;
 }
 
-/** The run record the browser follows over SSE (mirrors the Host's RunRecord). */
+/** The run record the browser follows over SSE (mirrors the Host's RunRecord; legacy v1 records render read-only). */
 export interface RunRecordLike {
 	runId?: string;
 	cwd?: string;
 	sessionId?: string;
 	coordinatorSessionId?: string;
+	/** 2 = the firing log. Absent on legacy v1 records (order + nodes slots). */
+	recordVersion?: number;
 	createdAt?: string;
 	updatedAt?: string;
 	state?: "running" | "paused" | "completed" | "aborted" | "error";
+	/** The paused FIRING id on v2 (a node id on v1); the node comes from the projection. */
 	pausedAt?: string;
 	graph?: PipelineGraph;
 	input?: unknown;
+	maxInFlight?: number;
+	/** v2: the firing log — one entry per firing (see RunFiring). */
+	firings?: RunFiring[];
+	/** v1 only: the walk order and per-node status slots (read-only). */
 	order?: string[];
 	nodes?: Record<string, RunNodeStateLike>;
+	/** Bound-overflow record (design principle 4). Reserved. */
+	dropped?: Array<{ nodeId: string; port: string; from: string }>;
 }
 
 /** The useSessions feed: session list rows plus the current selection. */

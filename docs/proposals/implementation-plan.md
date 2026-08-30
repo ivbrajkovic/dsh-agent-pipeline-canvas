@@ -16,7 +16,12 @@ node model, and the executor are REBUILT.
 
 ## Phase deltas
 
-*(empty — append below as phases complete)*
+- **P2** — the v2 `RunRecord` sketch says "minus `coordinatorSessionId`", but the
+  same sketch leaves the anchor map empty until P4 and the P2 gate requires the
+  restart scenarios green — post-restart steering cold-resumes the coordinator
+  from its persisted id, so with the field removed that gate is unsatisfiable.
+  The field stays on the record through P2 (and P3); P4 removes it when
+  `nodes[id].parentAnchorSessionId` takes over, as P4's work items already say.
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from

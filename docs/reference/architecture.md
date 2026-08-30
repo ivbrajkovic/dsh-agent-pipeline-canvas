@@ -9,13 +9,14 @@ the full project layout. The behavioral rules themselves live in
 
 ## The pure core
 
-`src/types.ts` + `src/graph.ts` + `src/execution.ts` — no Node/browser APIs,
-no I/O, no React:
+`src/types.ts` + `src/graph.ts` + `src/execution.ts` + `src/projection.ts` —
+no Node/browser APIs, no I/O, no React:
 
 - **`src/types.ts`** — the shared contract types: `PipelineGraph` / `Agent` /
   `Connection`, validation errors and results, agent execution input,
   pipeline execution result, runner request/result, and the durable run
-  record and control shapes.
+  record (the v2 firing log, plus the read-only legacy v1 shape) and control
+  shapes.
 - **`src/graph.ts`** — canonical graph semantics: pure
   `validateGraph(graph)` / `findCycle`, imported by the Host, the runner,
   **and** the browser bundle (tsdown inlines it, so there is exactly one
@@ -25,6 +26,11 @@ no I/O, no React:
   classification (root/terminal/orphan), the per-agent input shape, the
   default prompt framing, the deterministic run order (`topoOrder`), and the
   final-result shape.
+- **`src/projection.ts`** — the per-node view over a run record (pure
+  `projectNodes(record)`): the record is a FIRING LOG, so per-node status,
+  latest output, and the child session address are COMPUTED, never stored —
+  one implementation shared by the Host-side tests and the browser bundle
+  (tsdown inlines it like `graph.ts`). Reads legacy v1 records too.
 
 `src/storage.ts` implements the atomic temp-file+rename write protocol shared
 by the pipeline file and the run records.
@@ -117,6 +123,10 @@ dsh-agent-pipeline-canvas/
                         (root/terminal/orphan), the per-agent input shape, the
                         default prompt framing, the deterministic run order
                         (topoOrder), and the final-result shape
+  src/projection.ts     the per-node projection over a run record (pure
+                        projectNodes): status/latest-output/child-session per
+                        node, computed from the firing log — shared by the
+                        tests and the browser bundle (inlined by tsdown)
   src/storage.ts        the atomic temp-file+rename write protocol shared by the
                         pipeline file and the run records
   src/index.ts          Host half: Cordis plugin row + the webServer routes
@@ -126,10 +136,11 @@ dsh-agent-pipeline-canvas/
                         with settings forwarding), startContinuableAgent /
                         steerContinuableAgent (breakpoint path), and the legacy
                         blocking runPipeline executor
-  src/runs.ts           the durable run registry: per-workspace run records,
-                        the sequential executor + control mailbox, the per-run
-                        coordinator lifecycle, the subagent/end settlement
-                        matcher, restart sweep, single-active-run rule
+  src/runs.ts           the durable run registry: per-workspace firing-log run
+                        records (v2; legacy v1 read-only), the sequential
+                        executor + control mailbox, the per-run coordinator
+                        lifecycle, the subagent/end settlement matcher,
+                        restart sweep, single-active-run rule
   src/client.tsx        browser entry: slot registration only (components in
                         src/ui/ — pipeline-view, agent-config, run-modal,
                         result-modal, inspect-modal, shell-panel, shared; each
