@@ -559,6 +559,11 @@ class RunExecutor {
 	 * while the handle is disposed.
 	 */
 	private async ensureAnchor(nodeId: string): Promise<LiveAgentLike> {
+		// Fast path: the id, once set, is never unset, and same-node admissions
+		// are serialized by withAnchor — so a synchronous read cannot race a
+		// transition, and an already-anchored node's admission commits nothing.
+		const settled = this.record.nodes[nodeId]?.parentAnchorSessionId;
+		if (settled !== undefined) return this.liveOrResumedAnchor(nodeId, settled);
 		// Adopt-or-create runs INSIDE the write chain, so two nodes can never
 		// both claim a pre-P4 record's one shared coordinator id: the first
 		// adoption deletes the field atomically with its seed; the second sees

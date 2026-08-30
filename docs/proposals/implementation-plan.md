@@ -64,6 +64,17 @@ node model, and the executor are REBUILT.
   branches after a restart stays P5 surface (a resurrected record re-parks
   only the `pausedAt` head), so "cold-resume per node after restart" is
   pinned for the parked node's own anchor.
+- **P4 (scrutiny)** — the post-implementation scrutiny verdict was ship, with
+  one constraint recorded so P5 inherits it honestly: legacy adoption is
+  FIRST-CLAIM-WINS (delete-on-claim). Unreachable as coded — the resurrected
+  `pausedAt` head is the only pre-P4 node that can admit — but P5's
+  pending-pause queue will make a second pre-P4 parked branch steerable, and
+  its first admission then creates a fresh anchor whose id does not match
+  that branch child's durable `parentSession` header: every steer of that
+  child fails `UNAUTHORIZED` forever (Rerun still works — a fresh child is
+  stamped with the fresh anchor id). Decide before P5: keep the legacy field
+  as a fallback address for not-yet-anchored nodes, or accept
+  steer-via-Rerun-only for later pre-P4 branches.
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from
