@@ -25,7 +25,13 @@
 // rebuild across a restart (both parked branches steerable), pause while a
 // branch is in flight (output adopted and held), and abort mid-fan-out
 // (interrupts + one-shot cancel + drain before finalize + no post-finalize
-// commits).
+// commits). The P6 fail-fast cases pin the one rule: a firing settling as
+// anything but `completed` — thrown, or settled refusal/max-tokens/error —
+// fails the run: the halt gate closes (nothing downstream starts, even when a
+// drained sibling's emission would make it fireable), in-flight siblings drain
+// with their outputs preserved, the failed firing carries error + stopReason,
+// a parked control wait unwinds instead of hanging, and the record byte-stabilizes
+// after finalization.
 import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
 import { validateGraph } from "../lib/graph.js";
 import { projectNodes } from "../lib/projection.js";
@@ -864,7 +870,9 @@ await withTempDir(async (cwd) => {
 		harness.warnings.some((w) => w.includes("waiting nodes: d")));
 });
 
-// --- GATE P3: quiescence with an unfilled all-of port reports the waiting node
+// --- GATE P6: a failed firing FAILS THE RUN (executor spec §2 — one rule, no
+// continue-on-error): downstream never fires, the completed upstream is
+// preserved, and the failed firing carries its error + stopReason -------------
 await withTempDir(async (cwd) => {
 	const harness = makeHarness({ holdOneshots: true });
 	const registry = new RunRegistry(harness.services);
@@ -884,21 +892,243 @@ await withTempDir(async (cwd) => {
 		},
 		input: "x",
 	});
-	if (!started.ok) { okCheck("starve: start ok", false); return; }
+	if (!started.ok) { okCheck("failfast: start ok", false); return; }
 	await waitFor("a started", () => harness.starts.length === 1);
 	harness.resolveOneshot(harness.starts[0].childId, "<out:A>");
 	await waitFor("f started", () => harness.starts.length === 2);
-	// f fails: it records the error and emits nothing, so d's p2 never fills.
+	// f fails: the run fails fast — the halt gate closes (d could not start
+	// anyway with p2 unfilled) and the run finalizes error, not completed.
 	harness.failOneshot(harness.starts[1].childId, "boom");
 	const done = await waitTerminal(registry, started.runId, cwd);
-	okCheck("starve: the run ends at quiescence, completed", done.state === "completed");
-	okCheck("starve: d never fires with its all-of port unfilled", done.firings.every((f) => f.nodeId !== "d"));
-	okCheck("starve: the failed firing is recorded with its error (P3: not gating)",
-		done.firings.some((f) => f.nodeId === "f" && f.status === "error" && (f.error ?? "").includes("boom")));
-	okCheck("starve: the completed upstream is preserved",
+	okCheck("failfast: the run finalizes error (no continue-on-error)", done.state === "error");
+	okCheck("failfast: d never fires", done.firings.every((f) => f.nodeId !== "d"));
+	okCheck("failfast: the failed firing carries its error + stopReason",
+		done.firings.some((f) => f.nodeId === "f" && f.status === "error" && (f.error ?? "").includes("boom") && f.stopReason === "error" && typeof f.settledAt === "string"));
+	okCheck("failfast: the completed upstream is preserved",
 		done.firings.some((f) => f.nodeId === "a" && f.status === "done" && f.output === "<out:A>"));
-	okCheck("starve: the waiting node is reported",
-		harness.warnings.some((w) => w.includes("waiting nodes: d")));
+});
+
+// --- GATE P6: a one-shot that settles WITHOUT throwing but not `completed`
+// (the harness resolves, never rejects, a child-level failure) fails the run —
+// for every non-completed stop reason in the harness vocabulary ---------------
+for (const reason of ["error", "refusal", "max-tokens"]) {
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const started = await registry.startRun({
+			sessionId: "sess",
+			cwd,
+			graph: { agents: [agent("a", "Alpha", "A."), agent("b", "Beta", "B.")], connections: [conn("c1", "a", "b")] },
+			input: "x",
+		});
+		if (!started.ok) { okCheck("settle(" + reason + "): start ok", false); return; }
+		await waitFor("a started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+		await waitFor("b started", () => harness.starts.length === 2);
+		// b settles with a non-completed stop reason and a partial output.
+		harness.resolveOneshot(harness.starts[1].childId, "<out:partial-beta>", reason);
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("settle(" + reason + "): the run finalized error", done.state === "error");
+		okCheck("settle(" + reason + "): the firing is errored with the stop reason + typed error",
+			done.firings.length === 2
+			&& done.firings[1].status === "error"
+			&& done.firings[1].stopReason === reason
+			&& (done.firings[1].error ?? "").includes(reason));
+		okCheck("settle(" + reason + "): the partial output stays in the log; the transcript address is kept",
+			done.firings[1].output === "<out:partial-beta>" && typeof done.firings[1].childSessionId === "string");
+		okCheck("settle(" + reason + "): the completed upstream is preserved",
+			done.firings[0].status === "done" && done.firings[0].output === "<out:Alpha>");
+	});
+}
+
+// --- GATE P6: a continuable (breakpointed) epoch settling non-completed fails
+// the run — NO park (nothing to decide), no downstream, partial output kept ---
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }, agent("b", "Beta", "B.")], connections: [conn("c1", "a", "b")] },
+		input: "x",
+	});
+	if (!started.ok) { okCheck("failbp: start ok", false); return; }
+	await waitFor("a's continuable start", () => harness.starts.length === 1);
+	harness.settle(harness.starts[0].childId, "<out:partial-a>", "max-tokens");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("failbp: the run finalized error without ever parking", done.state === "error" && done.pausedAt === undefined);
+	okCheck("failbp: the firing carries the stop reason + typed error",
+		done.firings.length === 1
+		&& done.firings[0].status === "error"
+		&& done.firings[0].stopReason === "max-tokens"
+		&& (done.firings[0].error ?? "").includes("max-tokens"));
+	okCheck("failbp: the partial epoch output is kept", done.firings[0].output === "<out:partial-a>");
+	okCheck("failbp: downstream never started", harness.starts.every((s) => s.label !== "Beta"));
+});
+
+// --- GATE P6: fail-fast mid-fan-out — the gate closes on the FIRST failure so
+// nothing downstream starts even when a later sibling's emission makes it
+// fireable; the in-flight sibling DRAINS (paid turn settles, output preserved);
+// the record stays live (running) until everything recorded -------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, target: string, targetPort: string) => ({
+		id, source, target, sourcePort: source + ":out", targetPort,
+	});
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				agent("b", "Beta", "B."),
+				agent("c", "Gamma", "C."),
+				{ ...agent("d", "Delta", "D."), inputPorts: [{ name: "join", policy: "any-of" }] },
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), connP("c3", "b", "d", "d:join"), connP("c4", "c", "d", "d:join")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("failfan: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	await waitFor("b and c admitted together", () => harness.starts.length === 3);
+	const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+	const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+	// C fails FIRST, while b is still in flight: the run is failing.
+	harness.resolveOneshot(cChild, "<out:partial-gamma>", "refusal");
+	await waitFor("c's firing recorded the refusal", async () => {
+		const cur = await registry.getRun(started.runId, cwd) as RunRecord;
+		const c = cur.firings.find((f) => f.nodeId === "c");
+		return c?.status === "error" && c.stopReason === "refusal" && (c.error ?? "").includes("refusal");
+	});
+	const draining = await registry.getRun(started.runId, cwd) as RunRecord;
+	okCheck("failfan: the run is still RUNNING while the sibling drains (live, not finalized)", draining.state === "running");
+	okCheck("failfan: the failed firing errored with its partial output kept in the log", draining.firings.find((f) => f.nodeId === "c")?.output === "<out:partial-gamma>" && draining.firings.find((f) => f.nodeId === "c")?.status === "error");
+	// b settles completed while the run is failing: it drains, records, and its
+	// emission would make d fireable (any-of) — the closed gate must hold.
+	harness.resolveOneshot(bChild, "<out:Beta>");
+	await beat();
+	okCheck("failfan: d never started — nothing downstream of the failure runs",
+		harness.starts.every((s) => s.label !== "Delta"));
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("failfan: the run finalized error", done.state === "error" && done.pausedAt === undefined);
+	okCheck("failfan: the drained sibling kept its completed output",
+		done.firings.some((f) => f.nodeId === "b" && f.status === "done" && f.output === "<out:Beta>"));
+	okCheck("failfan: the failed firing carries error + stopReason",
+		done.firings.some((f) => f.nodeId === "c" && f.status === "error" && f.stopReason === "refusal" && typeof f.settledAt === "string"));
+	okCheck("failfan: d has no firing at all", done.firings.every((f) => f.nodeId !== "d"));
+	// No commit lands after finalization (the error path uses the same writer).
+	const file = join(cwd, ".agent-pipeline", "runs", started.runId + ".json");
+	const beforeBytes = await readFile(file, "utf8");
+	await beat(); await beat(); await beat();
+	okCheck("failfan: no commit landed after finalization (record byte-stable)", beforeBytes === await readFile(file, "utf8"));
+});
+
+// --- P6: a sibling failing WHILE parked at a breakpoint — the park unwinds
+// without a command, the record leaves `paused` for the drain (no paused
+// surface with a disarmed mailbox), and the run finalizes error (the parked
+// branch is swept aborted with its output kept, as on abort) ------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				{ ...agent("b", "Beta", "B."), breakpoint: true },
+				agent("c", "Gamma", "C."),
+				agent("e", "Epsilon", "E."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "a", "e")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("failpark: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	await waitFor("b, c, e admitted together", () => harness.starts.length === 4);
+	const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+	const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+	const eChild = harness.starts.find((s) => s.label === "Epsilon")!.childId;
+	harness.settle(bChild, "<out:Beta>");
+	await waitPausedAt(registry, started.runId, cwd, "b");
+	// c fails while the run is parked at b and e is still in flight: the armed
+	// control wait must be woken (no hang), the park retired, and the record
+	// must leave `paused` for the drain — e's held turn keeps it observable.
+	harness.failOneshot(cChild, "boom");
+	await waitFor("the record left `paused` for the drain", async () => {
+		const cur = await registry.getRun(started.runId, cwd) as RunRecord;
+		return cur.state === "running" && cur.pausedAt === undefined;
+	});
+	const draining = await registry.getRun(started.runId, cwd) as RunRecord;
+	okCheck("failpark: the run is live (running, no pausedAt) while draining", draining.state === "running");
+	okCheck("failpark: the drained firing stays parked in the log until finalize",
+		draining.firings.find((f) => f.nodeId === "b")?.status === "paused"
+		&& draining.firings.find((f) => f.nodeId === "e")?.status === "running");
+	// e's paid turn finishes during the drain: completed, output preserved.
+	harness.resolveOneshot(eChild, "<out:Epsilon>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("failpark: the failing sibling finalizes the parked run as error", done.state === "error");
+	okCheck("failpark: the parked branch is swept aborted with its output kept",
+		done.firings.find((f) => f.nodeId === "b")?.status === "aborted"
+		&& done.firings.find((f) => f.nodeId === "b")?.output === "<out:Beta>");
+	okCheck("failpark: the drained in-flight sibling completed with its output",
+		done.firings.find((f) => f.nodeId === "e")?.status === "done" && done.firings.find((f) => f.nodeId === "e")?.output === "<out:Epsilon>");
+	okCheck("failpark: the failed sibling carries the error",
+		done.firings.find((f) => f.nodeId === "c")?.status === "error" && (done.firings.find((f) => f.nodeId === "c")?.error ?? "").includes("boom"));
+	okCheck("failpark: nothing downstream ever started", harness.starts.length === 4);
+});
+
+// --- P6: a re-fired crash orphan that fails fails the run — the rebuilt
+// parked heads unwind and finalize error (the resurrect path classifies too) --
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const crashed: RunRecord = {
+		runId: "failrefire",
+		cwd,
+		sessionId: "sess",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "paused",
+		pausedAt: "f-002",
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				{ ...agent("b", "Beta", "B."), breakpoint: true },
+				agent("c", "Gamma", "C."),
+				agent("d", "Delta", "D."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+		},
+		input: "crash",
+		recordVersion: 2,
+		firings: [
+			{ firingId: "f-001", nodeId: "a", seq: 1, status: "done", input: "A.\n\n## Input\ncrash", output: "<out:Alpha>", stopReason: "completed", childSessionId: "oneshot-1", startedAt: "t", settledAt: "t" },
+			{ firingId: "f-002", nodeId: "b", seq: 1, status: "paused", input: "B.\n\n## Alpha\n<out:Alpha>", output: "<out:Beta>", stopReason: "completed", childSessionId: "child-9", startedAt: "t" },
+			{ firingId: "f-003", nodeId: "c", seq: 1, status: "running", input: "C.\n\n## Alpha\n<out:Alpha>", startedAt: "t" },
+		],
+		nodes: {},
+	};
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "failrefire.json"), JSON.stringify(crashed, null, 2));
+	await registry.activeRunForCwd(cwd);
+	await waitFor("c's orphan re-fired as a held one-shot", () => harness.starts.filter((s) => s.label === "Gamma").length === 1);
+	// The re-fired child fails: the run must finalize error — and the parked
+	// head b must unwind WITHOUT a control command (no hang).
+	harness.failOneshot(harness.starts.find((s) => s.label === "Gamma")!.childId, "boom");
+	const done = await waitTerminal(registry, "failrefire", cwd);
+	okCheck("failrefire: the failed re-fire finalizes error", done.state === "error");
+	okCheck("failrefire: the re-fired firing carries the error",
+		done.firings.find((f) => f.nodeId === "c" && f.seq === 2)?.status === "error"
+		&& ((done.firings.find((f) => f.nodeId === "c" && f.seq === 2)?.error) ?? "").includes("boom"));
+	okCheck("failrefire: the parked head unwound without a command (swept aborted)",
+		done.firings.find((f) => f.firingId === "f-002")?.status === "aborted");
+	okCheck("failrefire: nothing downstream ran", harness.starts.every((s) => s.label !== "Delta"));
 });
 
 // --- P3: any-of never blocks — one firing per arriving message, head consumed

@@ -49,12 +49,15 @@ function ResultModal({ result, names, targets, busy, status, onOpenSession, onCo
 							{result.error || ("graph is invalid: " + (result.validationErrors || []).map((e) => e.message).join("; "))}
 						</div>
 					)}
-					{result.ok && Array.isArray(result.runs) && result.runs.length > 0 ? (
+					{/* The per-agent rows render for FAILED runs too (fail-fast):
+					    the statuses, the firing error, and the Transcript route
+					    are how the completed siblings' outputs stay inspectable. */}
+					{Array.isArray(result.runs) && result.runs.length > 0 ? (
 						<div className="pipeline-runs">
 							{result.runs.map((r) => (
 								<div key={"run-" + r.id} className="pipeline-run-row">
 									<span className="run-name">{termName[r.id] || r.id}</span>
-									<span className={"run-status" + (r.status && r.status !== "completed" ? " warn" : "")}>{r.status || "?"}</span>
+									<span className={"run-status" + (r.status && r.status !== "completed" && r.status !== "done" ? " warn" : "")}>{r.status || "?"}</span>
 									{r.error ? <span className="run-error" title={r.error}>{r.error}</span> : null}
 									{r.childSessionId ? (
 										<button

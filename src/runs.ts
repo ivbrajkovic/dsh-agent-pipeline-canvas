@@ -17,8 +17,14 @@
 // every firing emits to its output ports, whose messages queue downstream.
 // Firings run CONCURRENTLY as separate Harness children, capped by the run's
 // `maxInFlight` (default 4); ready firings start in deterministic node-id
-// order. The run ends at quiescence — nothing in flight, nothing fireable —
-// with never-fired nodes reported. The record is the firing log (recordVersion
+// order. FAIL-FAST (executor spec §2 — one rule, no continue-on-error): a
+// firing that settles as anything but `completed` records its error + stop
+// reason, closes the halt gate run-wide (nothing downstream of a failure
+// starts anywhere), lets in-flight firings finish (drain — the same cost
+// discipline as pause and abort), and finalizes the run `state: "error"` with
+// all completed outputs preserved. The run otherwise ends at quiescence —
+// nothing in flight, nothing fireable — with never-fired nodes reported. The
+// record is the firing log (recordVersion
 // 2; the per-node view the UI shows is projected from it by lib/projection.ts,
 // never stored). A firing's composed prompt is written ONCE at start and is
 // immutable for the run's lifetime; Rerun appends a NEW firing with the SAME
@@ -120,6 +126,7 @@ import {
 	startContinuableAgent,
 	steerContinuableAgent,
 	toText,
+	type OneAgentOutcome,
 	type RunnerContext,
 	type SubagentRunEndInfoLike,
 } from "./runner.ts";
@@ -281,6 +288,28 @@ function isV2Record(rec: RunRecord | LegacyRunRecord): rec is RunRecord {
 }
 
 /**
+ * The fail-fast classification (executor spec §2): only a `completed`
+ * settlement proceeds; `error`, `refusal`, `max-tokens`, `aborted`, or any
+ * provider-added reason fails the run. The harness mirrors this exactly in
+ * its own settlement mapping, and a non-`completed` output may be partial.
+ */
+function settledIncomplete(stopReason: unknown): boolean {
+	return stopReason !== "completed";
+}
+
+/**
+ * The fail-fast error detail recorded on a firing whose settlement stopped
+ * short of `completed`. The stop reason is the message's spine; a provider's
+ * diagnostic (one-shot results carry one, continuable settlements do not)
+ * rides along.
+ */
+function failFastError(stopReason: unknown, diagnostic?: string): string {
+	const reason = typeof stopReason === "string" && stopReason.length > 0 ? stopReason : "unknown";
+	const detail = typeof diagnostic === "string" && diagnostic.trim().length > 0 ? ": " + diagnostic.trim() : "";
+	return `the firing settled as "${reason}" — failing the run (fail-fast)${detail}`;
+}
+
+/**
  * Parse one record file, or null when missing/corrupt (a bad file is skipped,
  * not fatal). Accepts BOTH record versions: v2 (the firing log) and legacy v1
  * (read-only — swept or finalized, never resurrected or run).
@@ -359,6 +388,13 @@ class RunExecutor {
 	private readonly pauseQueue: PauseEntry[] = [];
 	/** Live NodeRunner tasks; finalization drains them before its own writes. */
 	private readonly runners = new Set<Promise<void>>();
+	/**
+	 * The fail-fast latch (executor spec §2): set once by the first firing
+	 * that settled non-completed. The dispatch loop treats it exactly like the
+	 * abort signal (no new firing starts), the parked control loops unwind on
+	 * it, and the main loop finalizes `error` once everything drained.
+	 */
+	private failed = false;
 
 	constructor(services: RunRegistryServices, record: RunRecord, options: { sessionAgent?: unknown; resume?: boolean; onSettle?: (record: RunRecord) => void } = {}) {
 		this.services = services;
@@ -424,6 +460,37 @@ class RunExecutor {
 	/** Request abort from outside (control route): interrupt in-flight work and wake the loop. */
 	abort(): void {
 		this.controller.abort();
+	}
+
+	/**
+	 * Fail-fast (executor spec §2): one firing settled as anything but
+	 * `completed`. Closes the halt gate run-wide — nothing downstream of the
+	 * failure starts anywhere — and wakes the loop, which finalizes `error`
+	 * once the in-flight firings drain (paid turns settle and record; the same
+	 * cost discipline as pause and abort). Idempotent: the first failure owns
+	 * the run's outcome; later failures only record on their own firings.
+	 */
+	private failRun(): void {
+		if (this.failed) return;
+		this.failed = true;
+		this.kernel?.setHalted(true);
+		// Wake an ARMED parked head so the drain cannot hang on its control
+		// wait; entries behind it (and a head whose mailbox is disarmed mid-
+		// rerun) unwind because drivePauseEntry re-checks `failed` each turn.
+		this.postControl({ action: "abort" });
+		// A park whose mailbox is about to disarm must not leave the record
+		// claiming `paused` for the whole drain (observing paused ⇒ armed
+		// mailbox): flip the state back so the run reads as executing — the
+		// banner shows the failure — and finalize sweeps the parked firings.
+		if (this.record.state === "paused") {
+			void this.transition(() => {
+				if (this.record.state === "paused") {
+					this.record.state = "running";
+					delete this.record.pausedAt;
+				}
+			});
+		}
+		this.kernel?.notify();
 	}
 
 	subscribe(fn: (record: RunRecord) => void): () => void {
@@ -754,6 +821,52 @@ class RunExecutor {
 	}
 
 	/**
+	 * The typed failure when the session agent is not live: no one-shot can
+	 * start, so the firing fails and — P6 — the run fails with it.
+	 */
+	private async recordSessionAgentGone(firing: RunFiring): Promise<void> {
+		await this.transition(() => {
+			firing.status = "error";
+			firing.error = "the session agent is not live — reopen the conversation and start a new run";
+			firing.settledAt = new Date().toISOString();
+		});
+		this.failRun();
+	}
+
+	/**
+	 * The shared ONE-SHOT settle commit (the NodeRunner's firing and the
+	 * resurrect path's re-fire classify identically — P6): adopt the outcome
+	 * in one commit, marking the firing `done` only when it settled
+	 * `completed`. A thrown error, or a settled stop reason short of
+	 * `completed`, leaves the firing `error` with the failure detail — the
+	 * partial output and the transcript address stay in the log. Returns true
+	 * when the firing FAILED the run.
+	 */
+	private async settleOneShotFiring(firing: RunFiring, outcome: OneAgentOutcome): Promise<boolean> {
+		const failed = outcome.error !== undefined || settledIncomplete(outcome.stopReason);
+		await this.transition(() => {
+			firing.settledAt = new Date().toISOString();
+			if (outcome.error) {
+				firing.status = "error";
+				firing.error = outcome.error;
+				firing.stopReason = outcome.stopReason;
+			} else {
+				firing.output = outcome.output;
+				firing.stopReason = outcome.stopReason;
+				if (outcome.childSessionId !== undefined) firing.childSessionId = outcome.childSessionId;
+				if (failed) {
+					firing.status = "error";
+					firing.error = failFastError(outcome.stopReason, outcome.diagnostic);
+				} else {
+					firing.status = "done";
+					delete firing.error;
+				}
+			}
+		});
+		return failed;
+	}
+
+	/**
 	 * Re-fire an orphaned PLAIN (non-breakpoint) firing with a fresh one-shot
 	 * child running the orphan's verbatim composed input (Rerun semantics —
 	 * executor spec §3). The record keeps its paused state while the re-fire
@@ -767,30 +880,17 @@ class RunExecutor {
 		if (this.signal.aborted) return null;
 		const parent = this.resolveSessionAgent();
 		if (parent === undefined) {
-			await this.transition(() => {
-				fresh.status = "error";
-				fresh.error = "the session agent is not live — reopen the conversation and start a new run";
-				fresh.settledAt = new Date().toISOString();
-			});
+			await this.recordSessionAgentGone(fresh);
 			return null;
 		}
 		const outcome = await runOneAgent(this.services, { agent, agentById, inputs, parent, signal: this.signal });
 		if (this.signal.aborted) return null;
-		await this.transition(() => {
-			fresh.settledAt = new Date().toISOString();
-			if (outcome.error) {
-				fresh.status = "error";
-				fresh.error = outcome.error;
-				fresh.stopReason = outcome.stopReason;
-			} else {
-				fresh.status = "done";
-				delete fresh.error;
-				fresh.output = outcome.output;
-				fresh.stopReason = outcome.stopReason;
-				if (outcome.childSessionId !== undefined) fresh.childSessionId = outcome.childSessionId;
-			}
-		});
-		return outcome.error ? null : fresh;
+		// The re-fire is a firing like any other: fail-fast classifies it the
+		// same way (P6) — a non-completed re-fire fails the run and unwinds
+		// the parked heads it was re-fired behind.
+		const failed = await this.settleOneShotFiring(fresh, outcome);
+		if (failed) this.failRun();
+		return failed ? null : fresh;
 	}
 
 	// ---- The control plane's pending-pause queue -------------------------------
@@ -858,7 +958,10 @@ class RunExecutor {
 					await entry.turn;
 					continue;
 				}
-				if (this.signal.aborted) {
+				if (this.signal.aborted || this.failed) {
+					// Abort finalizes `aborted`; fail-fast unwinds the park so
+					// the drain cannot hang on a control wait that will never
+					// be answered — finalize sweeps the parked firing aborted.
 					this.retireEntry(entry);
 					return null;
 				}
@@ -947,6 +1050,13 @@ class RunExecutor {
 	 * firing stays in the log with its parked output preserved) started with
 	 * the verbatim original input — never steering content. After the fresh
 	 * epoch settles (or fails), the entry parks again on the new firing.
+	 *
+	 * The control plane deliberately does NOT fail-fast on the fresh epoch's
+	 * stop reason: the user is at the decision point with the halt gate
+	 * closed, so a non-completed rerun re-parks with the error visible (retry
+	 * / steer / abort) — P6's one rule is the NODE RUNNER's classification;
+	 * the unattended re-fire (refirePlain) classifies, this attended one does
+	 * not.
 	 */
 	private async rerunPaused(entry: PauseEntry): Promise<void> {
 		const current = entry.firing;
@@ -1060,9 +1170,10 @@ class RunExecutor {
 	/**
 	 * Emit a terminal firing's output into the kernel (P3 emission is
 	 * non-selective — every output port), recording any bound overflows.
-	 * A firing without an output emits nothing — downstream starves and is
-	 * reported at quiescence (P3 records failures without gating; fail-fast
-	 * arrives in P6).
+	 * Only reached for `completed` firings: a failed firing returns before
+	 * this point (P6 — nothing downstream of a failure runs), and a firing
+	 * without an output emits nothing — downstream starves and is reported at
+	 * quiescence.
 	 */
 	private async emitOutput(nodeId: string, firing: RunFiring): Promise<void> {
 		if (typeof firing.output !== "string") return;
@@ -1109,42 +1220,43 @@ class RunExecutor {
 			if (useContinuable) {
 				const end = await this.runContinuableEpoch(firing, agent, agentById, prompt);
 				if (end === null) return; // aborted mid-flight; finalization marks the firing
-				await this.transition(() => { this.adoptEpoch(firing, end); });
+				// P6 classification in the same commit as the adoption, so the
+				// record never shows a settled-but-unclassified firing: only a
+				// `completed` epoch proceeds (to the breakpoint park); every
+				// other stop reason fails the run — no park, no emission.
+				const failed = settledIncomplete(end.stopReason);
+				await this.transition(() => {
+					this.adoptEpoch(firing, end);
+					if (failed) {
+						firing.status = "error";
+						firing.error = failFastError(end.stopReason);
+					}
+				});
+				if (failed) {
+					this.failRun();
+					return;
+				}
 			} else {
 				const parent = this.resolveSessionAgent();
 				if (parent === undefined) {
 					// Typed failure instead of a harness TypeError: the session
-					// agent is not (yet) live. Recorded on the firing; it emits
-					// nothing.
-					await this.transition(() => {
-						firing.status = "error";
-						firing.error = "the session agent is not live — reopen the conversation and start a new run";
-						firing.settledAt = new Date().toISOString();
-					});
+					// agent is not (yet) live — no one-shot can start, so the
+					// failure fails the run (P6).
+					await this.recordSessionAgentGone(firing);
 					return;
 				}
 				const outcome = await runOneAgent(this.services, { agent, agentById, inputs, parent, signal: this.signal });
 				if (this.signal.aborted) return; // finalization marks the firing aborted
-				await this.transition(() => {
-					firing.settledAt = new Date().toISOString();
-					if (outcome.error) {
-						firing.status = "error";
-						firing.error = outcome.error;
-						firing.stopReason = outcome.stopReason;
-					} else {
-						firing.status = "done";
-						delete firing.error;
-						firing.output = outcome.output;
-						firing.stopReason = outcome.stopReason;
-						if (outcome.childSessionId !== undefined) firing.childSessionId = outcome.childSessionId;
-					}
-				});
-				// Degraded breakpoints still park (steering unavailable; the
-				// park's rerun works, its steer is rejected upstream) — even on
-				// an errored outcome, exactly as the sequential executor did.
-				if (outcome.error && agent.breakpoint !== true) return; // P3: recorded, not gating (fail-fast is P6)
+				const failed = await this.settleOneShotFiring(firing, outcome);
+				if (failed) {
+					this.failRun();
+					return;
+				}
 			}
-			if (agent.breakpoint === true) {
+			// A breakpoint parks the firing for the user's decision — unless the
+			// run is already failing (P6): a decision point on a failed run is
+			// never served, so the firing stays as-is for finalize's sweep.
+			if (agent.breakpoint === true && !this.failed) {
 				const released = await this.pauseAt(firing, agent, agentById, inputs);
 				if (released === null) return;
 				firing = released; // Rerun replaced the firing; the release emits ITS output
@@ -1158,6 +1270,7 @@ class RunExecutor {
 				if (firing.settledAt === undefined) firing.settledAt = new Date().toISOString();
 			});
 			this.services.logger.warn(`agent-pipeline: firing of agent "${nodeId}" failed: ${String(error)}`);
+			this.failRun();
 		}
 	}
 
@@ -1186,11 +1299,11 @@ class RunExecutor {
 	 * Finalize: drain every NodeRunner task and the write chain FIRST, so no
 	 * commit can land after the terminal state, then publish. Firings still
 	 * marked running/paused at this point are stale by definition (every
-	 * runner drained, no park queued — only a crash mid-control-op can leave
-	 * one) and are marked aborted in EVERY terminal kind, EXCEPT the superseded
-	 * parked firings a Rerun left behind: those keep `paused` as the honest
-	 * decision history the P2 record pins. Aborted and parked outputs are
-	 * preserved.
+	 * runner drained, no park queued — only a crash mid-control-op or a
+	 * fail-fast unwind can leave one) and are marked aborted in EVERY terminal
+	 * kind, EXCEPT the superseded parked firings a Rerun left behind: those
+	 * keep `paused` as the honest decision history the P2 record pins. Aborted
+	 * and parked outputs are preserved.
 	 */
 	private async finalize(kind: "completed" | "aborted" | "error"): Promise<void> {
 		await Promise.allSettled([...this.runners]);
@@ -1352,9 +1465,12 @@ class RunExecutor {
 				// slot on the live path, a rebuilt slot on the resurrect path) —
 				// harmless while parked (the halt gate is closed, so the cap
 				// never binds) and load-bearing at quiescence: the last
-				// release's emission must land before the run can end.
+				// release's emission must land before the run can end. Once
+				// failed, NO firing starts — the check rides along with the
+				// abort/gate checks so the halt gate reopening on the last
+				// parked unwind cannot restart anything (P6).
 				for (const nodeId of kernel.fireableNodes()) {
-					if (this.signal.aborted || kernel.halted || kernel.inFlight >= kernel.maxInFlight) break;
+					if (this.signal.aborted || this.failed || kernel.halted || kernel.inFlight >= kernel.maxInFlight) break;
 					if (noRefire.has(nodeId)) continue;
 					const messages = kernel.takeForFiring(nodeId);
 					kernel.beginFiring(nodeId);
@@ -1363,11 +1479,21 @@ class RunExecutor {
 					void task.catch(() => { /* runFiring finalizes internally */ }).finally(() => { this.runners.delete(task); });
 				}
 				if (this.signal.aborted) break;
+				if (this.failed) {
+					// Fail-fast drain: every kernel slot belongs to a runner
+					// (or parked control) task that releases it exactly when
+					// the task ends, so inFlight === 0 means every firing and
+					// parked entry has finished recording — finalize `error`.
+					if (kernel.inFlight === 0 && this.pauseQueue.length === 0) break;
+					await kernel.waitChange();
+					continue;
+				}
 				if (this.pauseQueue.length === 0 && kernel.quiescent(noRefire)) break;
 				await kernel.waitChange();
 			}
 
 			if (this.signal.aborted) await this.finalize("aborted");
+			else if (this.failed) await this.finalize("error");
 			else await this.finalizeCompleted(projected, noRefire);
 		} catch (error) {
 			// Unforeseen executor failure: drain the runners (no commit lands

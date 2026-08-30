@@ -246,6 +246,12 @@ function PipelineView({
 	// be parked at once, and the modal/label surface the head plus the depth.
 	const runProjection = runActive && activeRun !== null ? projectNodes(activeRun) : null;
 	const pausedNodeId = runActive && activeRun?.state === "paused" ? runProjection?.pausedNodeId ?? null : null;
+	// Fail-fast (P6): the failed firing commits while the run is still draining
+	// its in-flight siblings — surface it live on the banner (the node chip
+	// shows the error status through the same projection).
+	const failedNodeId = runActive && runProjection !== null
+		? runProjection.order.find((id) => runProjection.nodes[id]?.status === "error") ?? null
+		: null;
 	// A resolved paused node always heads the projection's queue, so the depth
 	// behind it is length − 1.
 	const queuedCount = pausedNodeId !== null && runProjection ? runProjection.pausedQueue.length - 1 : 0;
@@ -721,10 +727,17 @@ function PipelineView({
 						: validation.errors.length + " issue" + (validation.errors.length === 1 ? "" : "s")}
 				</span>
 				{runActive ? (
-					<span className="pipeline-run-live" title="A run is active in this workspace — canvas edits affect the NEXT run only">
-						{activeRun?.state === "paused"
-							? "Paused at " + nameOf(pausedNodeId as string) + (queuedCount > 0 ? " +" + queuedCount + " queued" : "")
-							: "Running…"}
+					<span
+						className={"pipeline-run-live" + (failedNodeId !== null ? " failed" : "")}
+						title={failedNodeId !== null
+							? "A firing failed — the run ends after the in-flight agents finish; completed outputs are preserved"
+							: "A run is active in this workspace — canvas edits affect the NEXT run only"}
+					>
+						{failedNodeId !== null
+							? "Failed at " + nameOf(failedNodeId) + " — finishing in-flight agents…"
+							: activeRun?.state === "paused"
+								? "Paused at " + nameOf(pausedNodeId as string) + (queuedCount > 0 ? " +" + queuedCount + " queued" : "")
+								: "Running…"}
 					</span>
 				) : null}
 				<button className="pipeline-btn" onClick={addAgentFromToolbar}>+ Add Agent</button>

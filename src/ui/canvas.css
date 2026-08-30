@@ -206,6 +206,12 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+/* Fail-fast: the run is failing — a firing errored, in-flight agents draining. */
+.pipeline-view .pipeline-toolbar .pipeline-run-live.failed {
+	color: var(--dsw-alias-state-error-primary);
+	border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent);
+	border-style: solid;
+}
 .pipeline-port {
 	position: absolute;
 	top: 50%;

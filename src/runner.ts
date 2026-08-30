@@ -83,6 +83,8 @@ interface SubagentResult {
 	output?: unknown;
 	structured?: unknown;
 	stopReason?: string;
+	/** Provider-authored failure detail for a non-`completed` result. */
+	diagnostic?: string;
 }
 
 interface SubagentRun {
@@ -224,6 +226,13 @@ export interface OneAgentOutcome {
 	childSessionId?: string;
 	/** Failure detail; present exactly when the run threw. */
 	error?: string;
+	/**
+	 * The provider's failure detail for a settled-but-not-`completed` result
+	 * (`SubagentResult.diagnostic` — the harness authors it for exactly this
+	 * presentation); absent otherwise. The fail-fast record composes it into
+	 * the firing's `error` beside the stop reason.
+	 */
+	diagnostic?: string;
 }
 
 /**
@@ -271,6 +280,7 @@ export async function runOneAgent(
 			output,
 			stopReason: result.stopReason ?? "unknown",
 			childSessionId: typeof run.id === "string" ? run.id : undefined,
+			...(typeof result.diagnostic === "string" && result.diagnostic.length > 0 ? { diagnostic: result.diagnostic } : {}),
 		};
 	} catch (error) {
 		// An aborted signal can reject the start itself (the driver's
