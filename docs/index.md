@@ -36,6 +36,7 @@ documents remain the design record.
 |----------|----------------|
 | [proposals/parallel-execution.md](proposals/parallel-execution.md) | **Built.** The stream-model executor: the firing kernel (ports, messages, firings, quiescence), fail-fast errors, grouped pause, per-node parent anchors, abort draining — plus the §8 verification matrix the implementation was held to. |
 | [proposals/conditional-dispatch.md](proposals/conditional-dispatch.md) | **Built.** Conditional dispatch as base mechanics: named output ports, selective emission via bindings, declared any-of/all-of joins. |
+| [proposals/if-control.md](proposals/if-control.md) | **Planned.** The if control — conditional routing as a first-class canvas node (branches owned by a visible control, schema on the producer), lowered onto the port/binding mechanics. Phased plan; each phase carries a read-before / append-after delta section. |
 | [proposals/run-operations.md](proposals/run-operations.md) | Designed, not built: run reuse (rerun from node X), a run history browser, per-firing token accounting, and per-node timeouts — plus recorded known limits. The firing log is the foundation this builds on. |
 | [proposals/implementation-plan.md](proposals/implementation-plan.md) | The phased build plan for the stream executor — each phase's gate, plus the append-only phase-deltas log recording where implementation met constraints. |
 
