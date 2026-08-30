@@ -20,7 +20,12 @@
 // pause/resume ordering, rerun verbatim inputs + fresh child ids, steering to
 // the SAME child, abort preservation, the sweeps, the single-active-run rule,
 // coordinator disposal between operations, and the degraded no-continuable
-// path — all WITHOUT a live model.
+// path — all WITHOUT a live model. The P5 control-plane cases pin the
+// pending-pause queue: two parks with id-order release, the crash-safe queue
+// rebuild across a restart (both parked branches steerable), pause while a
+// branch is in flight (output adopted and held), and abort mid-fan-out
+// (interrupts + one-shot cancel + drain before finalize + no post-finalize
+// commits).
 import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
 import { validateGraph } from "../lib/graph.js";
 import { projectNodes } from "../lib/projection.js";
@@ -1052,6 +1057,366 @@ await withTempDir(async (cwd) => {
 	const done = await waitTerminal(registry, "pre-p4", cwd);
 	okCheck("migrate: the run completes through the migrated anchor", done.state === "completed" && projectNodes(done).nodes.c.status === "done");
 	okCheck("migrate: downstream used the post-upgrade output", harness.starts.find((s) => s.label === "Gamma")?.prompt.includes("<out:after-upgrade>") === true);
+});
+
+// --- GATE P5: double-breakpoint queue — two parks, id-order release ----------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				{ ...agent("b", "Beta", "B."), breakpoint: true },
+				{ ...agent("c", "Gamma", "C."), breakpoint: true },
+				agent("d", "Delta", "D."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+		},
+		input: "hello",
+	});
+	if (!started.ok) { okCheck("queue: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	await waitFor("b and c admitted together", () => harness.starts.length === 3);
+	const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+	const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+	// b settles first (parks, halt gate closes); c settles WHILE parked — the
+	// second park queues behind it. d must never start from parked branches.
+	harness.settle(bChild, "<out:Beta>");
+	await waitPausedAt(registry, started.runId, cwd, "b");
+	harness.settle(cChild, "<out:Gamma>");
+	await waitFor("c parked behind b", async () => {
+		const cur = await registry.getRun(started.runId, cwd) as RunRecord;
+		return cur.firings.filter((f) => f.status === "paused").length === 2;
+	});
+	const parked = await registry.getRun(started.runId, cwd) as RunRecord;
+	const firingB = parked.firings.find((f) => f.nodeId === "b")!;
+	const firingC = parked.firings.find((f) => f.nodeId === "c")!;
+	okCheck("queue: head is b (first settle), c parked behind — firing-id order", parked.pausedAt === firingB.firingId);
+	const parkedP = projectNodes(parked);
+	okCheck("queue: the projection holds the queue — head first, depth 2",
+		parkedP.pausedQueue.length === 2 && parkedP.pausedQueue[0].firingId === firingB.firingId && parkedP.pausedQueue[1].firingId === firingC.firingId);
+	okCheck("queue: d never started while parked", harness.starts.every((s) => s.label !== "Delta"));
+	// Release the head: the run STAYS parked, the next surfaces.
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	await waitFor("c surfaced as the head", async () => {
+		const cur = await registry.getRun(started.runId, cwd) as RunRecord;
+		return cur.pausedAt === firingC.firingId;
+	});
+	const afterFirst = await registry.getRun(started.runId, cwd) as RunRecord;
+	okCheck("queue: releasing b surfaces c and the run stays paused", afterFirst.state === "paused");
+	okCheck("queue: b's released firing is done with its output", firingB !== undefined && afterFirst.firings.find((f) => f.nodeId === "b")?.status === "done");
+	okCheck("queue: d still held while c is parked", harness.starts.every((s) => s.label !== "Delta"));
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	await waitFor("d started once both released", () => harness.starts.length === 4);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("queue: completes with four done firings",
+		done.state === "completed" && done.firings.length === 4 && done.firings.every((f) => f.status === "done"));
+	okCheck("queue: d composed both released outputs in id order",
+		done.firings[3].input === "D.\n\n## Beta\n<out:Beta>\n\n## Gamma\n<out:Gamma>");
+});
+
+// --- GATE P5: the pending-pause queue survives a restart — rebuilt from the
+// log in firing-id order (the stale pausedAt pointer is not consulted), and
+// BOTH parked branches stay steerable across the restart ----------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry1 = new RunRegistry(harness.services);
+	const started = await registry1.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				{ ...agent("b", "Beta", "B."), breakpoint: true },
+				{ ...agent("c", "Gamma", "C."), breakpoint: true },
+				agent("d", "Delta", "D."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+		},
+		input: "hello",
+	});
+	if (!started.ok) { okCheck("rebuild: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	await waitFor("b and c admitted together", () => harness.starts.length === 3);
+	const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+	const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+	const admitted = await registry1.getRun(started.runId, cwd) as RunRecord;
+	const anchorB = admitted.nodes.b?.parentAnchorSessionId as string;
+	const anchorC = admitted.nodes.c?.parentAnchorSessionId as string;
+	// Settle OUT of id order: c parks first (the crashed head), then b.
+	harness.settle(cChild, "<out:Gamma>");
+	await waitPausedAt(registry1, started.runId, cwd, "c");
+	harness.settle(bChild, "<out:Beta>");
+	await waitFor("b parked behind c", async () => {
+		const cur = await registry1.getRun(started.runId, cwd) as RunRecord;
+		return cur.firings.filter((f) => f.status === "paused").length === 2;
+	});
+	const before = await registry1.getRun(started.runId, cwd) as RunRecord;
+	const firingB = before.firings.find((f) => f.nodeId === "b")!;
+	const firingC = before.firings.find((f) => f.nodeId === "c")!;
+	okCheck("rebuild: the crashed head is c (settle order, out of id order)", before.pausedAt === firingC.firingId);
+	// "Restart": a brand-new registry over the same workspace.
+	const registry2 = new RunRegistry(harness.services);
+	const discovered = await registry2.activeRunForCwd(cwd);
+	okCheck("rebuild: the paused run resurrects", discovered !== null && discovered.state === "paused");
+	// The rebuilt queue re-derives from the LOG in firing-id order: the head
+	// flips from the stale c pointer to b.
+	await waitFor("the rebuilt head is b", async () => {
+		const cur = await registry2.getRun(started.runId, cwd) as RunRecord;
+		return cur.pausedAt === firingB.firingId;
+	});
+	const rebuilt = await registry2.getRun(started.runId, cwd) as RunRecord;
+	okCheck("rebuild: both branches parked after the rebuild",
+		rebuilt.firings.filter((f) => f.status === "paused").length === 2
+		&& projectNodes(rebuilt).pausedQueue.map((f) => f.firingId).join() === firingB.firingId + "," + firingC.firingId);
+	// Steer the REBUILT head across the restart: cold-resumed anchor, SAME child.
+	await registry2.control(started.runId, { action: "steer", feedback: "tighten beta" }, cwd);
+	await waitFor("b's post-restart followup", () => harness.followups.length === 1);
+	okCheck("rebuild: steering the rebuilt head hits b's SAME child via its anchor",
+		harness.followups[0].childId === bChild && harness.followups[0].parentId === anchorB);
+	harness.settle(bChild, "<out:Beta2>");
+	await waitPausedAt(registry2, started.runId, cwd, "b");
+	// Release b: c surfaces and is steerable too (the SECOND pre-crash branch —
+	// P4's "steering both parked branches after a restart" surface).
+	await registry2.control(started.runId, { action: "resume" }, cwd);
+	await waitFor("c surfaced after the restart release", async () => {
+		const cur = await registry2.getRun(started.runId, cwd) as RunRecord;
+		return cur.pausedAt === firingC.firingId;
+	});
+	await registry2.control(started.runId, { action: "steer", feedback: "tighten gamma" }, cwd);
+	await waitFor("c's post-restart followup", () => harness.followups.length === 2);
+	okCheck("rebuild: the SECOND parked branch steers via its own anchor",
+		harness.followups[1].childId === cChild && harness.followups[1].parentId === anchorC);
+	harness.settle(cChild, "<out:Gamma2>");
+	await waitPausedAt(registry2, started.runId, cwd, "c");
+	await registry2.control(started.runId, { action: "resume" }, cwd);
+	await waitFor("d started once both rebuilt branches released", () => harness.starts.length === 4);
+	const done = await waitTerminal(registry2, started.runId, cwd);
+	okCheck("rebuild: completes with four done firings",
+		done.state === "completed" && done.firings.length === 4 && done.firings.every((f) => f.status === "done"));
+	okCheck("rebuild: d composed both post-restart outputs",
+		done.firings[3].input === "D.\n\n## Beta\n<out:Beta2>\n\n## Gamma\n<out:Gamma2>");
+});
+
+// --- GATE P5: pause while a branch is in flight — the in-flight output is
+// adopted and held; nothing downstream starts until resume ---------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				{ ...agent("b", "Beta", "B."), breakpoint: true },
+				agent("c", "Gamma", "C."),
+				agent("d", "Delta", "D."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+		},
+		input: "hello",
+	});
+	if (!started.ok) { okCheck("inflight: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	await waitFor("b and c admitted together", () => harness.starts.length === 3);
+	const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+	const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+	// b settles and parks WHILE c's paid turn is still in flight.
+	harness.settle(bChild, "<out:Beta>");
+	const parked = await waitPausedAt(registry, started.runId, cwd, "b");
+	const firingB = parked.firings.find((f) => f.nodeId === "b")!;
+	okCheck("inflight: parked at b while c is in flight",
+		parked.firings.find((f) => f.nodeId === "c")?.status === "running");
+	okCheck("inflight: d not started (halt gate closed)", harness.starts.length === 3);
+	// c settles while parked: its output is ADOPTED into the log and HELD —
+	// the run stays paused, d waits.
+	harness.resolveOneshot(cChild, "<out:Gamma>");
+	await waitFor("c's in-flight output adopted", async () => {
+		const cur = await registry.getRun(started.runId, cwd) as RunRecord;
+		const c = cur.firings.find((f) => f.nodeId === "c");
+		return c?.status === "done" && c.output === "<out:Gamma>";
+	});
+	const held = await registry.getRun(started.runId, cwd) as RunRecord;
+	okCheck("inflight: the run STAYS paused with the adopted output held", held.state === "paused" && held.pausedAt === firingB.firingId);
+	okCheck("inflight: d still held after the adopt", harness.starts.length === 3);
+	// Resume b: its emission joins c's already-queued message; d composes both.
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	await waitFor("d started after the resume", () => harness.starts.length === 4);
+	harness.resolveOneshot(harness.starts[3].childId, "<out:Delta>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("inflight: completes with d composing both branches",
+		done.state === "completed" && done.firings[3].input === "D.\n\n## Beta\n<out:Beta>\n\n## Gamma\n<out:Gamma>");
+});
+
+// --- GATE P5: abort mid-fan-out — both continuable children interrupted,
+// one-shots cancelled via the run signal, drain before finalize, and no commit
+// lands after finalization ------------------------------------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				{ ...agent("b", "Beta", "B."), breakpoint: true },
+				{ ...agent("c", "Gamma", "C."), breakpoint: true },
+				agent("e", "Epsilon", "E."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "a", "e")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("abort-fan: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	// b and c (continuable) and e (held one-shot) admitted together, all in
+	// flight when the abort lands.
+	await waitFor("b, c, e admitted together", () => harness.starts.length === 4);
+	const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+	const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+	const inFlight = await registry.getRun(started.runId, cwd) as RunRecord;
+	const anchorB = inFlight.nodes.b?.parentAnchorSessionId as string;
+	const anchorC = inFlight.nodes.c?.parentAnchorSessionId as string;
+	await registry.control(started.runId, { action: "abort" }, cwd);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("abort-fan: both continuable children interrupted via their node anchors",
+		harness.interrupts.some((i) => i.childId === bChild && i.parentSessionId === anchorB)
+		&& harness.interrupts.some((i) => i.childId === cChild && i.parentSessionId === anchorC));
+	okCheck("abort-fan: the held one-shot was cancelled via the run signal",
+		harness.warnings.some((w) => w.includes("agent \"e\" run failed")));
+	okCheck("abort-fan: run finalized aborted", done.state === "aborted");
+	okCheck("abort-fan: the drain completed first — every firing terminal",
+		done.firings.length === 4 && done.firings.every((f) => f.status !== "running" && f.status !== "paused"));
+	okCheck("abort-fan: a's completed output preserved", done.firings[0].status === "done" && done.firings[0].output === "<out:Alpha>");
+	okCheck("abort-fan: in-flight firings aborted, outputs they had kept",
+		done.firings.filter((f) => f.nodeId === "b" || f.nodeId === "c" || f.nodeId === "e").every((f) => f.status === "aborted"));
+	// No commit lands after finalization: the record file is byte-stable.
+	const file = join(cwd, ".agent-pipeline", "runs", started.runId + ".json");
+	const beforeBytes = await readFile(file, "utf8");
+	await beat();
+	await beat();
+	await beat();
+	const afterBytes = await readFile(file, "utf8");
+	okCheck("abort-fan: no commit landed after finalization (record byte-stable)", beforeBytes === afterBytes);
+});
+
+// --- GATE P5 (spec §3 restart): a firing the crash caught IN FLIGHT re-fires
+// on resume with its same composed input — exactly Rerun semantics; the dead
+// firing is marked aborted and a plain node's re-fired output emits -----------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	// Crashed while b (breakpointed) was parked and c (plain) was in flight.
+	const crashed: RunRecord = {
+		runId: "refire-plain",
+		cwd,
+		sessionId: "sess",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "paused",
+		pausedAt: "f-002",
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				{ ...agent("b", "Beta", "B."), breakpoint: true },
+				agent("c", "Gamma", "C."),
+				agent("d", "Delta", "D."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+		},
+		input: "crash",
+		recordVersion: 2,
+		firings: [
+			{ firingId: "f-001", nodeId: "a", seq: 1, status: "done", input: "A.\n\n## Input\ncrash", output: "<out:Alpha>", stopReason: "completed", childSessionId: "oneshot-1", startedAt: "t", settledAt: "t" },
+			{ firingId: "f-002", nodeId: "b", seq: 1, status: "paused", input: "B.\n\n## Alpha\n<out:Alpha>", output: "<out:Beta>", stopReason: "completed", childSessionId: "child-9", startedAt: "t" },
+			{ firingId: "f-003", nodeId: "c", seq: 1, status: "running", input: "C.\n\n## Alpha\n<out:Alpha>", startedAt: "t" },
+		],
+		nodes: {},
+	};
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "refire-plain.json"), JSON.stringify(crashed, null, 2));
+	const discovered = await registry.activeRunForCwd(cwd);
+	okCheck("refire: the paused record resurrects", discovered !== null && discovered.state === "paused");
+	await waitFor("c's orphan re-fired as a one-shot", () => harness.starts.filter((s) => s.label === "Gamma").length === 1);
+	const rec = await registry.getRun("refire-plain", cwd) as RunRecord;
+	const dead = rec.firings.find((f) => f.firingId === "f-003")!;
+	const refire = rec.firings.find((f) => f.nodeId === "c" && f.seq === 2)!;
+	okCheck("refire: the dead firing is aborted in the log (honest history)",
+		dead.status === "aborted" && typeof dead.settledAt === "string");
+	okCheck("refire: a fresh firing re-runs the SAME composed input",
+		refire !== undefined && refire.input === dead.input && refire.status === "running" && refire.seq === 2);
+	okCheck("refire: the fresh child got the verbatim prompt",
+		harness.starts.find((s) => s.label === "Gamma")!.prompt === dead.input);
+	// The re-fired output adopts and is HELD while b stays parked.
+	harness.resolveOneshot(harness.starts.find((s) => s.label === "Gamma")!.childId, "<out:Gamma2>");
+	await waitFor("the re-fired firing adopts its output", async () => {
+		const cur = await registry.getRun("refire-plain", cwd) as RunRecord;
+		return cur.firings.find((f) => f.nodeId === "c" && f.seq === 2)?.status === "done";
+	});
+	okCheck("refire: d still gated on the parked branch", harness.starts.every((s) => s.label !== "Delta"));
+	await registry.control("refire-plain", { action: "resume" }, cwd);
+	await waitFor("d started once the parked branch released", () => harness.starts.some((s) => s.label === "Delta"));
+	harness.resolveOneshot(harness.starts.find((s) => s.label === "Delta")!.childId, "<out:Delta>");
+	const done = await waitTerminal(registry, "refire-plain", cwd);
+	okCheck("refire: the run completes through the re-fired node", done.state === "completed");
+	const dFiring = done.firings.find((f) => f.nodeId === "d")!;
+	okCheck("refire: d composed the parked branch AND the re-fired branch",
+		typeof dFiring.input === "string" && dFiring.input.includes("## Beta\n<out:Beta>") && dFiring.input.includes("## Gamma\n<out:Gamma2>"));
+	okCheck("refire: the log reads a done, b done, the dead epoch aborted, the re-fire done, d done",
+		done.firings.map((f) => f.firingId + ":" + f.status).join(",") === "f-001:done,f-002:done,f-003:aborted,f-004:done,f-005:done");
+});
+
+// --- GATE P5 (spec §3 restart): a crash mid-RERUN — the orphaned continuable
+// epoch re-fires, re-parks on its fresh firing, and the stale pausedAt pointer
+// is re-derived from the log ---------------------------------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const crashed: RunRecord = {
+		runId: "refire-bp",
+		cwd,
+		sessionId: "sess",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "paused",
+		pausedAt: "f-002", // stale: points at the superseded firing, not the orphan
+		graph: { agents: [{ ...agent("x", "Xray", "X."), breakpoint: true }], connections: [] },
+		input: "x-input",
+		recordVersion: 2,
+		firings: [
+			{ firingId: "f-001", nodeId: "x", seq: 1, status: "paused", input: "X.\n\n## Input\nx-input", output: "<out:old>", stopReason: "completed", childSessionId: "child-7", startedAt: "t" },
+			{ firingId: "f-002", nodeId: "x", seq: 2, status: "running", input: "X.\n\n## Input\nx-input", startedAt: "t" },
+		],
+		nodes: {},
+	};
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "refire-bp.json"), JSON.stringify(crashed, null, 2));
+	await registry.activeRunForCwd(cwd);
+	await waitFor("the orphaned rerun epoch re-fired as continuable", () =>
+		harness.starts.length === 1 && harness.starts[0].kind === "continuable");
+	okCheck("refire-bp: the fresh epoch got the verbatim input", harness.starts[0].prompt === "X.\n\n## Input\nx-input");
+	const rec = await registry.getRun("refire-bp", cwd) as RunRecord;
+	okCheck("refire-bp: superseded parked firing kept as history, dead epoch aborted",
+		rec.firings[0].status === "paused" && rec.firings[1].status === "aborted");
+	okCheck("refire-bp: the node's anchor was created for the re-fire", typeof rec.nodes.x?.parentAnchorSessionId === "string");
+	const childId = harness.starts[0].childId;
+	harness.settle(childId, "<out:rerun2>");
+	const parked = await waitPausedAt(registry, "refire-bp", cwd, "x");
+	const fresh = parked.firings.find((f) => f.seq === 3)!;
+	okCheck("refire-bp: re-parked on the fresh (seq 3) firing; the stale pointer was re-derived",
+		parked.pausedAt === fresh.firingId && fresh.status === "paused" && fresh.output === "<out:rerun2>" && fresh.childSessionId === childId);
+	await registry.control("refire-bp", { action: "resume" }, cwd);
+	const done = await waitTerminal(registry, "refire-bp", cwd);
+	okCheck("refire-bp: completes with the re-fired output; the old parked firing stays history",
+		done.state === "completed" && done.firings.find((f) => f.seq === 3)?.status === "done"
+		&& done.firings.find((f) => f.seq === 1)?.status === "paused" && done.firings.find((f) => f.seq === 2)?.status === "aborted");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

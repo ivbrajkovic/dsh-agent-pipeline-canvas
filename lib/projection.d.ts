@@ -36,7 +36,28 @@ export interface NodeProjection {
     pausedNodeId?: string;
     /** The paused firing (v2 only; undefined on legacy records). */
     pausedFiring?: RunFiring;
+    /**
+     * The pending-pause queue (v2; empty on legacy records): the queue HEAD
+     * first (the pausedAt firing), then the other settled-but-unresolved
+     * breakpoint firings — status "paused", not superseded by a later firing
+     * of the same node — in firing-id order. The live queue is settle-ordered;
+     * the depth (length) is what the UI surfaces, and the crash-safe rebuild
+     * on the executor side uses the pure id order (the log is the truth).
+     */
+    pausedQueue: RunFiring[];
 }
+/**
+ * Every firing with `status` that no later firing of the same node supersedes,
+ * in firing-id order — the log's unresolved work of that kind. For "paused"
+ * these are the settled-but-unresolved breakpoints: the pending-pause queue
+ * the UI surfaces and the executor's crash-safe rebuild re-parks (the shared
+ * derivation keeps the displayed depth and the rebuilt head from drifting).
+ * For "running" these are the firings that were in flight when the process
+ * died, which a resumed run must re-fire (executor spec §3). Total over
+ * malformed entries (a projection must never be the thing that breaks a
+ * render).
+ */
+export declare function unresolvedFirings(firings: readonly RunFiring[], status: RunFiringStatus): RunFiring[];
 /**
  * Project a run record onto the per-node view the UI and tests consume.
  * Total over both record versions and over malformed entries (a projection

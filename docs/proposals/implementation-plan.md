@@ -75,6 +75,11 @@ node model, and the executor are REBUILT.
   stamped with the fresh anchor id). Decide before P5: keep the legacy field
   as a fallback address for not-yet-anchored nodes, or accept
   steer-via-Rerun-only for later pre-P4 branches.
+- **P5** — the P4-scrutiny decision lands as: steer-via-Rerun-only for later
+  pre-P4 branches. Keeping the shared id as a fallback address would put a
+  shared live-anchor address back into the admission hot path — the exact
+  race P4 removed — to serve only transitional (P3-era) records whose failing
+  steer is typed, surfaced on the firing, and fully recoverable via Rerun.
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from

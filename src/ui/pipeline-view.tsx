@@ -241,9 +241,14 @@ function PipelineView({
 
 	const runActive = activeRun !== null && (activeRun.state === "running" || activeRun.state === "paused");
 	// The record is a firing log; the per-node view is computed, never stored.
-	// pausedAt points at a FIRING; the projection resolves it to its node.
+	// pausedAt points at a FIRING; the projection resolves it to its node and
+	// derives the pending-pause queue (head first) — several breakpoints may
+	// be parked at once, and the modal/label surface the head plus the depth.
 	const runProjection = runActive && activeRun !== null ? projectNodes(activeRun) : null;
 	const pausedNodeId = runActive && activeRun?.state === "paused" ? runProjection?.pausedNodeId ?? null : null;
+	// A resolved paused node always heads the projection's queue, so the depth
+	// behind it is length − 1.
+	const queuedCount = pausedNodeId !== null && runProjection ? runProjection.pausedQueue.length - 1 : 0;
 	const inspectOpen = pausedNodeId !== null
 		&& activeRun !== null
 		&& typeof activeRun.runId === "string"
@@ -717,7 +722,9 @@ function PipelineView({
 				</span>
 				{runActive ? (
 					<span className="pipeline-run-live" title="A run is active in this workspace — canvas edits affect the NEXT run only">
-						{activeRun?.state === "paused" ? "Paused at " + nameOf(pausedNodeId as string) : "Running…"}
+						{activeRun?.state === "paused"
+							? "Paused at " + nameOf(pausedNodeId as string) + (queuedCount > 0 ? " +" + queuedCount + " queued" : "")
+							: "Running…"}
 					</span>
 				) : null}
 				<button className="pipeline-btn" onClick={addAgentFromToolbar}>+ Add Agent</button>
@@ -832,6 +839,7 @@ function PipelineView({
 				<InspectModal
 					agentName={nameOf(pausedNodeId)}
 					node={inspectNode}
+					queued={queuedCount}
 					busy={controlBusy}
 					status={controlStatus}
 					canSteer={typeof inspectNode.childSessionId === "string" && (inspectNode.childSessionId as string).length > 0}

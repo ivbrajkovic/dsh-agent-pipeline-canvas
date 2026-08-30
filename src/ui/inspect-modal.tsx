@@ -1,22 +1,26 @@
 // The paused-run inspection modal: when a run parks at a breakpoint, this shows
-// the paused firing's composed input (immutable for the run), its adopted
+// the paused HEAD firing's composed input (immutable for the run), its adopted
 // output, and the settlement status, and offers the control actions — Resume
-// (continue the pipeline with this output), Rerun (a fresh firing with the same
+// (continue the pipeline with this output; with more breakpoints parked, it
+// releases this one and surfaces the next), Rerun (a fresh firing with the same
 // input), Steer (deliver feedback to the SAME child; it keeps its transcript),
 // and Abort (stop the whole run). The node view is the projection of the run's
-// firing log (../projection.ts). The Transcript route opens the agent's durable
-// child session. Steer requires text; the other buttons are always available
-// while paused.
+// firing log (../projection.ts); the queue depth counts the parked firings
+// behind the head. The Transcript route opens the agent's durable child
+// session. Steer requires text; the other buttons are always available while
+// paused.
 import * as React from "react";
 import type { ProjectedNode } from "../projection.ts";
 import "./inspect-modal.css";
 
 function InspectModal({
-	agentName, node, busy, status, canSteer, onOpenSession,
+	agentName, node, queued, busy, status, canSteer, onOpenSession,
 	onResume, onRerun, onSteer, onAbort, onClose,
 }: {
 	agentName: string;
 	node: ProjectedNode;
+	/** Parked breakpoint firings behind this head (the pending-pause queue depth minus one). */
+	queued: number;
 	busy: string | null;
 	status: string | null;
 	/** False on a degraded deployment (no continuable runtime): steering is unavailable. */
@@ -51,6 +55,11 @@ function InspectModal({
 						>Transcript</button>
 					) : null}
 					<span className="pipeline-inspect-hint">The pipeline is paused before any downstream agent runs.</span>
+					{queued > 0 ? (
+						<span className="pipeline-inspect-hint">
+							{queued} more breakpoint{queued === 1 ? "" : "s"} queued — Resume releases this one and surfaces the next.
+						</span>
+					) : null}
 				</div>
 				<div className="modal-row">
 					<label>Composed input (fixed for this run)</label>

@@ -67,6 +67,35 @@ export interface NodeProjection {
 	pausedNodeId?: string;
 	/** The paused firing (v2 only; undefined on legacy records). */
 	pausedFiring?: RunFiring;
+	/**
+	 * The pending-pause queue (v2; empty on legacy records): the queue HEAD
+	 * first (the pausedAt firing), then the other settled-but-unresolved
+	 * breakpoint firings — status "paused", not superseded by a later firing
+	 * of the same node — in firing-id order. The live queue is settle-ordered;
+	 * the depth (length) is what the UI surfaces, and the crash-safe rebuild
+	 * on the executor side uses the pure id order (the log is the truth).
+	 */
+	pausedQueue: RunFiring[];
+}
+
+/**
+ * Every firing with `status` that no later firing of the same node supersedes,
+ * in firing-id order — the log's unresolved work of that kind. For "paused"
+ * these are the settled-but-unresolved breakpoints: the pending-pause queue
+ * the UI surfaces and the executor's crash-safe rebuild re-parks (the shared
+ * derivation keeps the displayed depth and the rebuilt head from drifting).
+ * For "running" these are the firings that were in flight when the process
+ * died, which a resumed run must re-fire (executor spec §3). Total over
+ * malformed entries (a projection must never be the thing that breaks a
+ * render).
+ */
+export function unresolvedFirings(firings: readonly RunFiring[], status: RunFiringStatus): RunFiring[] {
+	const all = firings.filter((f): f is RunFiring => f !== null && typeof f === "object");
+	const superseded = (f: RunFiring) =>
+		all.some((later) => later.nodeId === f.nodeId && typeof later.seq === "number" && typeof f.seq === "number" && later.seq > f.seq);
+	return all
+		.filter((f) => f.status === status && !superseded(f))
+		.sort((a, b) => (a.firingId < b.firingId ? -1 : a.firingId > b.firingId ? 1 : 0));
 }
 
 /**
@@ -134,10 +163,21 @@ export function projectNodes(record: ProjectableRecord): NodeProjection {
 	if (pausedFiring !== undefined) pausedNodeId = pausedFiring.nodeId;
 	else if (pausedAt !== undefined && firings.length === 0 && nodes[pausedAt] !== undefined) pausedNodeId = pausedAt;
 
+	// The pending-pause queue (v2): the settled-but-unresolved breakpoint
+	// firings with the record's pausedAt head first and the rest in firing-id
+	// order (the live queue is settle-ordered; the depth is what the UI shows,
+	// and the executor's crash-safe rebuild uses the same shared derivation).
+	const parked = unresolvedFirings(firings, "paused");
+	let pausedQueue: RunFiring[] = parked;
+	if (pausedFiring !== undefined) {
+		pausedQueue = [pausedFiring, ...parked.filter((f) => f !== pausedFiring)];
+	}
+
 	return {
 		nodes,
 		order,
 		...(pausedNodeId !== undefined ? { pausedNodeId } : {}),
 		...(pausedFiring !== undefined ? { pausedFiring } : {}),
+		pausedQueue,
 	};
 }
