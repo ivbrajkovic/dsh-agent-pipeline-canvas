@@ -96,6 +96,18 @@ node model, and the executor are REBUILT.
   rebuilt queue sorts firing ids lexicographically over 3-digit padding —
   switch to a numeric compare on the id suffix before loops can exceed 999
   firings.
+- **P6 (scrutiny)** — verdict ship. The one rule is the NODE RUNNER's: the
+  ATTENDED control plane does not fail-fast — a Rerun/Steer of a parked head
+  whose fresh epoch settles non-completed re-parks for another decision (the
+  gate is already closed and the user is present), so only unattended firings
+  (the NodeRunner's classification, the plain crash-orphan re-fire) fail the
+  run. This diverges from spec §2's blanket wording on purpose; P8 must not
+  "fix" it when consolidating the fail-fast matrix. En route: a failing
+  sibling unwinds parked control waits and flips the record out of `paused`
+  before the drain (the park invariant holds on the live path), with one
+  bounded write-beat window where a just-armed head publishes paused before
+  its retirement lands (self-healing by the flip; cheap fix if it matters:
+  skip the paused-state writes when the run already failed).
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from

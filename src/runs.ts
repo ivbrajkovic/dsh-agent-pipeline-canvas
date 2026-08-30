@@ -1053,10 +1053,11 @@ class RunExecutor {
 	 *
 	 * The control plane deliberately does NOT fail-fast on the fresh epoch's
 	 * stop reason: the user is at the decision point with the halt gate
-	 * closed, so a non-completed rerun re-parks with the error visible (retry
-	 * / steer / abort) — P6's one rule is the NODE RUNNER's classification;
-	 * the unattended re-fire (refirePlain) classifies, this attended one does
-	 * not.
+	 * closed, so a non-completed rerun re-parks for another decision (retry /
+	 * steer / abort) — a THROWN rerun records its error, a settled-but-not-
+	 * completed one carries only its stop reason. P6's one rule is the NODE
+	 * RUNNER's classification; the unattended re-fire (refirePlain)
+	 * classifies, this attended one does not.
 	 */
 	private async rerunPaused(entry: PauseEntry): Promise<void> {
 		const current = entry.firing;
