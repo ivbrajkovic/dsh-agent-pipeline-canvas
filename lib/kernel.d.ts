@@ -92,7 +92,9 @@ export declare class Kernel {
      * messages never (all) arrived, or they declare no input ports at all
      * (a port-less node can never fire — surfaced as starvation, not an error).
      * Sorted; the executor subtracts nodes already satisfied by the log before
-     * reporting.
+     * reporting. Known limitation (fine until P7's cycles): a node that DID
+     * fire but now waits on an unsatisfied re-firing round is not reported —
+     * extend this to unsatisfied all-of ports generally when re-firing lands.
      */
     starvingCandidates(): string[];
     /**

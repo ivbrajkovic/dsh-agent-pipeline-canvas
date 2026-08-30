@@ -184,7 +184,8 @@ type ControlCommand =
  * steered — so a settlement can never slip past registration; events arriving
  * before their `wait()` call (the acceptance-to-wait window) are buffered and
  * matched then. One-shot children also emit the event; their ids never match a
- * continuable child id, and the unmatched buffer is FIFO-capped.
+ * continuable child id, and the unmatched buffer is kept whole (eviction could
+ * drop a settlement its firing still needs).
  */
 class EndWaiter {
 	private readonly waiters = new Map<string, (info: SubagentRunEndInfoLike) => void>();
@@ -201,12 +202,12 @@ class EndWaiter {
 				waiter(info);
 				return;
 			}
-			// Not (yet) waited on — keep it for a later wait(), capped.
+			// Not (yet) waited on — keep it for a later wait(). Uncapped on
+			// purpose: entries are tiny and bounded by the run's settlement
+			// count, and evicting the oldest could drop a settlement that its
+			// firing is still about to wait on (a lost epoch would stall the
+			// run — abort would be the only recovery).
 			this.buffered.set(childId, info);
-			if (this.buffered.size > 32) {
-				const oldest = this.buffered.keys().next().value;
-				if (oldest !== undefined) this.buffered.delete(oldest);
-			}
 		});
 	}
 
@@ -686,6 +687,13 @@ class RunExecutor {
 		const entry: PauseEntry = { firing: initial, agent, agentById, inputs, turn, openTurn };
 		this.pauseQueue.push(entry);
 		this.kernel?.setHalted(true);
+		// Park the firing in the LOG as soon as it parks — not only when it
+		// becomes the queue head — so a queued-but-unresolved breakpoint is
+		// never mistaken for work in flight and a crash leaves an expressive
+		// log for P5's queue rebuild. This commits while `state` is still
+		// "running", so the park invariant (observing paused ⇒ armed mailbox)
+		// is untouched.
+		await this.transition(() => { initial.status = "paused"; });
 		try {
 			while (true) {
 				if (this.pauseQueue[0] !== entry) {
@@ -904,7 +912,17 @@ class RunExecutor {
 		const prompt = agentPrompt(agent, inputs, agentById);
 		let firing: RunFiring;
 		try {
-			firing = await this.transition(() => this.openFiring(nodeId, null, prompt));
+			firing = await this.transition(() => {
+				// seq is per-node: a node that re-fires from the stream (a
+				// cycle, or any-of fed twice) continues its firing number the
+				// same way a Rerun does.
+				const log = this.record.firings;
+				let previous: RunFiring | null = null;
+				for (let i = log.length - 1; i >= 0; i--) {
+					if (log[i].nodeId === nodeId) { previous = log[i]; break; }
+				}
+				return this.openFiring(nodeId, previous, prompt);
+			});
 		} catch (error) {
 			this.services.logger.warn(`agent-pipeline: opening a firing for "${nodeId}" failed: ${String(error)}`);
 			return;
@@ -989,22 +1007,25 @@ class RunExecutor {
 
 	/**
 	 * Finalize: drain every NodeRunner task and the write chain FIRST, so no
-	 * commit can land after the terminal state, then publish. The abort path
-	 * marks every in-flight or parked firing aborted (its output preserved — a
-	 * parked firing never released its output into the pipeline flow) and
-	 * keeps completed firings as they are; the error path's per-firing
-	 * attribution already happened in the NodeRunner.
+	 * commit can land after the terminal state, then publish. Firings still
+	 * marked running/paused at this point are stale by definition (every
+	 * runner drained, no park queued — only a crash mid-control-op can leave
+	 * one) and are marked aborted in EVERY terminal kind, EXCEPT the superseded
+	 * parked firings a Rerun left behind: those keep `paused` as the honest
+	 * decision history the P2 record pins. Aborted and parked outputs are
+	 * preserved.
 	 */
 	private async finalize(kind: "completed" | "aborted" | "error"): Promise<void> {
 		await Promise.allSettled([...this.runners]);
 		await this.writeChain;
 		await this.transition(() => {
-			if (kind === "aborted") {
-				const now = new Date().toISOString();
-				for (const firing of this.record.firings) {
-					if (firing.status === "running" || firing.status === "paused") firing.status = "aborted";
-					if (firing.status === "aborted" && firing.settledAt === undefined) firing.settledAt = now;
+			const now = new Date().toISOString();
+			for (const firing of this.record.firings) {
+				if (firing.status === "running" || firing.status === "paused") {
+					const superseded = this.record.firings.some((later) => later.nodeId === firing.nodeId && later.seq > firing.seq);
+					if (!superseded) firing.status = "aborted";
 				}
+				if (firing.status === "aborted" && firing.settledAt === undefined) firing.settledAt = now;
 			}
 			this.record.state = kind;
 			delete this.record.pausedAt;
@@ -1075,7 +1096,7 @@ class RunExecutor {
 					const released = await this.pauseAt(pausedFiring, agent, agentById, inputs);
 					if (released !== null) await this.emitOutput(pausedFiring.nodeId, released);
 				}
-			} else if (!resumeFromPause) {
+			} else if (!resumeFromPause && !this.signal.aborted) {
 				// The SOURCE (stream model): the run input emits once to every
 				// wired root — a node with no incoming edges is source-fed on
 				// all of its ports.

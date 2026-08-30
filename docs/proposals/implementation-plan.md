@@ -39,6 +39,19 @@ node model, and the executor are REBUILT.
   to await its commit before the executor leaves the registry — otherwise a
   concurrent workspace load sweeps the stale `running` disk snapshot over a
   completed run.
+- **P3 (scrutiny)** — two constraints surfaced by the post-implementation
+  review, recorded so later phases inherit them honestly: (1) the accepted
+  shared-coordinator race (P4 removes it) is worse than a wasted handle — two
+  breakpointed branches admitted in the same batch can each create a
+  coordinator, leaving one handle undisposed and LIVE (a settlement notice can
+  wake it with a real model call) and one child parented to a session other
+  than `coordinatorSessionId`; reachable the moment both branches of the
+  verification graph are breakpointed, which the P3 E2E gate dodges only by
+  using one-shot graphs. (2) The port bound is a BACKLOG cap (max unconsumed
+  queued messages — the P1 wording types.ts pinned), while design principle 4
+  and P7's loop-budget gate describe a DELIVERY count; in a free-running cycle
+  a backlog bound never overflows, so P7's "bound drops + records overflow"
+  cannot pass as coded. Decide the bound semantics before P7 builds on it.
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from

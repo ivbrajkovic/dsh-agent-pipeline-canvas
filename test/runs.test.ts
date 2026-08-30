@@ -893,5 +893,46 @@ await withTempDir(async (cwd) => {
 		harness.warnings.some((w) => w.includes("waiting nodes: d")));
 });
 
+// --- P3: any-of never blocks — one firing per arriving message, head consumed
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, target: string, targetPort: string) => ({
+		id, source, target, sourcePort: source + ":out", targetPort,
+	});
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				agent("b", "Beta", "B."),
+				{ ...agent("d", "Delta", "D."), inputPorts: [{ name: "p1", policy: "any-of" }, { name: "p2", policy: "any-of" }] },
+			],
+			connections: [connP("c1", "a", "d", "d:p1"), connP("c2", "b", "d", "d:p2")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("anyof: start ok", false); return; }
+	// Both roots are source-fed and admitted together; neither has settled.
+	await waitFor("both roots started", () => harness.starts.length === 2);
+	// Alpha settles first: any-of fires d on p1 alone — p2 never blocks it.
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	await waitFor("d fired on the first arrival only", () => harness.starts.length === 3);
+	okCheck("anyof: d consumes p1's head, composed from Alpha alone",
+		harness.starts[2].prompt === "D.\n\n## Alpha\n<out:Alpha>");
+	harness.resolveOneshot(harness.starts[2].childId, "<out:d1>");
+	// Beta settles: p2's arrival fires d AGAIN (a node may fire many times).
+	harness.resolveOneshot(harness.starts[1].childId, "<out:Beta>");
+	await waitFor("d fired again on the second arrival", () => harness.starts.length === 4);
+	okCheck("anyof: second firing composed from Beta alone", harness.starts[3].prompt === "D.\n\n## Beta\n<out:Beta>");
+	harness.resolveOneshot(harness.starts[3].childId, "<out:d2>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("anyof: run completes with four done firings",
+		done.state === "completed" && done.firings.length === 4 && done.firings.every((f) => f.status === "done"));
+	okCheck("anyof: d's re-firing continues its per-node seq",
+		done.firings[2].nodeId === "d" && done.firings[2].seq === 1 && done.firings[3].nodeId === "d" && done.firings[3].seq === 2);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
