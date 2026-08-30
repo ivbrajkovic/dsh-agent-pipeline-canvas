@@ -4,7 +4,7 @@
 // output of src/execution.ts; the Host and the runner import the same module).
 // This exercises the runtime input/output shapes, NOT scheduling/invocation —
 // those are out of scope.
-import { classifyGraph, agentInput, agentPrompt, pipelineResult, topoOrder, INPUT_KEY } from "../lib/execution.js";
+import { classifyGraph, agentInput, agentPrompt, pipelineResult, topoOrder, portGraph, INPUT_KEY } from "../lib/execution.js";
 import { deepStrictEqual } from "node:assert";
 
 let passed = 0;
@@ -148,6 +148,70 @@ const graph = (agents: unknown[], connections: unknown[]) => ({ agents, connecti
 {
 	const g = graph([], []);
 	eq("topo empty", topoOrder(g), []);
+}
+
+// --- portGraph ----------------------------------------------------------
+{
+	const g = graph([agent("a"), agent("b")], [conn("c1", "a", "b")]);
+	const pg = portGraph(g);
+	eq("portGraph ids in agent order", pg.ids, ["a", "b"]);
+	eq("default input port derives in/all-of/unbounded", pg.byId.a.inputs.map((p) => [p.name, p.portId, p.policy, p.bound]), [["in", "a:in", "all-of", undefined]]);
+	eq("default output port derives out", pg.byId.a.outputs.map((p) => [p.name, p.portId]), [["out", "a:out"]]);
+	eq("edge attaches to the target's input port", pg.byId.b.inputs[0].edges.map((e) => [e.connectionId, e.source, e.sourcePort]), [["c1", "a", "a:out"]]);
+	eq("input port sources sorted+unique", pg.byId.b.inputs[0].sources, ["a"]);
+	eq("edge attaches to the source's output port", pg.byId.a.outputs[0].edges.map((e) => [e.connectionId, e.target, e.targetPort]), [["c1", "b", "b:in"]]);
+	eq("output port targets sorted+unique", pg.byId.a.outputs[0].targets, ["b"]);
+}
+{
+	// Declared named ports: edges attach by wire id ("<id>:<name>"); fan-in
+	// queues both messages into the one all-of port.
+	const a = { ...agent("a"), outputPorts: ["mail", "slack"] };
+	const b = { ...agent("b"), inputPorts: [{ name: "data", policy: "any-of", bound: 3 }] };
+	const g = {
+		agents: [a, b],
+		connections: [
+			{ id: "c1", source: "a", target: "b", sourcePort: "a:mail", targetPort: "b:data" },
+			{ id: "c2", source: "a", target: "b", sourcePort: "a:slack", targetPort: "b:data" },
+		],
+	};
+	const pg = portGraph(g);
+	eq("declared output ports in declaration order", pg.byId.a.outputs.map((p) => p.portId), ["a:mail", "a:slack"]);
+	eq("declared input spec carries policy+bound", pg.byId.b.inputs.map((p) => [p.name, p.policy, p.bound]), [["data", "any-of", 3]]);
+	eq("both edges queue into the named port", pg.byId.b.inputs[0].edges.map((e) => e.sourcePort), ["a:mail", "a:slack"]);
+	eq("per-port source sets stay separate", pg.byId.a.outputs.map((p) => p.targets), [["b"], ["b"]]);
+}
+{
+	// Fan-in from two distinct upstreams into one port, sorted sources.
+	const g = graph([agent("a"), agent("b"), agent("c")], [conn("c1", "b", "c"), conn("c2", "a", "c")]);
+	const pg = portGraph(g);
+	eq("fan-in port sources sorted by id", pg.byId.c.inputs[0].sources, ["a", "b"]);
+	eq("fan-in port edges in connection order", pg.byId.c.inputs[0].edges.map((e) => e.source), ["b", "a"]);
+}
+{
+	// Edges whose port strings name no declared/default port drop silently
+	// (validateGraph reports them; the wiring view stays exact).
+	const g = graph([agent("a"), agent("b")], [{ id: "c1", source: "a", target: "b", sourcePort: "a:zzz", targetPort: "b:in" }]);
+	const pg = portGraph(g);
+	eq("unmatched edge drops from the output port", pg.byId.a.outputs[0].edges, []);
+	eq("matched edge still attaches on the input side", pg.byId.b.inputs[0].edges.map((e) => e.source), ["a"]);
+}
+{
+	// Invalid declared values normalize to the defaults (validateGraph reports
+	// them); duplicate names keep the first occurrence only.
+	const a = { ...agent("a"), inputPorts: [{ name: "x", policy: "bogus", bound: 0 }, { name: "x" }] };
+	const pg = portGraph({ agents: [a], connections: [] });
+	eq("invalid policy falls back to all-of", pg.byId.a.inputs[0].policy, "all-of");
+	eq("invalid bound falls back to unbounded", pg.byId.a.inputs[0].bound, undefined);
+	eq("duplicate declared name kept once", pg.byId.a.inputs.map((p) => p.name), ["x"]);
+	eq("one entry per unique name", pg.byId.a.inputs.length, 1);
+}
+{
+	// Legacy custom `input`/`output` strings ARE the port ids when no lists
+	// are declared — old files keep wiring exactly as before.
+	const a = { ...agent("a"), input: "a:custom-in", output: "a:custom-out" };
+	const pg = portGraph({ agents: [a], connections: [] });
+	eq("legacy input string is the port id", pg.byId.a.inputs[0].portId, "a:custom-in");
+	eq("legacy output string is the port id", pg.byId.a.outputs[0].portId, "a:custom-out");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

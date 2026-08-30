@@ -55,6 +55,25 @@ export interface AgentSettings {
 	outputSchema?: unknown;
 }
 
+/**
+ * One named input port on an agent (the stream node model). The wire id a
+ * connection refers to is `<agentId>:<name>`.
+ */
+export interface InputPortSpec {
+	/** Port name; must be unique within the agent's `inputPorts` list. */
+	name: string;
+	/**
+	 * Firing policy: "all-of" (default) — the node fires when EVERY wired input
+	 * port holds an unconsumed message; "any-of" — when at least one does.
+	 */
+	policy?: "all-of" | "any-of";
+	/**
+	 * Max unconsumed messages the port queues before overflow drops one
+	 * (positive integer); absent = unbounded.
+	 */
+	bound?: number;
+}
+
 /** One pipeline agent node on the canvas. */
 export interface Agent {
 	id: string;
@@ -74,10 +93,30 @@ export interface Agent {
 	systemPrompt?: string;
 	x: number;
 	y: number;
-	/** The agent's single input port, `<id>:in` by convention. */
+	/**
+	 * The agent's single input port, `<id>:in` by convention. The DEFAULT port
+	 * declaration: superseded by `inputPorts` when that list is present, and
+	 * kept on default graphs so old files stay byte-compatible.
+	 */
 	input: string;
-	/** The agent's single output port, `<id>:out` by convention. */
+	/**
+	 * The agent's single output port, `<id>:out` by convention. The DEFAULT
+	 * port declaration: superseded by `outputPorts` when that list is present.
+	 */
 	output: string;
+	/**
+	 * Named input ports (the stream model). Absent → the single default port
+	 * "in" (`<id>:in`, policy all-of, unbounded) — exactly today's shape. When
+	 * present the list REPLACES the default; an empty list means the node has
+	 * no input ports and can never fire (surfaced as starvation, not an error).
+	 */
+	inputPorts?: InputPortSpec[];
+	/**
+	 * Named output ports. Absent → the single default "out" port (`<id>:out`).
+	 * A node emits on some of its output ports per firing and not on others
+	 * (selective emission); an empty list means it emits nowhere.
+	 */
+	outputPorts?: string[];
 	/** The agent's settings (see AgentSettings); absent fields inherit defaults. */
 	settings?: AgentSettings;
 	/**
@@ -95,17 +134,19 @@ export interface Agent {
 
 /**
  * One directed edge from a source agent's output port to a target agent's input
- * port. `sourcePort`/`targetPort` are the `<id>:out` / `<id>:in` protocol ports,
- * but the on-disk / wire shape may omit or vary them (a hand-writer or a legacy
- * file); validation treats missing/mismatched ports as an error, never a panic.
+ * port. `sourcePort`/`targetPort` are wire port ids — `<sourceId>:<outputName>`
+ * / `<targetId>:<inputName>` (`<id>:out` / `<id>:in` on default graphs, per the
+ * legacy `input`/`output` strings); the on-disk / wire shape may omit or vary
+ * them (a hand-writer or a legacy file); validation treats missing/mismatched
+ * ports as an error, never a panic.
  */
 export interface Connection {
 	id: string;
 	source: string;
 	target: string;
-	/** `<source>:out`. */
+	/** `<source>:out` on a default graph; `<sourceId>:<outputPortName>` in general. */
 	sourcePort: string;
-	/** `<target>:in`. */
+	/** `<target>:in` on a default graph; `<targetId>:<inputPortName>` in general. */
 	targetPort: string;
 }
 
@@ -121,10 +162,17 @@ export interface ValidationError {
 	message: string;
 }
 
-/** DAG validation result: `ok` is true exactly when `errors` is empty. */
+/** Graph validation result: `ok` is true exactly when `errors` is empty. */
 export interface ValidationResult {
 	ok: boolean;
 	errors: ValidationError[];
+	/**
+	 * Non-fatal findings, reported alongside `errors` without affecting `ok`.
+	 * Today the only source is `cycle-present`: a cycle is legal wiring for the
+	 * stream executor, but the sequential runner (and topoOrder) truncates at
+	 * one — worth telling the author about.
+	 */
+	warnings?: ValidationError[];
 }
 
 /**
@@ -153,6 +201,79 @@ export interface ClassifiedGraph {
 	orphans: string[];
 	upstream: Record<string, string[]>;
 	downstream: Record<string, string[]>;
+}
+
+// ---- The port-graph view (the stream node model) --------------------------------
+// portGraph() in execution.ts derives this from the raw `{ agents, connections }`
+// shape: which ports each agent declares (defaults applied), and which edges wire
+// into them. Shared by validateGraph (port-wiring correctness) and the run kernel
+// (per-port message queues). Like ClassifiedGraph, it is a derived view — nothing
+// new is persisted.
+
+/** One edge wired INTO an input port (the fields that matter to the receiver). */
+export interface IncomingEdge {
+	/** The connection's id ("" when absent). */
+	connectionId: string;
+	/** The upstream agent id the message will come from. */
+	source: string;
+	/** The upstream wire port id the edge leaves (`<sourceId>:<outputName>`). */
+	sourcePort: string;
+}
+
+/** One edge wired OUT of an output port. */
+export interface OutgoingEdge {
+	connectionId: string;
+	/** The downstream agent id the message will go to. */
+	target: string;
+	/** The downstream wire port id the edge enters (`<targetId>:<inputName>`). */
+	targetPort: string;
+}
+
+/** One resolved input port: the declared (or default) spec plus its wired edges. */
+export interface ResolvedInputPort {
+	/** Port name — declared, or "in" on a default graph. */
+	name: string;
+	/** Wire id connections refer to: `<agentId>:<name>` (or the legacy `input` string). */
+	portId: string;
+	/** Delivery policy; declared, defaulting to "all-of" (invalid declared values fall back to it too — validation reports them). */
+	policy: "all-of" | "any-of";
+	/** Delivery bound; declared positive integer, else undefined (unbounded). */
+	bound?: number;
+	/** Incoming edges in connection-array order. */
+	edges: IncomingEdge[];
+	/** Unique upstream agent ids, sorted. */
+	sources: string[];
+}
+
+/** One resolved output port: the declared (or default) name plus its wired edges. */
+export interface ResolvedOutputPort {
+	/** Port name — declared, or "out" on a default graph. */
+	name: string;
+	/** Wire id connections refer to: `<agentId>:<name>` (or the legacy `output` string). */
+	portId: string;
+	/** Outgoing edges in connection-array order. */
+	edges: OutgoingEdge[];
+	/** Unique downstream agent ids, sorted. */
+	targets: string[];
+}
+
+/** One agent's resolved port surface. */
+export interface PortNode {
+	id: string;
+	/** Input ports in declaration order (a single default port when undeclared). */
+	inputs: ResolvedInputPort[];
+	/** Output ports in declaration order (a single default port when undeclared). */
+	outputs: ResolvedOutputPort[];
+	/** Wire port id -> port; the lookup connections resolve against. */
+	inputById: Record<string, ResolvedInputPort>;
+	outputById: Record<string, ResolvedOutputPort>;
+}
+
+/** The port-graph view of a whole graph: agents + their resolved ports and edges. */
+export interface PortGraph {
+	/** Known agent ids in agent-array order. */
+	ids: string[];
+	byId: Record<string, PortNode>;
 }
 
 /** Input for building one agent's input object (see agentInput). */

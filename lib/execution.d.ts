@@ -1,4 +1,4 @@
-import type { Agent, AgentExecutionInput, AgentInputContext, ClassifiedGraph, PipelineExecutionResult } from "./types.ts";
+import type { Agent, AgentExecutionInput, AgentInputContext, ClassifiedGraph, PortGraph, PipelineExecutionResult } from "./types.ts";
 /** Reserved key that carries the pipeline-level input to a root agent. */
 export declare const INPUT_KEY = "$input";
 /**
@@ -19,12 +19,38 @@ export declare function classifyGraph(graph: unknown): ClassifiedGraph;
  * order. The runner executes this order sequentially.
  *
  * @param graph - a value from ``{ agents, connections }``, or null/undefined.
- * @returns the agent ids in a deterministic topological order. A validated DAG
- *   yields every agent; a graph with a cycle is premature here (validateGraph
- *   rejects it first), and the order is truncated at the cycle rather than
- *   looping.
+ * @returns the agent ids in a deterministic topological order. A validated
+ *   acyclic graph yields every agent; a graph with a cycle truncates here —
+ *   the sequential runner runs only the acyclic prefix (cycles are legal
+ *   wiring for the stream executor; validateGraph reports them as a
+ *   `cycle-present` warning, not an error).
  */
 export declare function topoOrder(graph: unknown): string[];
+/**
+ * Derive the port-graph view of a graph: per agent, the declared input/output
+ * ports (defaults applied) with every edge resolved onto them. This is the
+ * shared derivation behind the stream node model — validateGraph consumes it
+ * for port-wiring correctness, and the run kernel queues per-port messages
+ * from it.
+ *
+ * Derivation rules:
+ *   - `inputPorts` present  → one port per spec, wire id `<agentId>:<name>`;
+ *     `outputPorts` present → one port per name, same wire id convention.
+ *   - A list ABSENT → the single legacy default: the agent's `input` / `output`
+ *     string (which already IS the wire id), else `<id>:in` / `<id>:out`. Old
+ *     files keep wiring exactly as before.
+ *   - Malformed declarations (non-object specs, empty/non-string names,
+ *     non-positive-integer bounds) are skipped or normalized to the default —
+ *     validateGraph reports them; this view stays total. Duplicate port names
+ *     keep the first occurrence (validation reports the duplicate).
+ *   - An edge attaches to a port only when the connection's port string names
+ *     that port exactly; unmatched edges drop here (validation reports them as
+ *     port mismatches).
+ *
+ * @param graph - a value from ``{ agents, connections }``, or null/undefined.
+ * @returns the port graph: agent ids (array order) and per-agent port views.
+ */
+export declare function portGraph(graph: unknown): PortGraph;
 /**
  * Build the structured input an agent receives. This is THE input contract:
  * always an object keyed by source.

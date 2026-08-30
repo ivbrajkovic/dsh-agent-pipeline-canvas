@@ -8,35 +8,46 @@ at run time. Everything here is implemented once, in the pure core
 
 ## The graph schema
 
-The pipeline is a directed acyclic graph (DAG) over two arrays:
+The pipeline is a directed graph over two arrays:
 
 ```json
 {
   "agents":      [ { "id", "name", "description", "instructions",
-                     "x", "y", "input": "<id>:in", "output": "<id>:out" } ],
+                     "x", "y", "input": "<id>:in", "output": "<id>:out",
+                     "inputPorts"?: [ { "name", "policy"?, "bound"? } ],
+                     "outputPorts"?: [ "<name>" ] } ],
   "connections": [ { "id", "source", "target",
                      "sourcePort": "<source>:out", "targetPort": "<target>:in" } ]
 }
 ```
 
-- `A → B` means A's output becomes input to B (an edge from A's output port
-  to B's input port).
-- Each agent has **exactly one** input port and one output port, named by the
-  `<id>:in` / `<id>:out` convention (declared on the agent as
-  `input`/`output`).
+- `A → B` means A's output becomes input to B (an edge from one of A's output
+  ports to one of B's input ports).
+- Each agent has named input and output ports. Undeclared, an agent has
+  **exactly one** of each — the `<id>:in` / `<id>:out` convention (declared on
+  the agent as `input`/`output`). `inputPorts` declares named input ports,
+  each with a delivery `policy` (`"all-of"` default, `"any-of"`) and an
+  optional `bound` (positive integer); `outputPorts` declares named output
+  ports. A present list replaces the single default; a wire port id is
+  `<agentId>:<portName>`.
 - **Fan-out** is allowed (a source id may appear in many connections);
-  **fan-in** is allowed (a target id may appear in many connections).
+  **fan-in** is allowed (a target id may appear in many connections — all
+  edges into one port queue there).
 - A node with no incoming edges is a **start** node; a node with no outgoing
   edges is a **terminal** node. A node runs only after every incoming
   dependency has produced its output. There are no explicit parallel/join
   node types.
-- A cycle, self-connection, duplicate edge, or a reference to a missing
-  agent/port is an error.
+- **Cycles are legal wiring** (the stream executor loops and ends on
+  quiescence), so a cycle is reported as a non-fatal `cycle-present`
+  *warning* — the sequential runner only runs an acyclic prefix. A
+  self-connection, duplicate edge, or a reference to a missing agent/port
+  remains an error.
 
 ## Validation: `validateGraph(graph)`
 
-`validateGraph` (in `src/graph.ts`) returns `{ ok, errors }`, each error
-`{ code, message }`:
+`validateGraph` (in `src/graph.ts`) returns `{ ok, errors, warnings? }`, each
+error or warning `{ code, message }`; `warnings` is present only when
+non-empty and never affects `ok`:
 
 | Code | Meaning |
 |------|---------|
@@ -44,15 +55,18 @@ The pipeline is a directed acyclic graph (DAG) over two arrays:
 | `agents-not-array` / `connections-not-array` | Either array is missing or not an array. |
 | `agent-invalid` / `agent-missing-id` | An agent entry is not an object, or has no id. |
 | `agent-duplicate-id` | Two agents share an id. |
-| `agent-port-invalid` | An agent's declared `input`/`output` port does not follow the `<id>:in` / `<id>:out` convention. |
+| `agent-port-invalid` | A malformed port declaration: a legacy `input`/`output` string that is empty, or an `inputPorts`/`outputPorts` list (or one of its entries) without a usable name. |
+| `agent-port-policy-invalid` | An input port's `policy` is not `"all-of"` or `"any-of"`. |
+| `agent-port-bound-invalid` | An input port's `bound` is not a positive integer. |
+| `agent-port-duplicate` | The same port name declared twice in one list. |
 | `connection-invalid` | A connection entry is not an object. |
 | `connection-missing-source` / `connection-missing-target` | The connection names no source/target agent. |
 | `connection-source-missing` / `connection-target-missing` | The referenced agent id does not exist. |
 | `connection-self` | An agent connected to itself. |
 | `connection-missing-source-port` / `connection-missing-target-port` | The connection names no source/target port. |
-| `connection-source-port-mismatch` / `connection-target-port-mismatch` | The port is present but is not the agent's declared `<id>:out` / `<id>:in`. |
-| `connection-duplicate` | The same source → target edge declared twice. |
-| `cycle` | The graph contains a directed cycle (`findCycle`). |
+| `connection-source-port-mismatch` / `connection-target-port-mismatch` | The port is present but names none of the agent's declared (or default) output/input ports. |
+| `connection-duplicate` | The same source → target edge over the same ports declared twice. |
+| `cycle-present` *(warning)* | The graph contains a directed cycle — legal wiring, but the sequential runner only runs its acyclic prefix. |
 
 An absent/empty graph is valid — there is nothing to run.
 

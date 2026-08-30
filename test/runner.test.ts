@@ -125,15 +125,20 @@ function makeCtx(providerNames?: string[]) {
 	if (result.ok) deepStrictEqual(Object.keys(result.outputs).sort(), ["b", "c"]);
 }
 
-// --- invalid graph (cycle) ----------------------------------------------
+// --- cycle graph: legal wiring now, but the sequential runner only runs its
+// --- acyclic prefix (the stream executor is what runs cycles; validateGraph
+// --- reports `cycle-present` as a warning, no longer an error) ------------
 {
-	const { ctx } = makeCtx();
+	const { ctx, invocations } = makeCtx();
 	const result = await runPipeline(ctx, {
-		graph: graph([agent("a", "A", ""), agent("b", "B", "")], [conn("c1", "a", "b"), conn("c2", "b", "a")]),
+		// a -> b -> c -> b: a is the acyclic prefix; b/c sit on the cycle.
+		graph: graph([agent("a", "A", ""), agent("b", "B", ""), agent("c", "C", "")], [conn("c1", "a", "b"), conn("c2", "b", "c"), conn("c3", "c", "b")]),
 		input: "",
 		sessionId: "sess",
 	});
-	okCheck("invalid graph rejected", result.ok === false && Array.isArray(result.validationErrors));
+	okCheck("cycle graph: validates (warning only)", result.ok === true);
+	okCheck("cycle graph: only the acyclic prefix ran", invocations.length === 1 && invocations[0].label === "A");
+	if (result.ok) okCheck("cycle graph: no terminal output collected", Object.keys(result.outputs).length === 0);
 }
 
 // --- missing / unavailable session agent --------------------------------
