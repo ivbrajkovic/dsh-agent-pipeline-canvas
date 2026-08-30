@@ -121,6 +121,16 @@ node model, and the executor are REBUILT.
   Coder→Review loop is authored with a task root wired into the coder's
   any-of port — one firing per arrival; loop graphs need an outside seed.
 
+- **P8** — the commit-isolation assertion diverges from the plan's "fake
+  storage's write log" sketch: no storage injection seam exists (the executor
+  writes through the real atomic file protocol on a real temp directory — the
+  test harness's documented discipline), so the test observes the durability
+  surface directly: whole-file snapshots sampled during the settle-burst +
+  abort-drain commits must parse whole with gap-free firing ids, never regress
+  in firing count, and stay byte-stable after finalization. Adding a seam for
+  testability would have reshaped the kept-boundary storage path in the test
+  phase for an assertion the observational form pins anyway.
+
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from
 the plan** — the phase id and *why* (the constraint discovered, the harness

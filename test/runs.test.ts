@@ -37,7 +37,15 @@
 // and no structured result emits on no port (honest quiet, starved downstream
 // reported), the any-of join fires on whichever branch ran, the feedback/
 // verdict loop ends on verdict (quiescence), and the feedback port's delivery
-// bound caps the loop (drop recorded, nothing downstream of the drop).
+// bound caps the loop (drop recorded, nothing downstream of the drop). The P8
+// matrix completion pins the whole-run contracts the earlier gates carried
+// only partially: a dedicated minimal starvation case (an all-of port that is
+// never filled goes quiet completed with the waiting node reported),
+// commit-writer isolation over an OBSERVED write log (snapshots sampled during
+// concurrent commits are always whole, gap-free, and never regress, and no
+// commit lands after finalization), determinism (the same scripted run twice
+// yields an identical firing structure, ready order by node id), and the
+// DEFAULT maxInFlight of 4 on a wide fan-out.
 import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
 import { validateGraph } from "../lib/graph.js";
 import { projectNodes } from "../lib/projection.js";
@@ -1929,6 +1937,216 @@ await withTempDir(async (cwd) => {
 		done.state === "completed" && done.firings.length === 3
 		&& done.firings[0].emittedTo?.join() === "a,b"
 		&& done.firings.every((f) => f.status === "done"));
+});
+
+// --- GATE P8 (spec §8 starvation, minimal and dedicated): an all-of port that
+// is never filled goes QUIET at quiescence — the run completes, the waiting
+// node is named in the report, and it never fired ------------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const connP = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				{
+					...agent("s", "Source", "S."),
+					outputPorts: ["used", "unused"],
+					bindings: [{ field: "k", value: "v", port: "used" }],
+					settings: { outputSchema: { type: "object" } },
+				},
+				agent("w", "Waiter", "W."),
+			],
+			// w's (default, all-of) port is wired to the port the binding will
+			// NOT select — the only source that could ever fill it.
+			connections: [connP("c1", "s", "s:unused", "w", "w:in")],
+		},
+		input: "x",
+	});
+	if (!started.ok) { okCheck("starve: start ok", false); return; }
+	await waitFor("s started", () => harness.starts.length === 1);
+	// The structured result selects "used", whose port has no edges: nothing
+	// ever arrives at w's all-of port, and no other message can.
+	harness.resolveOneshot(harness.starts[0].childId, "<out:s>", "completed", { k: "v" });
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("starve: the run goes quiet completed (a starved port is not a failure)", done.state === "completed");
+	okCheck("starve: only s fired; w never started",
+		done.firings.length === 1 && done.firings[0].nodeId === "s" && harness.starts.length === 1);
+	okCheck("starve: the report names the waiting node w",
+		harness.warnings.some((w) => w.includes("waiting nodes: w")));
+});
+
+// --- GATE P8 (spec §8 commit writer): isolation over an OBSERVED write log —
+// snapshots of the record file sampled DURING concurrent commits (a settle
+// burst racing the abort drain) are always whole records with gap-free firing
+// ids, their firing counts never regress (a stale snapshot never overwrote a
+// newer one), and no commit lands after finalization ----------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const branches = ["b1", "b2", "b3", "b4", "b5", "b6"].map((id, i) => agent(id, "Br" + (i + 1), id + "."));
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [agent("a", "Alpha", "A."), ...branches],
+			connections: branches.map((b) => conn("cc-" + b.id, "a", b.id)),
+		},
+		input: "x",
+		maxInFlight: 7, // never binds: every branch in flight at once
+	});
+	if (!started.ok) { okCheck("commits: start ok", false); return; }
+	const file = join(cwd, ".agent-pipeline", "runs", started.runId + ".json");
+	// The write log: every whole-file snapshot the sampler catches while the
+	// executor commits concurrently. An open error (a rename in flight) skips
+	// a sample; a TORN or interleaved snapshot fails to parse below.
+	const snapshots: string[] = [];
+	let watching = true;
+	const watcher = (async () => {
+		while (watching) {
+			try { snapshots.push(await readFile(file, "utf8")); } catch { /* between commits */ }
+			await new Promise((resolve) => { setTimeout(resolve, 2); });
+		}
+	})();
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	await waitFor("all six branches in flight", () => harness.starts.length === 7);
+	// Three settles land back-to-back and are given a beat to COMMIT (their
+	// settle/emission commits race the chain) — then the abort drains the
+	// three still-held one-shots and sweeps them in the finalize commit.
+	for (const start of harness.starts.slice(1, 4)) harness.resolveOneshot(start.childId, "<out:" + start.label + ">");
+	await waitFor("the three settles committed", async () => {
+		const cur = await registry.getRun(started.runId, cwd) as RunRecord;
+		return ["b1", "b2", "b3"].every((id) => cur.firings.find((f) => f.nodeId === id)?.status === "done");
+	});
+	await registry.control(started.runId, { action: "abort" }, cwd);
+	const done = await waitTerminal(registry, started.runId, cwd);
+	watching = false;
+	await watcher;
+	okCheck("commits: the run finalized aborted with the settled outputs kept",
+		done.state === "aborted"
+		&& ["a", "b1", "b2", "b3"].every((id) => done.firings.find((f) => f.nodeId === id)?.status === "done")
+		&& ["b4", "b5", "b6"].every((id) => done.firings.find((f) => f.nodeId === id)?.status === "aborted"));
+	let whole = true;
+	let monotonic = true;
+	let sawMidRun = false;
+	let previousCount = -1;
+	for (const text of snapshots) {
+		let rec: RunRecord;
+		try { rec = JSON.parse(text) as RunRecord; } catch { whole = false; break; }
+		if (rec.recordVersion !== 2 || (rec.state !== "running" && rec.state !== "aborted" && rec.state !== "completed")) { whole = false; break; }
+		const ids = rec.firings.map((f) => f.firingId).join();
+		const expected = Array.from({ length: rec.firings.length }, (_, i) => "f-" + String(i + 1).padStart(3, "0")).join();
+		if (ids !== expected) { whole = false; break; }
+		if (rec.state === "running" && rec.firings.length < 7) sawMidRun = true;
+		if (rec.firings.length < previousCount) monotonic = false;
+		previousCount = rec.firings.length;
+	}
+	okCheck("commits: the write log rode the run (mid-run snapshots observed)", snapshots.length >= 3 && sawMidRun);
+	okCheck("commits: every observed snapshot is a whole record (never torn, never interleaved)", whole);
+	okCheck("commits: firing counts never regress across the log (no stale snapshot overwrote a newer one)", monotonic);
+	// No late writes: the terminal bytes are final.
+	const finalBytes = await readFile(file, "utf8");
+	await beat();
+	await beat();
+	await beat();
+	okCheck("commits: no commit landed after finalization (record byte-stable)", finalBytes === await readFile(file, "utf8"));
+});
+
+// --- GATE P8 (spec §8 determinism): the same scripted run twice yields an
+// IDENTICAL firing structure — ids, log order (= the id-ordered ready order),
+// statuses, composed inputs/outputs, emissions, child ids — modulo the
+// wall-clock timestamps and the environment-minted run id -----------------------
+async function scriptedFanRun(): Promise<string> {
+	// withTempDir's callback returns void — the structure rides out through
+	// this variable.
+	let structure = "";
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const started = await registry.startRun({
+			sessionId: "sess",
+			cwd,
+			graph: {
+				agents: [agent("a", "Alpha", "A."), agent("b", "Beta", "B."), agent("c", "Gamma", "C."), agent("d", "Delta", "D.")],
+				connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+			},
+			input: "hello",
+		});
+		if (!started.ok) throw new Error("determinism: start failed");
+		await waitFor("a started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+		await waitFor("b and c admitted together", () => harness.starts.length === 3);
+		const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+		const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+		harness.resolveOneshot(cChild, "<out:Gamma>"); // the slower branch settles first — same script both runs
+		harness.resolveOneshot(bChild, "<out:Beta>");
+		await waitFor("d started", () => harness.starts.length === 4);
+		harness.resolveOneshot(harness.starts[3].childId, "<out:Delta>");
+		const done = await waitTerminal(registry, started.runId, cwd);
+		if (done.state !== "completed") throw new Error("determinism: run did not complete");
+		// The comparable structure: everything but wall-clock timestamps and
+		// the environment-minted run id (this graph mints no anchor ids).
+		structure = JSON.stringify(done.firings.map((f) => ({
+			firingId: f.firingId, nodeId: f.nodeId, seq: f.seq, status: f.status,
+			input: f.input, output: f.output, stopReason: f.stopReason,
+			childSessionId: f.childSessionId, emittedTo: f.emittedTo,
+		})));
+	});
+	return structure;
+}
+{
+	const detFirst = await scriptedFanRun();
+	const detSecond = await scriptedFanRun();
+	okCheck("determinism: two identical scripted runs produce identical firing structures", detFirst === detSecond);
+	const detParsed = JSON.parse(detFirst) as Array<{ firingId: string; nodeId: string; seq: number; status: string }>;
+	okCheck("determinism: the shared structure is the pinned fan-out shape — f-001..f-004, b before c (ready order by id), d last",
+		detParsed.map((f) => f.firingId).join() === "f-001,f-002,f-003,f-004"
+		&& detParsed.map((f) => f.nodeId).join() === "a,b,c,d"
+		&& detParsed.every((f) => f.seq === 1) && detParsed.every((f) => f.status === "done"));
+}
+
+// --- GATE P8 (spec §1): the DEFAULT maxInFlight is 4 — a wide fan-out without
+// a cap field admits exactly four branches before the first settle, in id
+// order, and freed slots go to the next id --------------------------------------
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const wide = ["b1", "b2", "b3", "b4", "b5", "b6"].map((id, i) => agent(id, "W" + (i + 1), id + "."));
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [agent("a", "Alpha", "A."), ...wide],
+			connections: wide.map((w) => conn("wc-" + w.id, "a", w.id)),
+		},
+		input: "fan",
+		// no maxInFlight: the default (4) governs
+	});
+	if (!started.ok) { okCheck("default-cap: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	await waitFor("four branches admitted", () => harness.starts.length === 5);
+	await beat();
+	okCheck("default-cap: exactly four branches admitted, in id order",
+		harness.starts.length === 5 && harness.starts.slice(1).map((s) => s.label).join(",") === "W1,W2,W3,W4");
+	const childOf = (label: string) => harness.starts.find((s) => s.label === label)!.childId;
+	harness.resolveOneshot(childOf("W1"), "<out:w1>");
+	await waitFor("the fifth branch admitted after a slot freed", () => harness.starts.length === 6);
+	okCheck("default-cap: the freed slot goes to the next id", harness.starts[5].label === "W5");
+	harness.resolveOneshot(childOf("W2"), "<out:w2>");
+	await waitFor("the sixth branch admitted", () => harness.starts.length === 7);
+	okCheck("default-cap: the last branch is W6", harness.starts[6].label === "W6");
+	harness.resolveOneshot(childOf("W3"), "<out:w3>");
+	harness.resolveOneshot(childOf("W4"), "<out:w4>");
+	harness.resolveOneshot(childOf("W5"), "<out:w5>");
+	harness.resolveOneshot(childOf("W6"), "<out:w6>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("default-cap: completes with all seven firings done",
+		done.state === "completed" && done.firings.length === 7 && done.firings.every((f) => f.status === "done"));
+	okCheck("default-cap: the record carries the resolved default", done.maxInFlight === 4);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
