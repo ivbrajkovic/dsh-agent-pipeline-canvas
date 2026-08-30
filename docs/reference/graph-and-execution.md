@@ -3,7 +3,7 @@
 The formal rules behind the canvas: what a pipeline graph is, what
 `validateGraph` enforces, and exactly what each agent receives and produces
 at run time. Everything here is implemented once, in the pure core
-(`src/graph.ts`, `src/execution.ts` — see
+(`src/graph.ts`, `src/execution.ts`, `src/kernel.ts` — see
 [architecture.md](architecture.md)), and is testable with `npm test`.
 
 ## The graph schema
@@ -15,9 +15,11 @@ The pipeline is a directed graph over two arrays:
   "agents":      [ { "id", "name", "description", "instructions",
                      "x", "y", "input": "<id>:in", "output": "<id>:out",
                      "inputPorts"?: [ { "name", "policy"?, "bound"? } ],
-                     "outputPorts"?: [ "<name>" ] } ],
+                     "outputPorts"?: [ "<name>" ],
+                     "bindings"?: [ { "field", "port", "value"? } ] } ],
   "connections": [ { "id", "source", "target",
-                     "sourcePort": "<source>:out", "targetPort": "<target>:in" } ]
+                     "sourcePort": "<source>:<outputPort>",
+                     "targetPort": "<target>:<inputPort>" } ]
 }
 ```
 
@@ -28,27 +30,24 @@ The pipeline is a directed graph over two arrays:
   the agent as `input`/`output`). `inputPorts` declares named input ports,
   each with a delivery `policy` (`"all-of"` default, `"any-of"`) and an
   optional `bound` (positive integer); `outputPorts` declares named output
-  ports. A present list replaces the single default; a wire port id is
+  ports; `bindings` maps a structured-output field to an output port
+  (`field == value → port`; `value` omitted = catch-all; first match wins).
+  A present list replaces the single default; a wire port id is
   `<agentId>:<portName>`.
 - **Fan-out** is allowed (a source id may appear in many connections);
   **fan-in** is allowed (a target id may appear in many connections — all
   edges into one port queue there).
-- A node with no incoming edges is a **start** node; a node with no outgoing
-  edges is a **terminal** node. A node runs only after every incoming
-  dependency has produced its output. There are no explicit parallel/join
-  node types.
-- **Cycles are legal wiring** (the stream executor loops and ends on
-  quiescence), so a cycle is reported as a non-fatal `cycle-present`
-  *warning* — the sequential runner only runs an acyclic prefix. A
+- **Cycles are legal wiring**: the executor loops until a port goes quiet,
+  and an input port's `bound` (a delivery count — the loop budget) drops and
+  records further arrivals. A cycle is reported as a non-fatal
+  `cycle-present` *warning* purely for the author's awareness. A
   self-connection, duplicate edge, or a reference to a missing agent/port
   remains an error.
 
-> Until the stream executor lands (phase P3 of
-> [the implementation plan](../proposals/implementation-plan.md)), the
-> sequential runner treats every graph — declared ports included — as the
-> single-port default: one all-of, unbounded input, one output, wired by
-> source/target only. Validation already enforces the declared wiring; the
-> runtime does not consume it yet.
+The schema is **additive**: a graph without the new fields means one `in`
+port (all-of, unbounded), one `out` port, no bindings — every pre-port
+pipeline loads and runs unchanged. The default single `input`/`output`
+strings stay on default graphs so old files stay byte-compatible.
 
 ## Validation: `validateGraph(graph)`
 
@@ -73,7 +72,7 @@ non-empty and never affects `ok`:
 | `connection-missing-source-port` / `connection-missing-target-port` | The connection names no source/target port. |
 | `connection-source-port-mismatch` / `connection-target-port-mismatch` | The port is present but names none of the agent's declared (or default) output/input ports. |
 | `connection-duplicate` | The same source → target edge over the same ports declared twice. |
-| `cycle-present` *(warning)* | The graph contains a directed cycle — legal wiring, but the sequential runner only runs its acyclic prefix. |
+| `cycle-present` *(warning)* | The graph contains a directed cycle — legal wiring for the stream executor; informational only. |
 
 An absent/empty graph is valid — there is nothing to run.
 
@@ -84,12 +83,38 @@ live via its *Valid* / *N issues* chip.
 
 ## The execution contract
 
-The runtime semantics the runner relies on are defined once, in the pure
-`src/execution.ts`, so they are stable and testable. The contract uses
-**conventions over new node types / new configuration** and requires **no
-persisted schema change** — every rule is derived from the existing
+The runtime semantics are defined once, in the pure core: `src/execution.ts`
+owns the input shape and prompt framing; `src/kernel.ts` owns the firing
+rules. The contract uses **conventions over new node types / new
+configuration** — every rule is derived from the existing
 `agents`/`connections` arrays plus **one runtime parameter**, a
 pipeline-level `pipelineInput`.
+
+### Firing: the kernel rules
+
+- A synthetic **source** delivers the pipeline input once to every input
+  port of every **root** (a node with no incoming edges), so roots fire once
+  per run. A declared input port with no edges on a node that has other
+  wired ports is inert: it receives nothing and does not block.
+- **all-of** (default): the node fires when every wired source of every
+  all-of input port holds an unconsumed message. Consumption takes the
+  oldest message per wired source — a firing composes exactly one message
+  per upstream.
+- **any-of**: the node fires on the arrival of any message; consumption
+  takes the port's single head message — one firing per arriving message.
+- **Ready order is deterministic**: node id, then per-node sequence.
+- **`maxInFlight`** (default 4, per-run configurable) caps concurrent
+  firings.
+- **Quiescence** ends the run: nothing in flight, nothing fireable. Nodes
+  that never fired and can never fire again (an unfilled all-of port) are
+  reported — the run finalizes `completed` with the starvation report in the
+  Host log.
+- **Selective emission**: without `bindings`, a firing's output is copied to
+  every edge of every output port. With bindings, the first rule matching
+  the firing's **structured result** selects its port; no match — or no
+  structured result — selects no port (the honest quiet; starved downstream
+  nodes surface in the starvation report). A delivery a port's `bound`
+  refuses is dropped and recorded.
 
 ### One structured input per agent, keyed by source
 
@@ -103,7 +128,8 @@ never branches on "how many upstreams".
   Every root gets the same pipeline input.
 - **Single-upstream / fan-out / fan-in agent** (in-degree ≥ 1): receives
   `{ [upstreamId]: <output> }` — one key per upstream agent, in deterministic
-  (sorted-by-id) order.
+  (sorted-by-id) order. A loop iteration delivers the upstream's newest
+  firing output under the same key.
 
 ### Terminals, orphans, and the final result
 
@@ -113,7 +139,8 @@ never branches on "how many upstreams".
   collected.
 - **Final result**: always `{ outputs: { [terminalId]: <output> } }` — keyed
   by terminal id (not a dedicated output node), `{}` when there are no
-  terminals, and only for terminals that produced an output.
+  terminals, and only for terminals that produced an output. A terminal that
+  fired several times contributes its LAST output.
 
 ### Prompt framing
 
@@ -128,3 +155,49 @@ The per-agent `instructions`/`name`/`description` fields are reused
 (instructions as the prompt seed; name/description to label a source and a
 terminal). The only reserved name is `"$input"`, which cannot collide with a
 canvas-generated agent id (`agent-N`; ids are not user-editable in the UI).
+
+## The run record: a firing log
+
+A run persists per workspace as
+`.agent-pipeline/runs/<runId>.json` (`recordVersion: 2`), rewritten
+atomically on every transition. The log is the run's truth — there is no
+parallel per-node status bookkeeping; the per-node view is computed by
+`projectNodes` (in `src/projection.ts`):
+
+```jsonc
+{
+  "recordVersion": 2,
+  "state": "running | paused | completed | aborted | error",
+  "graph": …, "input": …, "maxInFlight": 4,
+  "pausedAt": "f-002",                    // the paused FIRING (queue head)
+  "firings": [ {
+    "firingId": "f-002", "nodeId": "agent-2", "seq": 1,
+    "status": "pending | running | paused | done | aborted | error",
+    "input": "<composed prompt — written once, immutable>",
+    "output": "…", "error": "…", "stopReason": "completed",
+    "childSessionId": "…",
+    "emittedTo": ["out"],                 // output ports the firing SELECTED
+    "startedAt": "…", "settledAt": "…",
+    "usage": {}                           // reserved (run operations, out of scope)
+  } ],
+  "nodes": { "agent-2": { "parentAnchorSessionId": "…" } },
+  "dropped": [ { "nodeId": "agent-2", "port": "feedback", "from": "agent-3" } ]
+}
+```
+
+Projection rules: a node's status is its LAST firing's status (Rerun appends
+a new firing with the same immutable input; steering continues the SAME
+firing's child and updates its output in place); input is the first firing's;
+output/childSessionId/error are the latest defined values. `pausedAt` plus
+the `paused` firings reconstruct the pending-pause queue deterministically —
+that is what makes it crash-safe.
+
+Legacy records (no `recordVersion`, the pre-firing-log sequential shape) are
+**read-only**: rendering goes through the same projection; the registry
+sweeps a stale v1 `running` to `aborted` and finalizes a v1 `paused` to
+`aborted` with an explanatory error rather than resurrecting one.
+
+The firing log is also the foundation
+[run operations](../proposals/run-operations.md) — run reuse, a history
+browser, per-firing token accounting — will build on; that work is out of
+scope for now.

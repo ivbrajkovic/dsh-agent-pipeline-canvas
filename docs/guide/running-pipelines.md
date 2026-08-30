@@ -1,13 +1,17 @@
 # Running pipelines
 
 This guide covers everything that happens around the **Run** button: the run
-dialog, how a run executes as a durable, inspectable record, the breakpoint
-controls, and what you can do with the result. For graph rules and input
-shapes, see [../reference/graph-and-execution.md](../reference/graph-and-execution.md).
+dialog, how a run executes as a durable, inspectable firing log, the
+breakpoint controls, and what you can do with the result. For graph rules and
+input shapes, see
+[../reference/graph-and-execution.md](../reference/graph-and-execution.md);
+for short sample graphs, see
+[pipeline-samples.md](pipeline-samples.md).
 
 ## The run dialog
 
-**Run** opens a dialog with a multiline input and workspace file attachments.
+**Run** opens a dialog with a multiline input, workspace file attachments,
+and the concurrency cap.
 
 - Files attach as **absolute paths** — picked from the harness's own
   `@`-mention file-reference completion (type a path, click a file, descend
@@ -15,8 +19,11 @@ shapes, see [../reference/graph-and-execution.md](../reference/graph-and-executi
   paths in a browser, so a dropped file points at the picker instead.
 - File **contents are never inlined**: the composed input lists the paths,
   and the first agent reads them with its own file tools.
+- **Max agents in flight** caps how many firings run at the same time
+  (default 4). It is insurance against provider rate limits and accidental
+  wide fan-out; a value below 1 falls back to the default.
 
-The browser then POSTs `{ sessionId, cwd, graph, input }` to
+The browser then POSTs `{ sessionId, cwd, graph, input, maxInFlight? }` to
 `POST /dsh-agent-pipeline/run` — the graph is the snapshot the user currently
 sees; `input` is the composed text+files string. (How that input reaches each
 agent is the [execution contract](../reference/graph-and-execution.md).)
@@ -35,7 +42,8 @@ tab, or even the profile's lifetime — runs outlive the tab by design (use
   full record on every connect/reconnect and an `event: update` per
   transition. `EventSource` auto-reconnect self-heals a profile restart.
 - A page reload re-discovers the workspace's active run through the `run`
-  field of `GET /dsh-agent-pipeline?cwd=…`.
+  field of `GET /dsh-agent-pipeline?cwd=…` — mid-run reloads re-attach and
+  the run continues.
 - The full record is fetchable for debugging via
   `GET /dsh-agent-pipeline/run?id=…&cwd=…`.
 
@@ -46,65 +54,121 @@ The record persists per workspace at
 file + rename) on every transition — the same protocol as `pipeline.json`.
 It carries:
 
-- the immutable graph snapshot and the pipeline input;
-- the deterministic topological `order`;
-- one node state per agent: `pending / running / paused / done / aborted /
-  error`, plus the adopted `output`, the fixed composed `input`, and the
-  agent's `childSessionId`.
+- the immutable graph snapshot, the pipeline input, and the `maxInFlight` cap;
+- the **firing log** — one entry per firing (`f-001`, `f-002`, …) with the
+  node, its per-node sequence number, status
+  (`pending / running / paused / done / aborted / error`), the fixed composed
+  `input`, the adopted `output`, `error` + `stopReason`, the child session
+  id, the selected output ports (`emittedTo`), and start/settle timestamps;
+- durable executor control state per node: the node's parent-anchor session
+  id (below), present only for continuable nodes;
+- `pausedAt` (the paused FIRING id — the pending-pause queue head) while
+  paused, and the `dropped` list of bound overflows.
 
-Canvas edits during a run affect only the **next** run — the executor works
-on an immutable snapshot.
+There is deliberately no parallel per-node status bookkeeping — the per-node
+view the UI shows is computed from the log by
+[`projectNodes`](../reference/architecture.md). Canvas edits during a run
+affect only the **next** run — the executor works on an immutable snapshot.
+(The firing log is also the foundation
+[run operations](../proposals/run-operations.md) — run reuse, history,
+per-firing token accounting — will build on; that work is out of scope for
+now.)
 
-### Execution, step by step
+## How a run executes
+
+The executor is the stream model's **firing kernel**: agents are nodes with
+input/output ports, messages flow along connections, and a node **fires**
+each time its input policy is satisfied — running its agent once.
 
 1. **Validate** the snapshot with `validateGraph` and resolve the live
-   session Agent (one-shot children parent to it, unchanged).
-2. **Run each agent sequentially** in topological order (Kahn's algorithm,
-   `topoOrder`): fan-in waits for all upstreams, each output flows downstream.
-3. **Non-breakpointed agents** run as one-shot `subagents.start("spawn", …)`
-   children of the session agent.
-4. **Breakpointed agents** run as **continuable** children under a disposable
-   per-run **coordinator** agent, and the run **pauses** at each breakpoint
-   for user inspection (below).
-5. On a terminal state the record is finalized `completed / aborted / error`
-   with all completed outputs preserved.
+   session Agent (children parent to it, unchanged).
+2. A synthetic **source** delivers the pipeline input once to every wired
+   root (a node with no incoming edges), so roots fire once per run.
+3. A node **fires** when its input policy is satisfied — see the firing
+   rules in [graph-and-execution.md](../reference/graph-and-execution.md).
+   The firing consumes its input messages, composes the prompt exactly as
+   the sequential executor always did (one `## <source label>` section per
+   upstream), and runs the agent as a harness `subagents` child.
+4. **Ready firings start concurrently** — fan-out creates independently
+   ready work, and B and C genuinely run at the same time — bounded by the
+   `maxInFlight` cap. Ready order is deterministic (node id, then sequence).
+5. When a firing settles `completed`, its output is emitted on its selected
+   output ports and delivered downstream as new messages; when everything is
+   quiet — nothing in flight, nothing fireable — the run ends
+   (**quiescence**) and finalizes `completed`.
+
+**Cycles are ordinary wiring.** A loop ends when a port goes quiet (the
+reviewer emitting a verdict instead of feedback), and an input port's
+**bound** — a delivery count, the loop budget — drops further arrivals and
+records them in the record's `dropped` list. A graph that goes quiet with an
+unfilled all-of port still finalizes `completed`, and the executor log
+reports the starving nodes by name — never a silent skip.
+
+**Errors fail the run (fail-fast, no continue-on-error).** A firing that
+settles as anything but `completed` — `error`, `refusal`, `max-tokens` —
+closes the halt gate run-wide, lets in-flight firings finish (the same
+cost discipline as pause and abort), and finalizes the run `state: "error"`
+with all completed outputs preserved. Nothing downstream of a failure
+starts. The failure is live: the toolbar banner reads *Failed at
+&lt;agent&gt; — finishing in-flight agents…*, the node chip shows the error,
+and the record keeps the firing's `error` + `stopReason` permanently. (One
+exception, on purpose: a **Rerun/Steer of a parked head** that settles
+non-completed re-parks for another decision — the user is present; only
+unattended firings fail the run.)
 
 **One run is active (running|paused) per workspace**; a second `POST /run`
-answers `409 { ok: false, activeRunId }`. The executor is currently
-sequential: pausing at a breakpoint stops every branch, not just one
-([concurrent dispatch is designed](../proposals/parallel-execution.md), with
-pauses gating the whole parallel section).
+answers `409 { ok: false, activeRunId }`.
 
-## Breakpoints: pause, inspect, resume / rerun / steer / abort
+## Breakpoints: grouped pause, the queue, resume / rerun / steer / abort
 
 Every agent has a **Pause on output** breakpoint (the dot in the node's
-top-left corner, or the checkbox in the edit panel). When a breakpointed
-agent's output settles, the run parks **before any downstream agent starts**,
-and the inspection modal opens with the agent's composed input (fixed for the
-run), its output, and the control actions:
+top-left corner, or the checkbox in the edit panel). Breakpointed agents run
+as **continuable** children so they can be steered and interrupted.
+
+**A pause anywhere pauses the whole parallel section.** When a breakpointed
+agent's output settles:
+
+1. the **halt gate** closes — no new firing starts anywhere (nothing
+   downstream of the breakpoint runs);
+2. in-flight firings **run to completion** — stopping a paid turn mid-flight
+   would waste its LLM call, so their outputs are adopted and held;
+3. the **inspection modal** opens for the settled firing with its composed
+   input (fixed for the run), its output, and the control actions.
+
+If several breakpoints settle while parked (both branches of a fan-out
+armed), the settled-but-unresolved firings **queue**: the toolbar banner
+reads *Paused at &lt;agent&gt; +N queued*, the modal shows the queue head,
+and the queue is rebuilt deterministically from the firing log — which makes
+it crash-safe.
 
 | Action | What it does |
 |--------|--------------|
-| **Resume** | Continue with the recorded output — to the next breakpoint, or run finalization. A breakpoint on a terminal agent pauses before finalization too. Multiple breakpoints pause independently, in topological order. |
-| **Rerun** | Start a fresh child (new `childId`; the old transcript is preserved) with the node's **verbatim original input** — never steering content — then park again with the new output. |
+| **Resume** | Continue with the head's recorded output — releasing it surfaces the next queued breakpoint, or the run proceeds to quiescence. |
+| **Rerun** | Start a fresh firing of the same node (new child; the old transcript is preserved) with the node's **verbatim original input** — never steering content — then park again with the new output. |
 | **Steer** | Send feedback to the **same** child via the harness continuation (`subagents.followup`, cold-resuming it from its persisted session — this works across profile restarts). The steering epoch's answer is adopted and the run stays paused; repeat indefinitely. Requires non-empty text. |
-| **Abort** | Stop the whole run: an in-flight continuable turn is interrupted (authorized by the durable coordinator address, so it works while the coordinator is disposed), the in-flight/paused node reads `aborted`, and completed outputs are preserved in the record. |
+| **Abort** | Stop the whole run: every in-flight continuable child is interrupted, one-shot children are cancelled via the run signal, all settlements are drained (nothing commits after finalization), and completed outputs are preserved in the record. |
 
-### Why a coordinator
+Rerun and steer are node-local against the paused head's child — no
+interaction with other branches, which keep running (or hold their completed
+outputs) independently.
 
-Breakpointed agents run under a **coordinator agent** — a hidden
-`origin: "subagent"` child of the session with `delegationDepth: 0` — so the
-harness's settlement notices never wake the user's session with a model turn.
-The coordinator handle is disposed between operations, and its durable
-session id is persisted in the record for post-restart steering.
+### Why a parent anchor
+
+Each continuable node owns a **parent anchor** — a hidden
+`origin: "subagent"` session created lazily at the node's first continuable
+admission and disposed after each start/steer. It is a durable parent
+address: the header `interrupt` authorizes against it (so abort works while
+the anchor is disposed) and a post-restart steer cold-resumes from it. It
+costs one session record on disk and **zero model calls** — a settlement
+notice can never find it live, so it can never be woken into a model turn.
 
 ### Limitations and degradation
 
 - Continuable children cannot produce structured output (a harness
-  limitation), so a breakpointed agent ignores `settings.outputSchema` — the
-  edit panel warns when both are set. Every other setting
-  (provider/model, tool filter, max depth, persona) carries to the
-  continuable request unchanged.
+  limitation), so a breakpointed agent ignores `settings.outputSchema` — and
+  its **bindings never match**, so it emits on no port. The edit panel warns
+  when both are set. Every other setting (provider/model, tool filter, max
+  depth, persona) carries to the continuable request unchanged.
 - Continuable children require the harness continuable runtime
   (`subagents.startContinuable` + session persistence, both mounted by the
   base bundle). Without it the plugin still loads: breakpointed agents run
@@ -113,34 +177,48 @@ session id is persisted in the record for post-restart steering.
 
 ### Durability across restarts
 
-A paused run survives page reloads and profile restarts. On the next
-workspace load:
+A run survives page reloads and profile restarts. On the next workspace
+load:
 
 - a record found `running` is **stale** (its executor died with the previous
   process) and is swept to `aborted`, outputs intact;
-- a record found `paused` is **resurrected** fully controllable — the
-  coordinator is cold-resumed on demand and steering still reaches the same
-  child session.
+- a record found `paused` is **resurrected** fully controllable — and a
+  firing still marked `running` from before the crash **re-fires on resume
+  with its same composed input** (Rerun semantics);
+- records without `recordVersion` (written by the pre-firing-log executor)
+  are read-only: a stale v1 `running` sweeps to `aborted` as before, and a
+  v1 `paused` record is finalized `aborted` with an explanatory error — the
+  new executor cannot drive the old shape (a paused v1 run has nothing in
+  flight, so the remaining cost is zero).
 
 ### Where it lives in the code
 
-- `src/runs.ts` — the run registry: executor loop + control mailbox, record
-  persistence, coordinator lifecycle, restart sweep, single-active-run rule.
+- `src/kernel.ts` — the pure firing kernel: port queues and policies,
+  bounds, the halt gate, `maxInFlight`, quiescence, selective emission.
+- `src/runs.ts` — the durable run registry: the kernel driver + one
+  NodeRunner task per firing, the control plane (pause mailbox, queue,
+  steer/rerun routing, abort drain), per-node anchor lifecycle, the commit
+  writer (one chained write per transition), the restart sweep, and the
+  single-active-run rule.
+- `src/projection.ts` — the per-node view computed from the firing log.
 - `src/runner.ts` — `runOneAgent` (one-shot) and the continuable/steer
   primitives.
 - `src/index.ts` — the `POST /run`, `GET /run`, `GET /run/events` (SSE), and
   `POST /control` routes.
 - `src/ui/` — the breakpoint toggle and live node states
-  (`pipeline-view`), the inspection modal (`inspect-modal.tsx`), the config
-  checkbox (`agent-config`).
-- `test/runs.test.ts` — the scripted control-plane suite (pause ordering,
-  rerun/steer/abort, restart sweep, 409, coordinator disposal, degradation).
+  (`pipeline-view`), the inspection modal (`inspect-modal.tsx`), the ports/
+  bindings editor (`agent-config`), the run dialog's concurrency field
+  (`run-modal`).
+- `test/runs.test.ts` — the marble-style verification matrix: fan-in
+  ordering, bounded cycles, starvation, fail-fast, abort drain with
+  commit isolation, the double-breakpoint queue, `maxInFlight`, anchor
+  lifecycle, determinism.
 
-The breakpoint flows are additionally verified end-to-end against the live
-app: pause + inspection, rerun, repeated steering with transcript
-continuation, resume through the rest of the graph, abort preservation,
-multiple breakpoints pausing in sequence, page-reload discovery, and a paused
-run surviving a profile restart with steering still reaching the same child.
+The flows are additionally verified end-to-end against the live app:
+concurrent chips with strict fan-in ordering, breakpoint-while-in-flight,
+the double-breakpoint queue, abort mid-fan-out, a page reload mid-run with
+re-discovery, steering while the other branch is in flight, the failure
+surface, and the anchor sessions' zero-model-turn guarantee.
 
 ## Inheritance and settings forwarding
 
@@ -163,9 +241,11 @@ fetchable for debugging via `GET /dsh-agent-pipeline/run?id=…&cwd=…`.
 ## Results and the continue routes
 
 On completion a **result modal** shows the terminal outputs and a per-run
-status strip. Each run row also carries a **Transcript** button (when the run
-published a child session): it opens the agent's durable child session, which
-holds the agent's full transcript.
+status strip (a failed run shows the failure banner and the per-agent
+statuses; a failed firing's transcript stays openable). Each row also
+carries a **Transcript** button (when the run published a child session): it
+opens the agent's durable child session, which holds the agent's full
+transcript.
 
 The modal offers three continue routes — every route only **prefills a
 composer and lets the user send**; nothing is ever auto-sent:
@@ -192,15 +272,9 @@ picker), all declared on the client module's `inject`.
 
 ## What is deliberately not implemented
 
-Loops, retries, and live visualization do not exist yet. The executor is
-currently sequential: a pause halts the whole run.
-
-Designs for execution beyond sequential runs live in
-[docs/proposals/](../proposals/parallel-execution.md): the stream-model
-executor (nodes wired through ports, firing as data arrives, cycles as
-ordinary wiring),
-[conditional dispatch](../proposals/conditional-dispatch.md) (named output
-ports with selective emission), and
-[run operations](../proposals/run-operations.md) (run reuse, history, token
-accounting). Until they are implemented, this guide describes exactly how
-runs behave today.
+Self-similar **boxes** (a graph presented as a node) are defined in the
+design principles but need their own design pass;
+[run operations](../proposals/run-operations.md) — run reuse, a history
+browser, per-firing token accounting, timeouts — are designed but not built;
+retries and live run visualization do not exist. The firing log is the
+foundation that run operations will build on.

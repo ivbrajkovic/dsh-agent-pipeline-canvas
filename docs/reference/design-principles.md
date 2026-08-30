@@ -103,5 +103,5 @@ straight line, a wide fan-out, or a cycle.
 | **Source** | The synthetic node that emits the run's input once. |
 | **Selective emission** | A node emitting on some output ports and not others — conditionality as base mechanics. |
 | **Box** | A graph presented as a node; same rules, recursive. |
-| **Parent anchor** | The hidden parent session of a continuable child (today's "coordinator") — an authorization address, never a worker. |
+| **Parent anchor** | The hidden parent session of a continuable child — an authorization address, never a worker (the pre-executor "coordinator", renamed and made per-node). |
 | **Halt gate** | The pause mechanism: stop new firings, let in-flight firings finish. |

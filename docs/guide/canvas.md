@@ -26,35 +26,45 @@ edits in one are visible in the other.
   (`Agent 1`, `Agent 2`, … — ids are generated as `agent-N` and are not
   user-editable). Reposition nodes freely; click to select; the toolbar's
   **Delete** removes the selection and **Clear** empties the canvas.
-- Every agent has exactly **one input port and one output port**
-  (`<id>:in` / `<id>:out`). Drag from an agent's output port to another
-  agent's input port to connect them; edges are directed and arrow-marked.
+- Every agent has **named input and output ports**. Undeclared, an agent has
+  exactly one of each — the `in` / `out` ports (`<id>:in` / `<id>:out`).
+  Declared ports (with per-port policies, bounds, and output bindings) are
+  edited in the configuration panel's [port
+  surface](#the-port-surface--ports-policies-bounds-bindings) below. Drag
+  from an agent's output port to another agent's input port to connect them;
+  edges are directed and arrow-marked. When a node declares several ports
+  the connection editor offers **port pickers** on both ends.
 - Connections are flexible: an output may **fan out** to many inputs, and an
   input may **fan in** from many sources. Semantically, `A → B` means A's
   output becomes (part of) B's input. There are no explicit
-  parallel/join node types — a node simply runs after all of its upstreams
-  have produced output.
+  parallel/join node types — a node fires when its inputs say so
+  ([running-pipelines.md](running-pipelines.md#how-a-run-executes)).
+- **Cycles are legal wiring** — the executor loops until a port goes quiet.
+  A cycle shows as a non-fatal warning in the issue strip, not an error.
 - Each node carries a **breakpoint dot** (top-left) and an **edit button**
   (pencil, top-right). The dot arms the
-  [pause-on-output breakpoint](running-pipelines.md#breakpoints-pause-inspect-resume--rerun--steer--abort);
+  [pause-on-output breakpoint](running-pipelines.md#breakpoints-grouped-pause-the-queue-resume--rerun--steer--abort);
   the pencil opens the configuration panel.
 
 ## Validation while editing
 
 The graph is validated **as you edit**. The toolbar shows a *Valid* /
-*N issues* chip and an issue strip lists current problems:
+*N issues* chip (plus a warning count when a cycle is present) and an issue
+strip lists current problems:
 
-- **cycles** — a directed cycle in the graph;
 - **self-connections** and **duplicate edges**;
-- connections referencing a **missing agent or port**, or mismatched
-  source/target ports;
-- **duplicate agent ids**, non-array `agents`/`connections`.
+- connections referencing a **missing agent or port**, or naming a port the
+  agent does not declare (and that is not its default);
+- **duplicate agent ids**, non-array `agents`/`connections`;
+- malformed **port declarations** (unnamed ports, unknown policies,
+  non-positive-integer bounds, duplicate port names) — see the full rule set
+  in [../reference/graph-and-execution.md](../reference/graph-and-execution.md).
 
-An absent or empty graph is valid (there is nothing to run). Validation is
-**detection, not enforcement**: you can save an invalid graph, but you cannot
-run it — the runner re-validates before starting and refuses an invalid
-snapshot. The full rule set and error codes are documented in
-[../reference/graph-and-execution.md](../reference/graph-and-execution.md).
+A **directed cycle** is reported as a *warning* (legal wiring), and the
+toolbar chip gains a warning count. An absent or empty graph is valid (there
+is nothing to run). Validation is **detection, not enforcement**: you can
+save an invalid graph, but you cannot run it — the runner re-validates
+before starting and refuses an invalid snapshot.
 
 The toolbar also has **View JSON**, which exposes the graph as structured
 data — the exact shape the plugin persists and the runner consumes.
@@ -96,10 +106,50 @@ fields are forwarded to the harness subagent start request for that agent.
 - **Output schema** — an object-rooted JSON Schema. When the child returns a
   result valid against it, the validated structured output is preferred over
   the raw text (rendered as JSON) both downstream and in the result modal.
-  Note: a [breakpointed](running-pipelines.md#breakpoints-pause-inspect-resume--rerun--steer--abort)
+  Note: a [breakpointed](running-pipelines.md#breakpoints-grouped-pause-the-queue-resume--rerun--steer--abort)
   agent cannot produce structured output (harness limitation), so the schema
   is ignored for it — the panel warns when both are set.
+- **Input ports** — named input ports, one row each: a **name**, a firing
+  **policy** (`all-of` — wait for every wired source; `any-of` — fire per
+  arriving message), and an optional **bound** (a delivery count — the max
+  messages the port accepts this run; further arrivals are dropped and
+  recorded). Undeclared (no rows) keeps the single default `in` port
+  (all-of, unbounded); a declared EMPTY list means the node has no input
+  ports and can never fire (surfaced as starvation at run time, not a
+  validation error).
+- **Output ports** — comma-separated names; undeclared keeps the single
+  default `out` port (a declared empty list would emit nowhere). A firing
+  emits on some of them and not on others, per the bindings below — or on
+  all of them when no bindings are set.
+- **Output bindings** — rules of the form `field == value → port`, evaluated
+  against the firing's **structured output** (`settings.outputSchema`):
+  first match wins and selects the emission port; a rule with an empty value
+  is the catch-all (keep it last); no match — or no structured result at
+  all — emits on no port (the quiet branch simply never runs). The panel
+  warns when bindings are set without a parseable object schema, and when a
+  breakpoint (which forbids structured output) meets bindings.
 - **Pause on output** — the breakpoint checkbox (same as the node's dot).
+
+### The port surface — ports, policies, bounds, bindings
+
+The port fields make the canvas author the full stream model:
+
+- **Policies** decide WHEN a node fires. `all-of` (the default) waits until
+  every wired upstream of the port has delivered a message — fan-in joins
+  for free. `any-of` fires on the first arrival — a join that proceeds on
+  whichever branch ran.
+- **Bounds** decide HOW OFTEN a port may receive. The bound is a delivery
+  count over the whole run (the run input's seed message counts), which is
+  what makes a feedback loop terminate: cap the loop's input port and the
+  excess arrival is dropped and recorded in the run's `dropped` list.
+- **Bindings** decide WHERE a firing's output goes. Without bindings every
+  declared output port emits; with bindings the first matching rule's port
+  emits and the other branches stay quiet — conditional dispatch with no
+  extra model call (the comparison is executor-side, against the structured
+  result the schema produced).
+
+Short sample graphs for each pattern live in
+[pipeline-samples.md](pipeline-samples.md).
 
 ## Persistence
 

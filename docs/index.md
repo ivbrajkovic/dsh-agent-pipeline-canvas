@@ -11,8 +11,9 @@ that match what you need — nothing requires reading everything.
 
 | Document | What it covers |
 |----------|----------------|
-| [guide/canvas.md](guide/canvas.md) | Building a pipeline on the canvas: the palette, nodes and ports, connecting and editing, live DAG validation, the agent configuration panel (system prompt + settings), and per-repository persistence. |
-| [guide/running-pipelines.md](guide/running-pipelines.md) | The run dialog and input composition, durable runs (run records, SSE, the single-active-run rule), breakpoints (pause / inspect / resume / rerun / steer / abort), restart durability and degradation, and the result modal's continue routes. |
+| [guide/canvas.md](guide/canvas.md) | Building a pipeline on the canvas: the palette, nodes and ports, connecting and editing, live validation, the agent configuration panel (system prompt + settings + the port surface), and per-repository persistence. |
+| [guide/running-pipelines.md](guide/running-pipelines.md) | The run dialog and input composition, the firing-kernel execution model (concurrent dispatch, fail-fast, quiescence), durable runs (the firing-log record, SSE, the single-active-run rule), grouped pause and the pending-pause queue, breakpoints (pause / inspect / resume / rerun / steer / abort), restart durability and degradation, and the result modal's continue routes. |
+| [guide/pipeline-samples.md](guide/pipeline-samples.md) | Short sample graphs: sequential chains, concurrent fan-out/fan-in, any-of joins, conditional routers via output bindings, feedback loops with a bound, and steering at breakpoints. |
 | [guide/deployment.md](guide/deployment.md) | Installing into the DSH Web profile, the one-command sync loop, client-vs-host change handling, route verification, and the development scripts and change discipline. |
 
 ## Reference — how the plugin works
@@ -20,24 +21,27 @@ that match what you need — nothing requires reading everything.
 | Document | What it covers |
 |----------|----------------|
 | [reference/architecture.md](reference/architecture.md) | The three-face architecture (Host half, browser half, pure core), a route-by-route HTTP reference, the browser slot registrations and bundling, and the full project layout. |
-| [reference/graph-and-execution.md](reference/graph-and-execution.md) | The pipeline graph schema, every `validateGraph` rule and error code, and the execution contract: per-agent input shapes, root/terminal/orphan classification, prompt framing, and the final result. |
+| [reference/graph-and-execution.md](reference/graph-and-execution.md) | The pipeline graph schema (ports, policies, bounds, bindings), every `validateGraph` rule and error code, the kernel's firing rules, and the firing-log run record. |
 | [reference/system-prompt.md](reference/system-prompt.md) | How the harness assembles an agent's system prompt from named sections, and the one `deployment:persona` slot that a pipeline agent's system prompt field replaces. |
 | [reference/design-principles.md](reference/design-principles.md) | The stream model — nodes, ports, messages, firings, quiescence — and the durable rules: self-similar boxes, honest wiring, cost discipline, the firing-log record. |
 
-## Proposals — agreed designs, not yet built
+## Proposals — design background
 
-The knowledge base for upcoming work. Guides and references describe the
-current implementation; these describe what comes next.
+The knowledge base behind the executor and the designs for what comes next.
+The stream executor and conditional dispatch described by the first two are
+**built** — the guides above describe them as shipped behavior; the
+documents remain the design record.
 
 | Document | What it covers |
 |----------|----------------|
-| [proposals/parallel-execution.md](proposals/parallel-execution.md) | The stream-model executor: the firing kernel (ports, messages, firings, quiescence), fail-fast errors, grouped pause, per-node parent anchors, abort draining. |
-| [proposals/conditional-dispatch.md](proposals/conditional-dispatch.md) | Conditional dispatch as base mechanics: named output ports, selective emission, declared any-of/all-of joins. |
-| [proposals/run-operations.md](run-operations.md) | Operational features: run reuse (rerun from node X), a run history browser, per-firing token accounting, and per-node timeouts — plus recorded known limits. |
-| [proposals/implementation-plan.md](proposals/implementation-plan.md) | The phased build plan for the stream executor: schema, firing log, kernel, anchors, control plane, fail-fast, selective emission — each phase with its verification gate, plus the phase-deltas log. |
+| [proposals/parallel-execution.md](proposals/parallel-execution.md) | **Built.** The stream-model executor: the firing kernel (ports, messages, firings, quiescence), fail-fast errors, grouped pause, per-node parent anchors, abort draining — plus the §8 verification matrix the implementation was held to. |
+| [proposals/conditional-dispatch.md](proposals/conditional-dispatch.md) | **Built.** Conditional dispatch as base mechanics: named output ports, selective emission via bindings, declared any-of/all-of joins. |
+| [proposals/run-operations.md](proposals/run-operations.md) | Designed, not built: run reuse (rerun from node X), a run history browser, per-firing token accounting, and per-node timeouts — plus recorded known limits. The firing log is the foundation this builds on. |
+| [proposals/implementation-plan.md](proposals/implementation-plan.md) | The phased build plan for the stream executor — each phase's gate, plus the append-only phase-deltas log recording where implementation met constraints. |
 
 Suggested reading order for a new contributor:
 [README](../README.md) → [canvas guide](guide/canvas.md) →
 [running guide](guide/running-pipelines.md) →
+[samples](guide/pipeline-samples.md) →
 [architecture](reference/architecture.md) → the rest on demand.
 Agent-oriented repo instructions live in [AGENTS.md](../AGENTS.md).

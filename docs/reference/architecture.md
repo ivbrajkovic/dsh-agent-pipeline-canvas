@@ -9,23 +9,29 @@ the full project layout. The behavioral rules themselves live in
 
 ## The pure core
 
-`src/types.ts` + `src/graph.ts` + `src/execution.ts` + `src/projection.ts` —
-no Node/browser APIs, no I/O, no React:
+`src/types.ts` + `src/graph.ts` + `src/execution.ts` + `src/kernel.ts` +
+`src/projection.ts` — no Node/browser APIs, no I/O, no React:
 
 - **`src/types.ts`** — the shared contract types: `PipelineGraph` / `Agent` /
-  `Connection`, validation errors and results, agent execution input,
-  pipeline execution result, runner request/result, and the durable run
-  record (the v2 firing log, plus the read-only legacy v1 shape) and control
-  shapes.
+  `Connection`, port specs and output bindings, validation errors and
+  results, agent execution input, pipeline execution result, runner
+  request/result, and the durable run record (the v2 firing log, plus the
+  read-only legacy v1 shape) and control shapes.
 - **`src/graph.ts`** — canonical graph semantics: pure
   `validateGraph(graph)` / `findCycle`, imported by the Host, the runner,
   **and** the browser bundle (tsdown inlines it, so there is exactly one
   implementation of the graph semantics — never a second hand-written copy in
   the browser).
-- **`src/execution.ts`** — the canonical execution contract (pure):
-  classification (root/terminal/orphan), the per-agent input shape, the
-  default prompt framing, the deterministic run order (`topoOrder`), and the
-  final-result shape.
+- **`src/execution.ts`** — the canonical execution contract (pure): the
+  port-graph view (`portGraph` — resolved ports and wired edges, shared by
+  validation and the kernel), binding evaluation, classification
+  (root/terminal/orphan), the per-agent input shape, the default prompt
+  framing, and the final-result shape.
+- **`src/kernel.ts`** — the firing kernel (pure stream mechanics): per-port
+  FIFO queues with policies, bound enforcement (delivery-count drops), the
+  halt gate, `maxInFlight` accounting, selective emission, quiescence with
+  starving-node candidates, and promise-based readiness. It says WHICH node
+  may fire next; the executor owns every side effect.
 - **`src/projection.ts`** — the per-node view over a run record (pure
   `projectNodes(record)`): the record is a FIRING LOG, so per-node status,
   latest output, and the child session address are COMPUTED, never stored —
@@ -55,9 +61,11 @@ Supporting modules:
   `spawn` child with settings forwarding), `startContinuableAgent` /
   `steerContinuableAgent` (the breakpoint path), and the legacy blocking
   `runPipeline` executor.
-- **`src/runs.ts`** — the durable run registry: per-workspace run records,
-  the sequential executor + control mailbox, the per-run coordinator
-  lifecycle, the subagent/end settlement matcher, the restart sweep, and the
+- **`src/runs.ts`** — the durable run registry: the kernel driver (one
+  NodeRunner task per firing), the control plane (pause mailbox,
+  pending-pause queue, steer/rerun routing, abort drain), per-node parent
+  anchor lifecycle, the commit writer (one chained transition per record
+  mutation), the subagent/end settlement matcher, the restart sweep, and the
   single-active-run rule.
 
 ## The browser half
@@ -101,9 +109,9 @@ The source lives under `src/` (TypeScript); the shipped artifacts under
 `lib/` are build output (`npm run build` →
 `tsc -p tsconfig.build.json && tsdown --config tsdown.config.ts`), matching
 the DSH plugin convention. The node half (`lib/index.js`, `lib/graph.js`,
-`lib/execution.js`, `lib/runner.js`, `lib/runs.js`, `lib/storage.js`,
-`lib/types.js` + `.d.ts`) is emitted by tsc; the browser bundle
-(`lib/client.js`) is built by tsdown.
+`lib/execution.js`, `lib/kernel.js`, `lib/projection.js`, `lib/runner.js`,
+`lib/runs.js`, `lib/storage.js`, `lib/types.js`, … + `.d.ts`) is emitted by
+tsc; the browser bundle (`lib/client.js`) is built by tsdown.
 
 ```
 dsh-agent-pipeline-canvas/
@@ -113,16 +121,19 @@ dsh-agent-pipeline-canvas/
   tsconfig.build.json   node-half emit: src/*.ts -> lib/*.js + lib/*.d.ts (excl. client)
   tsdown.config.ts      browser bundle: src/client.tsx -> lib/client.js (module-loader format)
   src/types.ts          shared contract types (PipelineGraph / Agent / Connection,
-                        validation errors+results, agent execution input, pipeline
-                        execution result, runner request/result, durable run record
-                        and control shapes)
+                        port specs + output bindings, validation errors+results,
+                        agent execution input, pipeline execution result, runner
+                        request/result, durable run record and control shapes)
   src/graph.ts          canonical graph semantics: pure validateGraph(graph) /
                         findCycle — imported by the Host, the runner, AND the
                         browser bundle (inlined by tsdown)
-  src/execution.ts      canonical execution contract (pure): classification
+  src/execution.ts      canonical execution contract (pure): the port-graph view
+                        (portGraph), binding evaluation, classification
                         (root/terminal/orphan), the per-agent input shape, the
-                        default prompt framing, the deterministic run order
-                        (topoOrder), and the final-result shape
+                        default prompt framing, and the final-result shape
+  src/kernel.ts         the firing kernel (pure): port queues + policies, bounds,
+                        halt gate, maxInFlight, selective emission, quiescence,
+                        promise-based readiness
   src/projection.ts     the per-node projection over a run record (pure
                         projectNodes): status/latest-output/child-session per
                         node, computed from the firing log — shared by the
@@ -136,11 +147,11 @@ dsh-agent-pipeline-canvas/
                         with settings forwarding), startContinuableAgent /
                         steerContinuableAgent (breakpoint path), and the legacy
                         blocking runPipeline executor
-  src/runs.ts           the durable run registry: per-workspace firing-log run
-                        records (v2; legacy v1 read-only), the sequential
-                        executor + control mailbox, the per-run coordinator
-                        lifecycle, the subagent/end settlement matcher,
-                        restart sweep, single-active-run rule
+  src/runs.ts           the durable run registry: kernel driver + one NodeRunner
+                        task per firing, the control plane (pause mailbox,
+                        pending-pause queue, abort drain), per-node parent anchor
+                        lifecycle, the commit writer, the subagent/end settlement
+                        matcher, restart sweep, single-active-run rule
   src/client.tsx        browser entry: slot registration only (components in
                         src/ui/ — pipeline-view, agent-config, run-modal,
                         result-modal, inspect-modal, shell-panel, shared; each
@@ -148,11 +159,13 @@ dsh-agent-pipeline-canvas/
                         <style data-plugin-css> injector)
   src/ui/*.tsx|css      one module + one stylesheet per UI surface
   test/validate.test.ts    validateGraph smoke tests
-  test/execution.test.ts   execution-contract smoke tests
+  test/execution.test.ts   execution-contract smoke tests (ports, bindings, framing)
   test/message.test.ts     run-dialog message composition tests
   test/runner.test.ts      runner-orchestration smoke tests
-  test/runs.test.ts        durable-run tests: pause/resume, breakpoints, rerun,
-                           steering, abort, restart sweep, 409, degradation
+  test/runs.test.ts        the marble-style verification matrix: fan-in ordering,
+                           bounded cycles, starvation, fail-fast, abort drain,
+                           double-breakpoint queue, maxInFlight, anchor lifecycle,
+                           determinism, restart sweep, 409, degradation
   docs/                 this documentation (start at docs/index.md)
   lib/                  committed build output — rebuild, never hand-edit
 ```

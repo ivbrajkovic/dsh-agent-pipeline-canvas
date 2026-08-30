@@ -18,11 +18,13 @@
 
 **dsh-agent-pipeline-canvas** is a DSH Web composition plugin: a visual
 **agent-pipeline** canvas in every session — a **Pipelines** view tab, plus a
-composer button that works even on a brand-new session. Build a DAG of
-generic agents, then run it: each agent is delegated to the harness's own
-`subagents` service in deterministic topological order, outputs flow
-downstream, and the durable run returns
-`{ outputs: { [terminalId]: output } }`. The graph persists per repository.
+composer button that works even on a brand-new session. Build a graph of
+generic agents — fan-out, fan-in, even cycles — then run it: a firing
+kernel dispatches ready agents concurrently as harness `subagents` children
+(bounded by a max-in-flight cap), outputs flow downstream as messages, loops
+end when a port goes quiet, and the durable run record — a per-firing log —
+finalizes with `{ outputs: { [terminalId]: output } }`. The graph persists
+per repository.
 
 <p align="center">
   <img alt="The Pipelines canvas: three agents wired as a chain, with a Valid chip in the toolbar and breakpoint dots on two nodes" src="docs/assets/canvas.png" width="840" />
@@ -30,27 +32,34 @@ downstream, and the durable run returns
 
 ## What it does
 
-- **Visual DAG editor** — drag agents onto the canvas, wire outputs to
-  inputs (fan-out and fan-in), get live DAG validation as you edit.
+- **Visual graph editor** — drag agents onto the canvas, wire outputs to
+  inputs (fan-out and fan-in; cycles are legal wiring), get live validation
+  as you edit.
 - **Per-agent configuration** — system prompt (the harness persona slot),
-  provider/model/reasoning/tokens, tool filter, delegation-depth cap, and an
-  output schema; empty fields inherit the parent session.
-- **Durable runs** — a run executes in the Host process, survives page
-  reloads and profile restarts, and streams its progress over SSE; one run
-  is active per workspace.
-- **Breakpoints** — pause any agent after its output settles, then inspect
+  provider/model/reasoning/tokens, tool filter, delegation-depth cap, an
+  output schema, named input ports with firing policies and delivery
+  bounds, named output ports with bindings (conditional dispatch), and the
+  pause-on-output breakpoint; empty fields inherit the parent session.
+- **Concurrent durable runs** — a run executes in the Host process as a
+  firing log: ready agents run concurrently (capped), fail-fast errors end
+  the run, and everything survives page reloads and profile restarts over
+  SSE; one run is active per workspace.
+- **Breakpoints** — pause any agent after its output settles (the whole
+  parallel section parks; in-flight agents finish and hold), then inspect
   and **resume**, **rerun** from the original input, **steer** the same
-  child with feedback, or **abort** — all across restarts.
+  child with feedback, or **abort** — several breakpoints queue; all across
+  restarts.
 - **Results that go somewhere** — continue in chat, in a new session, or in
   any workspace session; nothing is ever auto-sent.
 - **Zero runtime dependencies** — three faces (Host routes, React client,
-  pure core) over one shared validation/execution contract.
+  pure core) over one shared validation/execution contract; the firing
+  kernel is part of that pure core.
 
-Not yet implemented: concurrent dispatch, conditional dispatch, run
-operations, loops, and retries. The first three are designed in
-[docs/proposals/](docs/index.md#proposals--agreed-designs-not-yet-built);
-the executor is still sequential until that lands. Live visualization stays
-deferred.
+Not yet implemented: run operations (run reuse, history, per-firing token
+accounting), self-similar boxes, retries, and live run visualization. Run
+operations is designed in
+[docs/proposals/](docs/index.md#proposals--design-background); the firing
+log is the foundation it will build on.
 
 ## Documentation
 
@@ -58,11 +67,12 @@ The full manual lives in [docs/index.md](docs/index.md). Read what you need:
 
 | Document | Covers |
 |----------|--------|
-| [docs/guide/canvas.md](docs/guide/canvas.md) | Building pipelines: nodes, ports, connections, validation, the configuration panel, persistence. |
-| [docs/guide/running-pipelines.md](docs/guide/running-pipelines.md) | The run dialog, durable runs and SSE, breakpoints (resume / rerun / steer / abort), results and continue routes. |
+| [docs/guide/canvas.md](docs/guide/canvas.md) | Building pipelines: nodes, ports, connections, validation, the configuration panel (including the port surface), persistence. |
+| [docs/guide/running-pipelines.md](docs/guide/running-pipelines.md) | The run dialog, the firing-kernel execution model, durable runs and SSE, grouped pause / queue / fail-fast, breakpoints (resume / rerun / steer / abort), results and continue routes. |
+| [docs/guide/pipeline-samples.md](docs/guide/pipeline-samples.md) | Short sample graphs: fan-out/fan-in, any-of joins, conditional routers via bindings, feedback loops with a bound. |
 | [docs/guide/deployment.md](docs/guide/deployment.md) | Profile wiring, the sync loop, route verification, dev scripts and change discipline. |
-| [docs/reference/architecture.md](docs/reference/architecture.md) | Host routes, browser slots and bundling, the pure core, project layout. |
-| [docs/reference/graph-and-execution.md](docs/reference/graph-and-execution.md) | The graph schema, every validation error code, and the execution contract. |
+| [docs/reference/architecture.md](docs/reference/architecture.md) | Host routes, browser slots and bundling, the pure core and the firing kernel, project layout. |
+| [docs/reference/graph-and-execution.md](docs/reference/graph-and-execution.md) | The graph schema, every validation error code, the kernel firing rules, and the firing-log record. |
 | [docs/reference/design-principles.md](docs/reference/design-principles.md) | The durable design rules every feature must keep. |
 | [docs/reference/system-prompt.md](docs/reference/system-prompt.md) | The harness system-prompt section layout and the persona slot an agent's system prompt replaces. |
 
