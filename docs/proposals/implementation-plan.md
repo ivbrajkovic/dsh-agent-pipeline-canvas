@@ -80,6 +80,22 @@ node model, and the executor are REBUILT.
   shared live-anchor address back into the admission hot path — the exact
   race P4 removed — to serve only transitional (P3-era) records whose failing
   steer is typed, surfaced on the firing, and fully recoverable via Rerun.
+- **P5 (scrutiny)** — verdict ship with constraints. (1) A reachable
+  park-invariant window in the re-fire path: when a resumed head surfaces an
+  orphaned breakpointed node whose re-fire epoch is still in flight,
+  `pausedAt` re-points at the fresh RUNNING firing while the record claims
+  paused, and the surfaced entry arms its mailbox only when the epoch
+  settles — until then every resume/rerun/steer is rejected with the typed
+  not-parked error while the UI shows the modal. Accepted as bounded (one
+  epoch), self-healing (the epoch's settle re-arms), abort-safe (abort is
+  accepted throughout), and coherent across a second crash (the running
+  firing re-fires again); later phases must not assume the invariant holds
+  in the crash-recovery path. Cheap fixes if it ever matters in practice:
+  gate the modal actions while the pausedAt firing's status is "running", or
+  defer the orphan's re-fire until its entry surfaces. (2) For P7: the
+  rebuilt queue sorts firing ids lexicographically over 3-digit padding —
+  switch to a numeric compare on the id suffix before loops can exceed 999
+  firings.
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from
