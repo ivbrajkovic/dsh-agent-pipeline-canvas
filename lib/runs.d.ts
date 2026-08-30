@@ -1,6 +1,6 @@
 import { type RunnerContext, type SubagentRunEndInfoLike } from "./runner.ts";
 import type { LegacyRunRecord, PipelineGraph, RunRecord } from "./types.ts";
-/** The live-Agent fields the coordinator machinery reads. */
+/** The live-Agent fields the parent-anchor machinery reads. */
 interface LiveAgentLike {
     id: string;
     options?: Record<string, unknown>;
@@ -10,11 +10,11 @@ interface AgentHandleLike {
     dispose(): Promise<void> | void;
 }
 /**
- * Structural view of the agents service's coordinator surface
+ * Structural view of the agents service's parent-anchor surface
  * (`ctx.agents.create` / `ctx.agents.resume` — the agent-loop registers the
  * factory in the base bundle, so a plugin may call both).
  */
-interface CoordinatorAgentsService {
+interface AnchorAgentsService {
     get(sessionId: string): unknown | undefined;
     create(options: {
         sessionId: string;
@@ -36,7 +36,7 @@ interface CoordinatorAgentsService {
 }
 /** The services a RunRegistry needs (a superset of the runner's seams). */
 export interface RunRegistryServices extends RunnerContext {
-    agents: CoordinatorAgentsService;
+    agents: AnchorAgentsService;
     subagents: RunnerContext["subagents"];
     /** Settlement seam — production wires `ctx.on("subagent/end", fn)`. */
     subscribeRunEnd(fn: (info: SubagentRunEndInfoLike) => void): () => void;

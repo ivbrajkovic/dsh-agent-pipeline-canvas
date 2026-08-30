@@ -5,7 +5,7 @@
 // children settle when the test emits a `subagent/end` payload and whose
 // ONE-SHOT children settle on demand (holdOneshots + resolveOneshot — the
 // marble harness scripts one-shot interleavings too), a fake agents service
-// that records coordinator create/resume/dispose, and a real temp directory
+// that records parent-anchor create/resume/dispose, and a real temp directory
 // for the per-workspace run records.
 //
 // The record is a FIRING LOG (recordVersion 2): per-node behavior is asserted
@@ -59,10 +59,10 @@ function makeHarness(options: { continuable?: boolean; holdOneshots?: boolean } 
 	const starts: Array<{ kind: string; childId: string; label: string; prompt: string; parentId: string; request: Record<string, unknown> }> = [];
 	const followups: Array<{ childId: string; text: string; parentId: string }> = [];
 	const interrupts: Array<{ childId: string; parentSessionId: string }> = [];
-	const coordinatorCreated: Array<{ sessionId: string; meta: Record<string, unknown> | undefined; agentOptions: Record<string, unknown> | undefined }> = [];
-	const coordinatorResumed: string[] = [];
-	const coordinatorDisposed: string[] = [];
-	const liveCoordinators = new Set<string>();
+	const anchorCreated: Array<{ sessionId: string; meta: Record<string, unknown> | undefined; agentOptions: Record<string, unknown> | undefined }> = [];
+	const anchorResumed: string[] = [];
+	const anchorDisposed: string[] = [];
+	const liveAnchors = new Set<string>();
 	const heldOneshots = new Map<string, HeldOneshot>();
 	let seq = 0;
 
@@ -108,23 +108,23 @@ function makeHarness(options: { continuable?: boolean; holdOneshots?: boolean } 
 	const agentsService = {
 		get: (id: string) => {
 			if (id === "sess") return { id: "sess", options: { provider: "ds", model: "m-1", subagentDepth: 99 } };
-			if (liveCoordinators.has(id)) return { id, options: {} };
+			if (liveAnchors.has(id)) return { id, options: {} };
 			return undefined;
 		},
 		create: async (opts: { sessionId: string; meta?: Record<string, unknown>; agentOptions?: Record<string, unknown> }) => {
-			coordinatorCreated.push({ sessionId: opts.sessionId, meta: opts.meta, agentOptions: opts.agentOptions });
-			liveCoordinators.add(opts.sessionId);
+			anchorCreated.push({ sessionId: opts.sessionId, meta: opts.meta, agentOptions: opts.agentOptions });
+			liveAnchors.add(opts.sessionId);
 			return {
 				agent: { id: opts.sessionId, options: {} },
-				dispose: async () => { liveCoordinators.delete(opts.sessionId); coordinatorDisposed.push(opts.sessionId); },
+				dispose: async () => { liveAnchors.delete(opts.sessionId); anchorDisposed.push(opts.sessionId); },
 			};
 		},
 		resume: async (opts: { resumeSessionId: string }) => {
-			coordinatorResumed.push(opts.resumeSessionId);
-			liveCoordinators.add(opts.resumeSessionId);
+			anchorResumed.push(opts.resumeSessionId);
+			liveAnchors.add(opts.resumeSessionId);
 			return {
 				agent: { id: opts.resumeSessionId, options: {} },
-				dispose: async () => { liveCoordinators.delete(opts.resumeSessionId); coordinatorDisposed.push(opts.resumeSessionId); },
+				dispose: async () => { liveAnchors.delete(opts.resumeSessionId); anchorDisposed.push(opts.resumeSessionId); },
 			};
 		},
 	};
@@ -139,7 +139,7 @@ function makeHarness(options: { continuable?: boolean; holdOneshots?: boolean } 
 	return {
 		services,
 		starts, followups, interrupts,
-		coordinatorCreated, coordinatorResumed, coordinatorDisposed, liveCoordinators,
+		anchorCreated, anchorResumed, anchorDisposed, liveAnchors,
 		warnings,
 		/** Simulate the child's epoch settling: the harness emits `subagent/end`. */
 		settle(childId: string, output: string, stopReason = "completed") {
@@ -301,10 +301,10 @@ await withTempDir(async (cwd) => {
 	okCheck("pause: b runs one-shot on a's adopted output", harness.starts[1].kind === "oneshot" && harness.starts[1].prompt.includes("## Alpha\n<out:after-breakpoint>"));
 	const doneP = projectNodes(done);
 	okCheck("pause: b done with its own output", done.firings.length === 2 && done.firings[1].nodeId === "b" && done.firings[1].status === "done" && done.firings[1].output === "<out:Beta>" && doneP.nodes.b.status === "done");
-	// The continuable child parents to the run coordinator; the one-shot
+	// The continuable child parents to its NODE's parent anchor; the one-shot
 	// child stays parented to the session agent (unchanged behavior).
-	const coordinatorId = rec.coordinatorSessionId as string;
-	okCheck("pause: continuable child parented to the coordinator", harness.starts[0].parentId === coordinatorId);
+	const anchorId = rec.nodes.a?.parentAnchorSessionId as string;
+	okCheck("pause: continuable child parented to its node's parent anchor", harness.starts[0].parentId === anchorId);
 	okCheck("pause: one-shot child parented to the session agent", harness.starts[1].parentId === "sess");
 });
 
@@ -385,7 +385,7 @@ await withTempDir(async (cwd) => {
 	await registry.control(started.runId, { action: "steer", feedback: "make it shorter" }, cwd);
 	await waitFor("followup delivered", () => harness.followups.length === 1);
 	okCheck("rerun: steer went to the SAME child", harness.followups[0].childId === firstChildId && harness.followups[0].text === "make it shorter");
-	okCheck("rerun: steer parented to the coordinator", harness.followups[0].parentId === first.coordinatorSessionId);
+	okCheck("rerun: steer parented to the node's parent anchor", harness.followups[0].parentId === first.nodes.a?.parentAnchorSessionId);
 	harness.settle(firstChildId, "<out:steered-1>");
 	const afterSteer1 = await waitPausedAt(registry, started.runId, cwd, "a");
 	const afterSteer1P = projectNodes(afterSteer1);
@@ -431,7 +431,8 @@ await withTempDir(async (cwd) => {
 		&& done.firings[1].status === "done" && done.firings[0].status === "paused");
 });
 
-// --- coordinator lifecycle: created with depth 0, disposed between ops ------
+// --- anchor lifecycle: created per node with depth 0, disposed between ops,
+// --- never live at a settlement (executor spec §8)
 await withTempDir(async (cwd) => {
 	const harness = makeHarness();
 	const registry = new RunRegistry(harness.services);
@@ -441,24 +442,26 @@ await withTempDir(async (cwd) => {
 		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }], connections: [] },
 		input: "x",
 	});
-	if (!started.ok) { okCheck("coordinator: start ok", false); return; }
+	if (!started.ok) { okCheck("anchor: start ok", false); return; }
 	await waitFor("a's continuable start", () => harness.starts.length === 1);
 	harness.settle(harness.starts[0].childId, "<out:1>");
 	const rec = await waitPausedAt(registry, started.runId, cwd, "a");
-	okCheck("coordinator: exactly one created", harness.coordinatorCreated.length === 1);
-	const created = harness.coordinatorCreated[0];
-	okCheck("coordinator: persisted in the record", rec.coordinatorSessionId === created.sessionId);
-	okCheck("coordinator: meta origin/depth/parent", created.meta?.origin === "subagent" && created.meta?.delegationDepth === 0 && created.meta?.parentSession === "sess" && created.meta?.cwd === cwd);
-	okCheck("coordinator: options mirrored minus subagentDepth", created.agentOptions?.provider === "ds" && created.agentOptions?.subagentDepth === undefined);
-	okCheck("coordinator: disposed after the start acceptance", harness.coordinatorDisposed.includes(created.sessionId) && !harness.liveCoordinators.has(created.sessionId));
+	okCheck("anchor: exactly one created for the node", harness.anchorCreated.length === 1);
+	const created = harness.anchorCreated[0];
+	okCheck("anchor: persisted in the record's nodes map", rec.nodes.a?.parentAnchorSessionId === created.sessionId);
+	okCheck("anchor: the record carries no shared coordinator field", !("coordinatorSessionId" in rec));
+	okCheck("anchor: meta origin/depth/parent", created.meta?.origin === "subagent" && created.meta?.delegationDepth === 0 && created.meta?.parentSession === "sess" && created.meta?.cwd === cwd);
+	okCheck("anchor: options mirrored minus subagentDepth", created.agentOptions?.provider === "ds" && created.agentOptions?.subagentDepth === undefined);
+	okCheck("anchor: disposed after the start acceptance", harness.anchorDisposed.includes(created.sessionId) && !harness.liveAnchors.has(created.sessionId));
 	// Steer: resumed on demand, disposed again right after the followup.
 	await registry.control(started.runId, { action: "steer", feedback: "go on" }, cwd);
 	await waitFor("followup", () => harness.followups.length === 1);
-	okCheck("coordinator: resumed for the steer", harness.coordinatorResumed.includes(created.sessionId));
-	await waitFor("coordinator re-disposed", () => harness.coordinatorDisposed.filter((id) => id === created.sessionId).length >= 2);
-	okCheck("coordinator: absent parent drops the settlement notice (no live coordinator)", !harness.liveCoordinators.has(created.sessionId));
+	okCheck("anchor: resumed for the steer", harness.anchorResumed.includes(created.sessionId));
+	await waitFor("anchor re-disposed", () => harness.anchorDisposed.filter((id) => id === created.sessionId).length >= 2);
+	okCheck("anchor: no live anchor when the child settles (notice dropped, no model call)", !harness.liveAnchors.has(created.sessionId));
 	harness.settle(projectNodes(rec).nodes.a.childSessionId as string, "<out:yes>");
 	await waitPausedAt(registry, started.runId, cwd, "a");
+	okCheck("anchor: still no live anchor after the settlement", harness.liveAnchors.size === 0);
 });
 
 // --- abort: completed outputs preserved; run finalized aborted --------------
@@ -505,8 +508,8 @@ await withTempDir(async (cwd) => {
 	const rec = await waitTerminal(registry, started.runId, cwd);
 	const p = projectNodes(rec);
 	const bChild = p.nodes.b.childSessionId as string;
-	okCheck("abort-flight: interrupt sent to the live child via the coordinator address",
-		harness.interrupts.some((i) => i.childId === bChild && i.parentSessionId === rec.coordinatorSessionId));
+	okCheck("abort-flight: interrupt sent to the live child via the node's durable anchor address",
+		harness.interrupts.some((i) => i.childId === bChild && i.parentSessionId === rec.nodes.b?.parentAnchorSessionId));
 	okCheck("abort-flight: run aborted with the in-flight firing aborted", rec.state === "aborted" && p.nodes.b.status === "aborted");
 });
 
@@ -628,20 +631,20 @@ await withTempDir(async (cwd) => {
 	harness.settle(harness.starts[0].childId, "<out:before-restart>");
 	const before = await waitPausedAt(registry1, started.runId, cwd, "a");
 	const childId = projectNodes(before).nodes.a.childSessionId as string;
-	const coordinatorId = before.coordinatorSessionId as string;
+	const anchorId = before.nodes.a?.parentAnchorSessionId as string;
 	// "Restart": a brand-new registry over the same workspace.
 	const registry2 = new RunRegistry(harness.services);
 	const discovered = await registry2.activeRunForCwd(cwd);
 	const discoveredP = discovered !== null ? projectNodes(discovered) : null;
 	okCheck("restart: paused run discovered via the workspace",
 		discovered !== null && discovered.runId === started.runId && discovered.state === "paused" && discoveredP?.pausedNodeId === "a");
-	okCheck("restart: coordinator id preserved", discovered?.coordinatorSessionId === coordinatorId);
-	// Steering after the restart: coordinator resumed, SAME child, then resume.
+	okCheck("restart: the node's anchor id preserved", discovered?.nodes.a?.parentAnchorSessionId === anchorId);
+	// Steering after the restart: the node's anchor cold-resumed, SAME child, then resume.
 	await registry2.control(started.runId, { action: "steer", feedback: "post-restart steer" }, cwd);
 	await waitFor("post-restart followup", () => harness.followups.length === 1);
 	okCheck("restart: followup to the SAME child", harness.followups[0].childId === childId);
-	okCheck("restart: coordinator cold-resumed for the steer", harness.coordinatorResumed.includes(coordinatorId));
-	okCheck("restart: steer parented to the resumed coordinator", harness.followups[0].parentId === coordinatorId);
+	okCheck("restart: the node's anchor cold-resumed for the steer", harness.anchorResumed.includes(anchorId));
+	okCheck("restart: steer parented to the resumed anchor", harness.followups[0].parentId === anchorId);
 	harness.settle(childId, "<out:after-restart>");
 	await waitPausedAt(registry2, started.runId, cwd, "a");
 	await registry2.control(started.runId, { action: "resume" }, cwd);
@@ -699,7 +702,7 @@ await withTempDir(async (cwd) => {
 	const p = projectNodes(rec);
 	okCheck("degraded: breakpointed agent ran one-shot and paused",
 		harness.starts[1].kind === "oneshot" && rec.firings.length === 2 && rec.firings[1].nodeId === "b" && p.nodes.b.status === "paused");
-	okCheck("degraded: no coordinator ever created", harness.coordinatorCreated.length === 0);
+	okCheck("degraded: no parent anchor ever created", harness.anchorCreated.length === 0);
 	// Steering is rejected with a typed error; rerun works.
 	const steer = await registry.control(started.runId, { action: "steer", feedback: "nope" }, cwd);
 	okCheck("degraded: steering rejected", steer.ok === false);
@@ -932,6 +935,123 @@ await withTempDir(async (cwd) => {
 		done.state === "completed" && done.firings.length === 4 && done.firings.every((f) => f.status === "done"));
 	okCheck("anyof: d's re-firing continues its per-node seq",
 		done.firings[2].nodeId === "d" && done.firings[2].seq === 1 && done.firings[3].nodeId === "d" && done.firings[3].seq === 2);
+});
+
+// --- GATE P4: two breakpointed branches admitted concurrently never share a handle
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ holdOneshots: true });
+	const registry = new RunRegistry(harness.services);
+	const started = await registry.startRun({
+		sessionId: "sess",
+		cwd,
+		graph: {
+			agents: [
+				agent("a", "Alpha", "A."),
+				{ ...agent("b", "Beta", "B."), breakpoint: true },
+				{ ...agent("c", "Gamma", "C."), breakpoint: true },
+				agent("d", "Delta", "D."),
+			],
+			connections: [conn("c1", "a", "b"), conn("c2", "a", "c"), conn("c3", "b", "d"), conn("c4", "c", "d")],
+		},
+		input: "hello",
+	});
+	if (!started.ok) { okCheck("anchors2: start ok", false); return; }
+	await waitFor("a started", () => harness.starts.length === 1);
+	harness.resolveOneshot(harness.starts[0].childId, "<out:Alpha>");
+	// B and C are admitted together — the batch the shared-coordinator race
+	// made reachable — EACH on its own node's parent anchor.
+	await waitFor("b and c admitted together", () => harness.starts.length === 3);
+	const rec = await registry.getRun(started.runId, cwd) as RunRecord;
+	const anchorB = rec.nodes.b?.parentAnchorSessionId;
+	const anchorC = rec.nodes.c?.parentAnchorSessionId;
+	okCheck("anchors2: one anchor per node, distinct ids",
+		harness.anchorCreated.length === 2 && typeof anchorB === "string" && typeof anchorC === "string" && anchorB !== anchorC);
+	okCheck("anchors2: each child parented to its own node's anchor",
+		harness.starts[1].parentId === anchorB && harness.starts[2].parentId === anchorC);
+	okCheck("anchors2: both anchors disposed after admission — none live",
+		harness.anchorDisposed.length >= 2 && harness.liveAnchors.size === 0);
+	okCheck("anchors2: the record carries no shared coordinator field", !("coordinatorSessionId" in rec));
+	// Both branches park (the double-breakpoint queue); steer EACH on its own anchor.
+	const bChild = harness.starts.find((s) => s.label === "Beta")!.childId;
+	const cChild = harness.starts.find((s) => s.label === "Gamma")!.childId;
+	harness.settle(bChild, "<out:Beta>");
+	await waitPausedAt(registry, started.runId, cwd, "b");
+	harness.settle(cChild, "<out:Gamma>");
+	await waitFor("c parked behind b", async () => {
+		const cur = await registry.getRun(started.runId, cwd) as RunRecord;
+		return cur.firings.filter((f) => f.status === "paused").length === 2;
+	});
+	okCheck("anchors2: no live anchor at either settlement", harness.liveAnchors.size === 0);
+	await registry.control(started.runId, { action: "resume" }, cwd); // releases b, surfaces c
+	await waitFor("c surfaced as the head", async () => {
+		const cur = await registry.getRun(started.runId, cwd) as RunRecord;
+		return cur.pausedAt === cur.firings.find((f) => f.nodeId === "c")?.firingId;
+	});
+	await registry.control(started.runId, { action: "steer", feedback: "tighten" }, cwd);
+	await waitFor("c's followup delivered", () => harness.followups.length === 1);
+	okCheck("anchors2: the branch's steer parents to ITS OWN anchor",
+		harness.followups[0].childId === cChild && harness.followups[0].parentId === anchorC);
+	harness.settle(cChild, "<out:Gamma2>");
+	await waitPausedAt(registry, started.runId, cwd, "c");
+	await registry.control(started.runId, { action: "resume" }, cwd);
+	await waitFor("d started once both branches released", () => harness.starts.length === 4);
+	harness.resolveOneshot(harness.starts[3].childId, "<out:Delta>");
+	const done = await waitTerminal(registry, started.runId, cwd);
+	okCheck("anchors2: run completes with four done firings",
+		done.state === "completed" && done.firings.length === 4 && done.firings.every((f) => f.status === "done"));
+	okCheck("anchors2: d composed both branches' outputs",
+		done.firings[3].input === "D.\n\n## Beta\n<out:Beta>\n\n## Gamma\n<out:Gamma2>");
+	okCheck("anchors2: no live anchor at the end", harness.liveAnchors.size === 0);
+});
+
+// --- P4: a pre-P4 paused record (shared coordinatorSessionId) migrates per node
+await withTempDir(async (cwd) => {
+	// A record written by the P3 executor: ONE shared coordinator id, an empty
+	// nodes map, and a parked child already parented to that shared session.
+	const preP4 = {
+		runId: "pre-p4",
+		cwd,
+		sessionId: "sess",
+		coordinatorSessionId: "legacy-coord",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "paused",
+		pausedAt: "f-002",
+		graph: {
+			agents: [agent("a", "Alpha", "A."), { ...agent("b", "Beta", "B."), breakpoint: true }, agent("c", "Gamma", "C.")],
+			connections: [conn("c1", "a", "b"), conn("c2", "b", "c")],
+		},
+		input: "x",
+		recordVersion: 2,
+		firings: [
+			{ firingId: "f-001", nodeId: "a", seq: 1, status: "done", input: "a", output: "<out:Alpha>", stopReason: "completed", childSessionId: "oneshot-1", startedAt: "t", settledAt: "t" },
+			{ firingId: "f-002", nodeId: "b", seq: 1, status: "paused", input: "b", output: "<out:Beta>", stopReason: "completed", childSessionId: "child-9", startedAt: "t" },
+		],
+		nodes: {},
+	} as unknown as RunRecord;
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "pre-p4.json"), JSON.stringify(preP4, null, 2));
+	const harness = makeHarness();
+	const registry = new RunRegistry(harness.services);
+	const discovered = await registry.activeRunForCwd(cwd);
+	okCheck("migrate: the pre-P4 paused record resurrects", discovered !== null && discovered.state === "paused");
+	// Steering the parked child adopts the legacy coordinator id as b's anchor:
+	// the durable address its child already authorizes against.
+	await registry.control("pre-p4", { action: "steer", feedback: "after upgrade" }, cwd);
+	await waitFor("followup on the legacy address", () => harness.followups.length === 1);
+	okCheck("migrate: the legacy id RESUMED — no new anchor session created",
+		harness.anchorCreated.length === 0 && harness.anchorResumed.includes("legacy-coord"));
+	okCheck("migrate: the followup parents to the legacy anchor id",
+		harness.followups[0].childId === "child-9" && harness.followups[0].parentId === "legacy-coord");
+	const rec = await registry.getRun("pre-p4", cwd) as RunRecord;
+	okCheck("migrate: the record now holds nodes[b].parentAnchorSessionId", rec.nodes.b?.parentAnchorSessionId === "legacy-coord");
+	okCheck("migrate: the shared field is retired", !("coordinatorSessionId" in rec));
+	harness.settle("child-9", "<out:after-upgrade>");
+	await waitPausedAt(registry, "pre-p4", cwd, "b");
+	await registry.control("pre-p4", { action: "resume" }, cwd);
+	const done = await waitTerminal(registry, "pre-p4", cwd);
+	okCheck("migrate: the run completes through the migrated anchor", done.state === "completed" && projectNodes(done).nodes.c.status === "done");
+	okCheck("migrate: downstream used the post-upgrade output", harness.starts.find((s) => s.label === "Gamma")?.prompt.includes("<out:after-upgrade>") === true);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

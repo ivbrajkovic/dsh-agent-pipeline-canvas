@@ -82,7 +82,6 @@ export interface RunRecordLike {
 	runId?: string;
 	cwd?: string;
 	sessionId?: string;
-	coordinatorSessionId?: string;
 	/** 2 = the firing log. Absent on legacy v1 records (order + nodes slots). */
 	recordVersion?: number;
 	createdAt?: string;
@@ -95,8 +94,10 @@ export interface RunRecordLike {
 	maxInFlight?: number;
 	/** v2: the firing log — one entry per firing (see RunFiring). */
 	firings?: RunFiring[];
-	/** v1 only: the walk order and per-node status slots (read-only). */
+	/** v1 only: the walk order. */
 	order?: string[];
+	/** v1: per-node status slots; v2: executor control state (each continuable
+	 * node's parent anchor session id). The UI renders from the projection. */
 	nodes?: Record<string, RunNodeStateLike>;
 	/** Bound-overflow record (design principle 4). Reserved. */
 	dropped?: Array<{ nodeId: string; port: string; from: string }>;

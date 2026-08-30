@@ -139,9 +139,9 @@ export declare function runOneAgent(ctx: RunnerContext, options: {
  * subscribeRunEnd). The continuable request mirrors the one-shot request
  * except `outputSchema`, which continuable children cannot produce.
  *
- * The caller supplies the PARENT: the run's disposable coordinator agent (never
- * the user's session agent — settlement notices wake the parent with a real
- * model turn). Throws on failure; the child id is authoritative on success.
+ * The caller supplies the PARENT: the node's disposable parent-anchor agent
+ * (never the user's session agent — settlement notices wake the parent with a
+ * real model turn). Throws on failure; the child id is authoritative on success.
  */
 export declare function startContinuableAgent(ctx: RunnerContext, options: {
     agent: Agent | null | undefined;
@@ -156,9 +156,9 @@ export declare function startContinuableAgent(ctx: RunnerContext, options: {
  * Deliver a steering turn to a continuable child: `subagents.followup` to the
  * SAME child (cold-resuming it from its persisted session when it is not
  * resident — this works across profile restarts). The caller must ensure the
- * parent is the child's exact live parent agent (the run coordinator) and must
- * dispose it after acceptance; the settlement then arrives as a `subagent/end`
- * event whose output is epoch-relative (the new answer only).
+ * parent is the child's exact live parent agent (the node's parent anchor) and
+ * must dispose it after acceptance; the settlement then arrives as a
+ * `subagent/end` event whose output is epoch-relative (the new answer only).
  */
 export declare function steerContinuableAgent(ctx: RunnerContext, options: {
     parent: unknown;

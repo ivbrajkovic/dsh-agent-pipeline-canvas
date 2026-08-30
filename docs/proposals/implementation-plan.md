@@ -52,6 +52,18 @@ node model, and the executor are REBUILT.
   and P7's loop-budget gate describe a DELIVERY count; in a free-running cycle
   a backlog bound never overflows, so P7's "bound drops + records overflow"
   cannot pass as coded. Decide the bound semantics before P7 builds on it.
+- **P4** — the work items cover fresh runs only, but a record written by a
+  P2/P3 build parks a child whose durable parent is the shared
+  `coordinatorSessionId`; a freshly created per-node anchor would break that
+  child's post-restart steer authorization. The first anchor a node needs
+  therefore adopts the shared id and retires the field — check-and-adopt
+  inside one write-chain transition, so two nodes can never claim it. En
+  route: same-node admissions serialize on a per-node chain
+  (`fireableNodes()` does not exclude in-flight nodes, so cyclic re-feed makes
+  concurrent same-node firings reachable before P7), and steering both parked
+  branches after a restart stays P5 surface (a resurrected record re-parks
+  only the `pausedAt` head), so "cold-resume per node after restart" is
+  pinned for the parked node's own anchor.
 
 Protocol: before starting a phase, read this log first. After finishing a
 phase, append one entry **only if the implementation materially diverged from

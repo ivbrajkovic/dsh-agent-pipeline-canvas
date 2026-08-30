@@ -395,11 +395,18 @@ export interface RunFiring {
 /**
  * Durable EXECUTOR CONTROL state for one node — the only per-node data the
  * record still carries. Everything the UI shows is projected from the firing
- * log (./projection.ts), never stored beside it. Empty until per-node parent
- * anchors land (the executor spec §5), which moves the anchor id in here.
+ * log (./projection.ts), never stored beside it.
  */
 export interface RunNodeControlState {
-	/** The node's own parent anchor session id (per-node coordinator; P4). */
+	/**
+	 * The node's own parent anchor session id (executor spec §5): a hidden
+	 * `origin: "subagent"` session that admits the node's continuable children
+	 * and is their durable parent address — the header `interrupt` authorizes
+	 * against and the address a post-restart steer cold-resumes from. Present
+	 * only after the node's first continuable admission; the anchor handle is
+	 * disposed between operations (it costs one session record, zero model
+	 * calls).
+	 */
 	parentAnchorSessionId?: string;
 }
 
@@ -416,14 +423,6 @@ export interface RunRecord {
 	cwd: string;
 	/** The user conversation id the run was started from. */
 	sessionId: string;
-	/**
-	 * The disposable per-run coordinator session id (hidden `origin: "subagent"`
-	 * agent that parents the run's continuable children so settlement notices
-	 * never reach the user's chat). Absent until the first continuable start.
-	 * Kept until the per-node parent anchors land, which replace the shared
-	 * coordinator and move the durable address into `nodes[id]`.
-	 */
-	coordinatorSessionId?: string;
 	/** The record schema version (2 = the firing log). */
 	recordVersion: 2;
 	createdAt: string;
@@ -443,7 +442,8 @@ export interface RunRecord {
 	maxInFlight?: number;
 	/** The firing log — append-ordered, one entry per firing (start order). */
 	firings: RunFiring[];
-	/** Durable executor control state per node (see RunNodeControlState). */
+	/** Durable executor control state per node (see RunNodeControlState) — the
+	 * parent anchor session ids. Empty for one-shot-only runs. */
 	nodes: Record<string, RunNodeControlState>;
 	/** Bound-overflow record (design principle 4): messages dropped at a port bound. Reserved. */
 	dropped?: Array<{ nodeId: string; port: string; from: string }>;

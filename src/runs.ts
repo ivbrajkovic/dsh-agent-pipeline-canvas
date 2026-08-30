@@ -36,15 +36,22 @@
 //   - Non-breakpointed agents run through the historical one-shot path
 //     (runOneAgent), parented to the user's session agent — unchanged.
 //   - Breakpointed agents run as CONTINUABLE subagents (startContinuableAgent)
-//     under a disposable per-run COORDINATOR agent — a hidden `origin:
-//     "subagent"` child of the user's session with `delegationDepth: 0`, so
-//     settlement notices never reach the user's chat (the coordinator is only
-//     live inside control operations; notices to an absent parent are dropped)
-//     and per-agent maxDepth caps keep their absolute semantics. The
-//     coordinator handle is disposed after every operation; its durable
-//     session id is persisted in the record and cold-resumed on demand
-//     (`agents.resume`) after a restart. (Per-node parent anchors — the
-//     coordinator renamed and un-shared — land next.)
+//     under a hidden `origin: "subagent"` PARENT ANCHOR that belongs to the
+//     NODE (executor spec §5) — one anchor per continuable node, never shared
+//     across branches, with `delegationDepth: 0`, so settlement notices never
+//     reach the user's chat (the anchor is only live inside its own node's
+//     control operations; notices to an absent parent are dropped) and
+//     per-agent maxDepth caps keep their absolute semantics. The anchor handle
+//     is disposed after every operation; its durable session id is persisted
+//     in `nodes[nodeId].parentAnchorSessionId` before any child is created and
+//     cold-resumed on demand (`agents.resume`) after a restart. Because
+//     branches never touch each other's anchors there is no shared handle to
+//     race, and a child cannot settle during its own admission, so a
+//     settlement notice can never find a live parent (the wasted model call is
+//     unreachable by construction). Records written before per-node anchors
+//     carried one shared `coordinatorSessionId`; the first anchor a node needs
+//     adopts that id and retires the field, so already-parented children keep
+//     their durable address.
 //
 // Settlement is push-based: a single `subagent/end` listener is registered
 // BEFORE any child starts/steers and settlements are matched by child id. A
@@ -68,9 +75,9 @@
 //               persisted session — works after a restart); after settle, the
 //               epoch output is adopted and the run stays parked. Repeatable.
 //   - abort   — interrupt EVERY in-flight continuable child (the interrupt
-//               target is a set under concurrency; authorized by the
-//               coordinator's durable parentSession, so it works while the
-//               coordinator is disposed), cancel one-shots via the run signal,
+//               target is a set under concurrency; authorized by the child's
+//               node anchor's durable parentSession, so it works while the
+//               anchor is disposed), cancel one-shots via the run signal,
 //               drain every runner, and finalize `state: "aborted"` with
 //               completed outputs preserved. No commit lands after
 //               finalization.
@@ -124,7 +131,7 @@ const RUNS_DIR = ".agent-pipeline/runs";
 // Same discipline as runner.ts: standalone zero-dep plugin, so only the fields
 // actually called are named; the real services satisfy the shapes structurally.
 
-/** The live-Agent fields the coordinator machinery reads. */
+/** The live-Agent fields the parent-anchor machinery reads. */
 interface LiveAgentLike {
 	id: string;
 	options?: Record<string, unknown>;
@@ -136,11 +143,11 @@ interface AgentHandleLike {
 }
 
 /**
- * Structural view of the agents service's coordinator surface
+ * Structural view of the agents service's parent-anchor surface
  * (`ctx.agents.create` / `ctx.agents.resume` — the agent-loop registers the
  * factory in the base bundle, so a plugin may call both).
  */
-interface CoordinatorAgentsService {
+interface AnchorAgentsService {
 	get(sessionId: string): unknown | undefined;
 	create(options: {
 		sessionId: string;
@@ -158,7 +165,7 @@ interface CoordinatorAgentsService {
 
 /** The services a RunRegistry needs (a superset of the runner's seams). */
 export interface RunRegistryServices extends RunnerContext {
-	agents: CoordinatorAgentsService;
+	agents: AnchorAgentsService;
 	subagents: RunnerContext["subagents"];
 	/** Settlement seam — production wires `ctx.on("subagent/end", fn)`. */
 	subscribeRunEnd(fn: (info: SubagentRunEndInfoLike) => void): () => void;
@@ -315,9 +322,22 @@ class RunExecutor {
 	private readonly onSettle: ((record: RunRecord) => void) | undefined;
 	private controlWaiter: ((cmd: ControlCommand) => void) | null = null;
 	private readonly listeners = new Set<(record: RunRecord) => void>();
-	private coordinatorHandle: AgentHandleLike | null = null;
-	/** The continuable children that may have a turn in flight (abort targets). */
-	private readonly inFlightChildren = new Set<string>();
+	/** Live parent-anchor handles by node id — each held ONLY inside its own
+	 * node's admission (the withAnchor bracket), disposed after. */
+	private readonly anchorHandles = new Map<string, AgentHandleLike>();
+	/**
+	 * Per-node admission serialization: admissions of the SAME node queue on
+	 * this chain so each holds the anchor alone (created → admitted → disposed
+	 * before the next begins), while different nodes admit fully concurrently —
+	 * branches never touch each other's anchors, so there is no shared handle
+	 * to race. Unreachable today (a parked breakpoint closes the halt gate
+	 * before its node could re-fire), but a cyclic graph could re-feed a node
+	 * while its firing is in flight, so same-node admissions stay safe anyway.
+	 */
+	private readonly anchorChain = new Map<string, Promise<void>>();
+	/** The continuable children that may have a turn in flight, keyed to their
+	 * node (the abort interrupt authorizes against the NODE's anchor id). */
+	private readonly inFlightChildren = new Map<string, string>();
 	/** The kernel — created at the top of run(); notify() wakes its main loop. */
 	private kernel: Kernel | null = null;
 	/**
@@ -344,16 +364,21 @@ class RunExecutor {
 		this.onSettle = options.onSettle;
 		// The interrupt-on-abort wiring: every live continuable turn is stopped
 		// via the harness interrupt, authorized by the child's durable
-		// parentSession (the coordinator's id) — the coordinator agent itself
-		// need not be live. A parked control wait is woken so the loop can
-		// finalize, and the kernel's main loop is woken off its sleep.
+		// parentSession (its NODE's anchor id — persisted before any child
+		// starts), so the anchor agent itself need not be live. A parked control
+		// wait is woken so the loop can finalize, and the kernel's main loop is
+		// woken off its sleep.
 		this.signal.addEventListener("abort", () => {
-			const coordinatorId = this.record.coordinatorSessionId;
 			const interrupt = this.services.subagents.interrupt;
-			if (coordinatorId !== undefined && typeof interrupt === "function") {
-				for (const childId of [...this.inFlightChildren]) {
+			if (typeof interrupt === "function") {
+				for (const [childId, nodeId] of [...this.inFlightChildren]) {
+					const anchorId = this.record.nodes[nodeId]?.parentAnchorSessionId;
+					if (anchorId === undefined) {
+						this.services.logger.warn(`agent-pipeline: cannot interrupt child "${childId}" — node "${nodeId}" has no parent anchor id`);
+						continue;
+					}
 					try {
-						interrupt.call(this.services.subagents, childId, { kind: "user", parentSessionId: coordinatorId });
+						interrupt.call(this.services.subagents, childId, { kind: "user", parentSessionId: anchorId });
 					} catch (error) {
 						this.services.logger.warn(`agent-pipeline: interrupting child "${childId}" failed: ${String(error)}`);
 					}
@@ -482,15 +507,15 @@ class RunExecutor {
 		return this.sessionAgent;
 	}
 
-	// ---- Coordinator lifecycle ----
+	// ---- Per-node parent-anchor lifecycle (executor spec §5) ------------------
 
 	/**
-	 * Mirror the session agent's options onto the coordinator, minus the runtime
-	 * delegation-depth option: the coordinator's durable header stamps
+	 * Mirror the session agent's options onto the anchor, minus the runtime
+	 * delegation-depth option: the anchor's durable header stamps
 	 * `delegationDepth: 0`, and a stale runtime `subagentDepth` would override
 	 * it and silently shift every pipeline child one level deeper.
 	 */
-	private coordinatorOptions(): Record<string, unknown> | undefined {
+	private anchorOptions(): Record<string, unknown> | undefined {
 		const src = this.sessionAgent && typeof this.sessionAgent.options === "object" && this.sessionAgent.options !== null
 			? this.sessionAgent.options
 			: {};
@@ -500,36 +525,65 @@ class RunExecutor {
 	}
 
 	/**
-	 * Return the run's coordinator agent, creating or cold-resuming it on
-	 * demand. Live ONLY inside control operations: the caller disposes the
-	 * handle right after each start/followup acceptance, so the harness's
-	 * settlement notice — which would otherwise wake the parent with a real
-	 * model turn — finds no live parent and is dropped. The coordinator's
-	 * durable session id is persisted before any child is created, so a later
-	 * interrupt (and a post-restart steer) can authorize against it.
+	 * Run one admission for `nodeId`'s anchor — starting a child or steering
+	 * one — holding the anchor LIVE only for the duration of `admit` and
+	 * disposing it right after, so the harness's settlement notice (which
+	 * would otherwise wake the parent with a real model turn) finds no live
+	 * parent. Admissions of the same node serialize on the per-node chain;
+	 * different nodes never touch each other's anchors.
 	 */
-	private async ensureCoordinator(): Promise<LiveAgentLike> {
-		const agents = this.services.agents;
-		if (this.record.coordinatorSessionId !== undefined) {
-			const live = agents.get(this.record.coordinatorSessionId);
-			if (live !== undefined && live !== null && typeof (live as LiveAgentLike).id === "string") {
-				return live as LiveAgentLike;
+	private async withAnchor<T>(nodeId: string, admit: (anchor: LiveAgentLike) => Promise<T>): Promise<T> {
+		const prior = this.anchorChain.get(nodeId) ?? Promise.resolve();
+		let open: () => void = () => {};
+		const gate = new Promise<void>((resolve) => { open = resolve; });
+		this.anchorChain.set(nodeId, prior.then(() => gate));
+		await prior;
+		try {
+			const anchor = await this.ensureAnchor(nodeId);
+			try {
+				return await admit(anchor);
+			} finally {
+				await this.releaseAnchor(nodeId);
 			}
-			// Not resident (disposed after the last operation, or a restart):
-			// cold-resume the persisted coordinator session.
-			const handle = await agents.resume({
-				resumeSessionId: this.record.coordinatorSessionId,
-				agentOptions: this.coordinatorOptions(),
-				signal: this.signal,
-			});
-			this.coordinatorHandle = handle;
-			return handle.agent;
+		} finally {
+			open();
 		}
+	}
+
+	/**
+	 * Return node `nodeId`'s parent anchor, creating or cold-resuming it on
+	 * demand. The anchor is a durable parent ADDRESS (authorization for
+	 * `interrupt`, the header for cold-resume), never a worker: its session id
+	 * is persisted into `nodes[nodeId]` before any child is created on it, so a
+	 * later interrupt — and a post-restart steer — can authorize against it
+	 * while the handle is disposed.
+	 */
+	private async ensureAnchor(nodeId: string): Promise<LiveAgentLike> {
+		// Adopt-or-create runs INSIDE the write chain, so two nodes can never
+		// both claim a pre-P4 record's one shared coordinator id: the first
+		// adoption deletes the field atomically with its seed; the second sees
+		// neither and creates a fresh anchor of its own.
+		const persisted = await this.transition(() => {
+			const existing = this.record.nodes[nodeId]?.parentAnchorSessionId;
+			if (existing !== undefined) return existing;
+			// A record written before per-node anchors carried ONE shared
+			// coordinator id for all continuable nodes. Adopt it as this node's
+			// anchor — it is the durable address the node's already-parented
+			// children authorize against — and retire the shared field.
+			const legacy = (this.record as { coordinatorSessionId?: string }).coordinatorSessionId;
+			if (typeof legacy === "string" && legacy.length > 0) {
+				this.record.nodes[nodeId] = { parentAnchorSessionId: legacy };
+				delete (this.record as { coordinatorSessionId?: string }).coordinatorSessionId;
+				return legacy;
+			}
+			return undefined;
+		});
+		if (persisted !== undefined) return this.liveOrResumedAnchor(nodeId, persisted);
 		if (this.sessionAgent === undefined) {
-			throw new Error("the run's coordinator cannot be created because the session agent is not live");
+			throw new Error("the node's parent anchor cannot be created because the session agent is not live");
 		}
 		const sessionId = randomUUID();
-		const handle = await agents.create({
+		const handle = await this.services.agents.create({
 			sessionId,
 			meta: {
 				cwd: this.record.cwd,
@@ -540,22 +594,48 @@ class RunExecutor {
 				delegationDepth: 0,
 			},
 			seed: [],
-			agentOptions: this.coordinatorOptions(),
+			agentOptions: this.anchorOptions(),
 			signal: this.signal,
 		});
-		this.coordinatorHandle = handle;
-		await this.transition(() => { this.record.coordinatorSessionId = sessionId; });
+		this.anchorHandles.set(nodeId, handle);
+		await this.transition(() => { this.record.nodes[nodeId] = { parentAnchorSessionId: sessionId }; });
 		return handle.agent;
 	}
 
-	/** Dispose the retained coordinator handle (the session itself persists). */
-	private async releaseCoordinator(): Promise<void> {
-		const handle = this.coordinatorHandle;
-		this.coordinatorHandle = null;
-		if (handle !== null) {
-			try { await handle.dispose(); } catch (error) {
-				this.services.logger.warn(`agent-pipeline: disposing the run coordinator failed: ${String(error)}`);
-			}
+	/**
+	 * The anchor's live agent, or a cold resume of its persisted session. A
+	 * RESIDENT anchor (live without our retained handle — someone else, say the
+	 * user's GUI, made it live) is admitted through but never disposed: we only
+	 * ever dispose handles WE created or resumed.
+	 */
+	private async liveOrResumedAnchor(nodeId: string, anchorId: string): Promise<LiveAgentLike> {
+		const live = this.services.agents.get(anchorId);
+		if (live !== undefined && live !== null && typeof (live as LiveAgentLike).id === "string") {
+			return live as LiveAgentLike;
+		}
+		const handle = await this.services.agents.resume({
+			resumeSessionId: anchorId,
+			agentOptions: this.anchorOptions(),
+			signal: this.signal,
+		});
+		this.anchorHandles.set(nodeId, handle);
+		return handle.agent;
+	}
+
+	/** Dispose the node's retained anchor handle (the session itself persists). */
+	private async releaseAnchor(nodeId: string): Promise<void> {
+		const handle = this.anchorHandles.get(nodeId);
+		if (handle === undefined) return;
+		this.anchorHandles.delete(nodeId);
+		try { await handle.dispose(); } catch (error) {
+			this.services.logger.warn(`agent-pipeline: disposing node "${nodeId}"'s parent anchor failed: ${String(error)}`);
+		}
+	}
+
+	/** Dispose every retained anchor handle (finalization's last touch). */
+	private async releaseAllAnchors(): Promise<void> {
+		for (const nodeId of [...this.anchorHandles.keys()]) {
+			await this.releaseAnchor(nodeId);
 		}
 	}
 
@@ -598,33 +678,27 @@ class RunExecutor {
 	}
 
 	/**
-	 * Run one continuable epoch for `firing`: ensure the coordinator, start a
-	 * FRESH child with the firing's verbatim prompt, dispose the coordinator
-	 * immediately after acceptance, and await the child's first settlement.
+	 * Run one continuable epoch for `firing`: admit it under the NODE's parent
+	 * anchor (held live only for the admission), start a FRESH child with the
+	 * firing's verbatim prompt, and await the child's first settlement.
 	 * Returns the end info, or null when the run was aborted mid-flight.
 	 */
 	private async runContinuableEpoch(firing: RunFiring, agent: Agent, agentById: Map<string, Agent>, prompt: string): Promise<SubagentRunEndInfoLike | null> {
 		let childId = "";
 		try {
-			const coordinator = await this.ensureCoordinator();
-			try {
-				({ childId } = await startContinuableAgent(this.services, {
+			({ childId } = await this.withAnchor(firing.nodeId, (anchor) =>
+				startContinuableAgent(this.services, {
 					agent,
 					agentById,
 					prompt,
-					parent: coordinator,
+					parent: anchor,
 					signal: this.signal,
-				}));
-			} finally {
-				// Dispose between operations: settlement notices to an absent
-				// parent are dropped instead of burning a model turn.
-				await this.releaseCoordinator();
-			}
+				})));
 		} catch (error) {
 			if (this.signal.aborted) return null;
 			throw error;
 		}
-		this.inFlightChildren.add(childId);
+		this.inFlightChildren.set(childId, firing.nodeId);
 		try {
 			await this.transition(() => { firing.childSessionId = childId; });
 			const end = await this.endWaiter.wait(childId, this.signal);
@@ -644,18 +718,14 @@ class RunExecutor {
 	 */
 	private async steerNode(firing: RunFiring, feedback: string): Promise<void> {
 		const childId = firing.childSessionId as string;
-		const coordinator = await this.ensureCoordinator();
-		try {
-			await steerContinuableAgent(this.services, {
-				parent: coordinator,
+		await this.withAnchor(firing.nodeId, (anchor) =>
+			steerContinuableAgent(this.services, {
+				parent: anchor,
 				childId,
 				feedback,
 				signal: this.signal,
-			});
-		} finally {
-			await this.releaseCoordinator();
-		}
-		this.inFlightChildren.add(childId);
+			}));
+		this.inFlightChildren.set(childId, firing.nodeId);
 		try {
 			const end = await this.endWaiter.wait(childId, this.signal);
 			if (this.signal.aborted) return;
@@ -1035,7 +1105,7 @@ class RunExecutor {
 		// behind it, and once onSettle deletes this executor the next workspace
 		// load would sweep a stale `running` disk snapshot over the truth.
 		await this.writeChain;
-		await this.releaseCoordinator();
+		await this.releaseAllAnchors();
 		this.onSettle?.(this.record);
 	}
 
@@ -1196,7 +1266,7 @@ export class RunRegistry {
 		if (!validation.ok) {
 			return { ok: false, error: "graph is invalid: " + validation.errors.map((e) => e.message).join("; ") };
 		}
-		// One-shot children (and the coordinator's creation) need the live
+		// One-shot children (and parent-anchor creation) need the live
 		// session agent; fail with the historical error when it is gone.
 		const sessionAgent = this.services.agents.get(sessionId);
 		if (sessionAgent === undefined) {
@@ -1218,8 +1288,8 @@ export class RunRegistry {
 
 		const now = new Date().toISOString();
 		// The kernel derives its streams from the immutable snapshot; the
-		// firing log fills as nodes fire. Per-node control state is empty until
-		// per-node parent anchors land.
+		// firing log fills as nodes fire. Each continuable node's parent anchor
+		// id appears in `nodes` when the node first admits a child.
 		const record: RunRecord = {
 			runId: randomUUID(),
 			cwd,
@@ -1391,7 +1461,7 @@ export class RunRegistry {
 			// it re-enters the control wait without re-running anything.
 			// Re-resolve the session agent so remaining ONE-SHOT nodes (and a
 			// degraded Rerun) can still start; continuable steer/rerun work
-			// through the cold-resumed coordinator even when it is not live.
+			// through the node's cold-resumed parent anchor even when it is not live.
 			const executor = new RunExecutor(this.services, rec, {
 				resume: true,
 				sessionAgent: this.services.agents.get(rec.sessionId),
