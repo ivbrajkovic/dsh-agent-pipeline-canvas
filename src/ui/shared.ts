@@ -8,7 +8,7 @@
 // (src/client.tsx): the dynamic ctx proxy rejects property reads of undeclared
 // services, and nested Remote namespaces need their own dotted entry.
 
-import type { AgentSettings, PipelineGraph } from "../types.ts";
+import type { AgentSettings, InputPortSpec, PipelineGraph } from "../types.ts";
 
 export const ENDPOINT = "/dsh-agent-pipeline";
 export const SAVE_DEBOUNCE_MS = 250;
@@ -29,6 +29,14 @@ export interface CanvasAgent {
 	systemPrompt?: string;
 	x: number;
 	y: number;
+	/**
+	 * Declared port lists, carried through untouched. The canvas cannot author
+	 * them yet (the ports editor is P7), but a hand-edited pipeline.json must
+	 * survive a load-and-save round trip without losing data — the same rule
+	 * loadAgent applies to settings shapes.
+	 */
+	inputPorts?: InputPortSpec[];
+	outputPorts?: string[];
 	/** The agent's settings (see AgentSettings); absent fields inherit defaults. */
 	settings?: AgentSettings;
 	/** Pause-on-output breakpoint: the run parks after this agent settles. */
@@ -187,6 +195,10 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 			y: Math.round(a.y),
 			input: a.id + ":in",
 			output: a.id + ":out",
+			// Declared port lists pass through verbatim (they supersede the legacy
+			// input/output strings during validation and, later, execution).
+			...(a.inputPorts !== undefined ? { inputPorts: a.inputPorts } : {}),
+			...(a.outputPorts !== undefined ? { outputPorts: a.outputPorts } : {}),
 			...(a.settings ? { settings: a.settings } : {}),
 			...(a.breakpoint === true ? { breakpoint: true } : {}),
 		})),
@@ -202,14 +214,20 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 
 /**
  * Read one persisted agent back into React state: the first-class
- * `systemPrompt` plus the settings. Legacy on-disk shapes are lifted so older
- * pipeline.json files lose nothing: `settings` was named `overrides`, the
- * system prompt was the top-level `persona` and before that
- * `overrides.persona`. Object-shaped setting values round-trip untouched (a
- * hand-edited file must not lose data); the edit form canonicalizes a shape
- * only when that agent is saved again.
+ * `systemPrompt`, the settings, and any declared port lists. Legacy on-disk
+ * shapes are lifted so older pipeline.json files lose nothing: `settings` was
+ * named `overrides`, the system prompt was the top-level `persona` and before
+ * that `overrides.persona`. Object-shaped setting values and the port lists
+ * round-trip untouched (a hand-edited file must not lose data); the edit form
+ * canonicalizes a shape only when that agent is saved again.
  */
-export function loadAgent(raw: unknown): { systemPrompt: string; settings?: AgentSettings; breakpoint?: boolean } {
+export function loadAgent(raw: unknown): {
+	systemPrompt: string;
+	settings?: AgentSettings;
+	breakpoint?: boolean;
+	inputPorts?: InputPortSpec[];
+	outputPorts?: string[];
+} {
 	const rawAgent = (raw ?? {}) as Record<string, unknown>;
 	const rawSettings = loadSettingsShape(rawAgent.settings !== undefined ? rawAgent.settings : rawAgent.overrides);
 	const legacySettingsPersona = rawSettings?.persona;
@@ -227,7 +245,17 @@ export function loadAgent(raw: unknown): { systemPrompt: string; settings?: Agen
 					? legacySettingsPersona
 					: "";
 	const breakpoint = rawAgent.breakpoint === true;
-	return { systemPrompt, settings, ...(breakpoint ? { breakpoint: true } : {}) };
+	// Declared port lists round-trip untouched (see CanvasAgent): the canvas
+	// cannot author them yet, but a hand-written file must not lose them.
+	const inputPorts = Array.isArray(rawAgent.inputPorts) ? (rawAgent.inputPorts as InputPortSpec[]) : undefined;
+	const outputPorts = Array.isArray(rawAgent.outputPorts) ? (rawAgent.outputPorts as string[]) : undefined;
+	return {
+		systemPrompt,
+		settings,
+		...(breakpoint ? { breakpoint: true } : {}),
+		...(inputPorts !== undefined ? { inputPorts } : {}),
+		...(outputPorts !== undefined ? { outputPorts } : {}),
+	};
 }
 
 function loadSettingsShape(raw: unknown): (AgentSettings & { persona?: string }) | undefined {

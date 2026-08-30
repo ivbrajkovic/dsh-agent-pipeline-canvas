@@ -43,6 +43,13 @@ The pipeline is a directed graph over two arrays:
   self-connection, duplicate edge, or a reference to a missing agent/port
   remains an error.
 
+> Until the stream executor lands (phase P3 of
+> [the implementation plan](../proposals/implementation-plan.md)), the
+> sequential runner treats every graph — declared ports included — as the
+> single-port default: one all-of, unbounded input, one output, wired by
+> source/target only. Validation already enforces the declared wiring; the
+> runtime does not consume it yet.
+
 ## Validation: `validateGraph(graph)`
 
 `validateGraph` (in `src/graph.ts`) returns `{ ok, errors, warnings? }`, each

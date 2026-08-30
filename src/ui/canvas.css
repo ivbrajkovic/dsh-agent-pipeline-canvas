@@ -40,6 +40,10 @@
 	color: var(--dsw-alias-state-error-primary);
 	border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent);
 }
+.pipeline-view .pipeline-toolbar .pipeline-validation.warn {
+	color: var(--dsw-alias-state-warning-primary);
+	border-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 45%, transparent);
+}
 .pipeline-issues {
 	background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, var(--dsw-alias-bg-layer-1));
 	border-bottom: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 25%, var(--dsw-alias-border-l1));
@@ -50,7 +54,12 @@
 	flex-direction: column;
 	gap: 3px;
 }
+.pipeline-issues.warnings-only {
+	background: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 10%, var(--dsw-alias-bg-layer-1));
+	border-bottom-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 25%, var(--dsw-alias-border-l1));
+}
 .pipeline-issue { font-size: 12px; color: var(--dsw-alias-state-error-primary); line-height: 1.4; }
+.pipeline-issue.warn { color: var(--dsw-alias-state-warning-primary); }
 .pipeline-body { flex: 1; min-height: 0; display: flex; border-top: 1px solid var(--dsw-alias-border-l1); }
 .pipeline-palette {
 	width: 170px;

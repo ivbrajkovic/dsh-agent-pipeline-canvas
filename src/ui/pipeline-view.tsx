@@ -527,6 +527,8 @@ function PipelineView({
 						...(loaded.systemPrompt.length > 0 ? { systemPrompt: loaded.systemPrompt } : {}),
 						instructions: String(r.instructions || ""),
 						x: Number(r.x) || 0, y: Number(r.y) || 0,
+						...(loaded.inputPorts !== undefined ? { inputPorts: loaded.inputPorts } : {}),
+						...(loaded.outputPorts !== undefined ? { outputPorts: loaded.outputPorts } : {}),
 						settings: loaded.settings,
 						...(r.breakpoint === true ? { breakpoint: true } : {}),
 					};
@@ -671,6 +673,7 @@ function PipelineView({
 
 	const graphData = buildGraph(agents, connections);
 	const validation: ValidationResult = validateGraph(graphData);
+	const warnCount = validation.warnings?.length ?? 0;
 	const jsonText = JSON.stringify(graphData, null, 2);
 
 	let configAgent: CanvasAgent | null = null;
@@ -690,11 +693,15 @@ function PipelineView({
 				<div className="spacer" />
 				<span className="stat">{agents.length + " agents · " + connections.length + " connections"}</span>
 				<span
-					className={"pipeline-validation" + (validation.ok ? " ok" : " err")}
-					title={validation.ok ? "Graph is a valid DAG" : "Graph has validation issues (see the issue list below)"}
+					className={"pipeline-validation" + (validation.ok ? (warnCount > 0 ? " warn" : " ok") : " err")}
+					title={validation.ok
+						? (warnCount > 0 ? "Graph is valid — " + warnCount + " warning" + (warnCount === 1 ? "" : "s") + " (see below)" : "Graph is valid")
+						: "Graph has validation issues (see the issue list below)"}
 					role="status"
 				>
-					{validation.ok ? "Valid" : validation.errors.length + " issue" + (validation.errors.length === 1 ? "" : "s")}
+					{validation.ok
+						? (warnCount > 0 ? "Valid · " + warnCount + " warning" + (warnCount === 1 ? "" : "s") : "Valid")
+						: validation.errors.length + " issue" + (validation.errors.length === 1 ? "" : "s")}
 				</span>
 				{runActive ? (
 					<span className="pipeline-run-live" title="A run is active in this workspace — canvas edits affect the NEXT run only">
@@ -727,10 +734,13 @@ function PipelineView({
 					>Abort</button>
 				) : null}
 			</div>
-			{validation.ok ? null : (
-				<div className="pipeline-issues">
+			{validation.ok && warnCount === 0 ? null : (
+				<div className={"pipeline-issues" + (validation.ok ? " warnings-only" : "")}>
 					{validation.errors.map((err) => (
 						<div key={err.code + ":" + err.message} className="pipeline-issue">{err.message}</div>
+					))}
+					{(validation.warnings ?? []).map((warn) => (
+						<div key={warn.code + ":" + warn.message} className="pipeline-issue warn">{warn.message}</div>
 					))}
 				</div>
 			)}
