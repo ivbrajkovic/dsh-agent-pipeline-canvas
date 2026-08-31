@@ -1,6 +1,7 @@
 # The node context menu — per-agent actions on the canvas
 
-**Status: Planned** — phased plan, not started. Reviewed via the scrutinize
+**Status: Built** — all three phases shipped (N1 wiring, N2 Go to transcript,
+N3 hardening + docs). Reviewed via the scrutinize
 pass before implementation (verdict: fix-then-ship; findings applied — the
 menu reuses the harness `Menu` primitive, close-on-activation and the
 registration-commit step are pinned). The living phase-delta handoff lives in

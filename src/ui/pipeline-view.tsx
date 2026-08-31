@@ -299,6 +299,7 @@ function PipelineView({
 		dragRef.current = null; connectRef.current = null;
 		setSeq(1); idRef.current = 0;
 		setRunResult(null); setResultOpen(false); setShowRunModal(false); setDoneRun(null);
+		setNodeMenu(null);
 		runTextRef.current = ""; runFilesRef.current = [];
 	}
 
@@ -312,6 +313,9 @@ function PipelineView({
 	function onNodeContextMenu(e: React.MouseEvent, agent: CanvasAgent) {
 		e.preventDefault(); e.stopPropagation();
 		setSelectedId(agent.id);
+		// A connection gesture owns the pointer; it keeps its cancel path
+		// (Escape) and the right-click opens nothing.
+		if (connectRef.current) return;
 		setNodeMenu({ agentId: agent.id, x: e.clientX, y: e.clientY });
 	}
 	function nodeMenuEntries(agent: CanvasAgent): MenuEntry[] {
@@ -413,6 +417,9 @@ function PipelineView({
 		setDoneRun(rec);
 		setRunResult(recordToResult(rec));
 		setResultOpen(true);
+		// Terminal transition opens the result modal; the menu's host-styled
+		// portal layers above modals, so it must go rather than stack.
+		setNodeMenu(null);
 	}
 
 	// Terminal record → the result modal's shape: the contract outputs keyed by
