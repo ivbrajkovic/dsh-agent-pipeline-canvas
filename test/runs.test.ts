@@ -81,9 +81,10 @@ interface HeldOneshot {
 }
 
 /** The scripted harness: services + recording + a settle() the test drives. */
-function makeHarness(options: { continuable?: boolean; holdOneshots?: boolean } = {}) {
+function makeHarness(options: { continuable?: boolean; holdOneshots?: boolean; liveSessions?: string[] } = {}) {
 	const continuable = options.continuable !== false;
 	const holdOneshots = options.holdOneshots === true;
+	const liveSessions = options.liveSessions ?? ["sess"];
 	const listeners = new Set<EndListener>();
 	const starts: Array<{ kind: string; childId: string; label: string; prompt: string; parentId: string; request: Record<string, unknown> }> = [];
 	const followups: Array<{ childId: string; text: string; parentId: string }> = [];
@@ -136,7 +137,7 @@ function makeHarness(options: { continuable?: boolean; holdOneshots?: boolean } 
 	};
 	const agentsService = {
 		get: (id: string) => {
-			if (id === "sess") return { id: "sess", options: { provider: "ds", model: "m-1", subagentDepth: 99 } };
+			if (liveSessions.includes(id)) return { id, options: { provider: "ds", model: "m-1", subagentDepth: 99 } };
 			if (liveAnchors.has(id)) return { id, options: {} };
 			return undefined;
 		},
@@ -817,6 +818,139 @@ await withTempDir(async (cwd) => {
 		input: "x",
 	});
 	okCheck("single: other workspace allowed", other.ok === true);
+});
+
+// --- the single-active rule and discovery are per (workspace, session) ------
+// Two sessions in ONE workspace run concurrently; the 409 fires only within
+// one session; scoped discovery reports each session only its own runs.
+await withTempDir(async (cwd) => {
+	const harness = makeHarness({ liveSessions: ["sess-a", "sess-b"] });
+	const registry = new RunRegistry(harness.services);
+	const graph = { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }], connections: [] };
+	const runA = await registry.startRun({ sessionId: "sess-a", cwd, graph, input: "x" });
+	okCheck("scoped: session A starts", runA.ok === true);
+	if (!runA.ok) return;
+	await waitFor("A's continuable start", () => harness.starts.length === 1);
+	harness.settle(harness.starts[0].childId, "<out:a>");
+	await waitPausedAt(registry, runA.runId, cwd, "a");
+	const againA = await registry.startRun({ sessionId: "sess-a", cwd, graph, input: "y" });
+	okCheck("scoped: same-session second start rejected with the active id", againA.ok === false && againA.activeRunId === runA.runId);
+	// A DIFFERENT session in the SAME workspace runs concurrently.
+	const runB = await registry.startRun({ sessionId: "sess-b", cwd, graph, input: "x" });
+	okCheck("scoped: different session, same workspace, starts concurrently", runB.ok === true);
+	if (!runB.ok) return;
+	await waitFor("B's continuable start", () => harness.starts.length === 2);
+	harness.settle(harness.starts[1].childId, "<out:b>");
+	await waitPausedAt(registry, runB.runId, cwd, "a");
+	okCheck("scoped: both runs active at once (the disk check did not see across sessions)",
+		(await registry.getRun(runA.runId, cwd))?.state === "paused" && (await registry.getRun(runB.runId, cwd))?.state === "paused");
+	// Discovery: each session sees only its own run.
+	okCheck("scoped: activeRunForCwd reports each session only its own run",
+		(await registry.activeRunForCwd(cwd, "sess-a"))?.runId === runA.runId
+		&& (await registry.activeRunForCwd(cwd, "sess-b"))?.runId === runB.runId);
+	okCheck("scoped: latestRunForCwd filters by session too",
+		(await registry.latestRunForCwd(cwd, "sess-a"))?.runId === runA.runId
+		&& (await registry.latestRunForCwd(cwd, "sess-b"))?.runId === runB.runId);
+	okCheck("scoped: the unscoped legacy path still reports an active run of the workspace",
+		(await registry.activeRunForCwd(cwd)) !== null);
+	// The 409 fires only WITHIN one session: B's own start names B's run.
+	const againB = await registry.startRun({ sessionId: "sess-b", cwd, graph, input: "z" });
+	okCheck("scoped: B's 409 names B's run, not A's", againB.ok === false && againB.activeRunId === runB.runId);
+});
+
+// --- a scoped sweep touches only its own session's records ------------------
+// Two stale `running` records left by dead processes: a session-scoped
+// discovery sweeps ONLY its own; the unscoped legacy call still sweeps both.
+await withTempDir(async (cwd) => {
+	const staleRecord = (runId: string, sessionId: string): RunRecord => ({
+		runId, cwd, sessionId,
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "running",
+		graph: { agents: [agent("a", "Alpha", "A.")], connections: [] },
+		input: "x",
+		recordVersion: 2,
+		firings: [{ firingId: "f-001", nodeId: "a", seq: 1, status: "running", input: "a prompt", startedAt: "t" }],
+		nodes: {},
+	});
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "stale-a.json"), JSON.stringify(staleRecord("stale-a", "sess-a"), null, 2));
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "stale-b.json"), JSON.stringify(staleRecord("stale-b", "sess-b"), null, 2));
+	const registry = new RunRegistry(makeHarness().services);
+	const readDisk = async (runId: string) => JSON.parse(await readFile(join(cwd, ".agent-pipeline", "runs", runId + ".json"), "utf8")) as RunRecord;
+	okCheck("sweep-scope: scoped discovery of A finds nothing active", (await registry.activeRunForCwd(cwd, "sess-a")) === null);
+	okCheck("sweep-scope: A's stale record swept, B's left untouched on disk",
+		(await readDisk("stale-a")).state === "aborted" && (await readDisk("stale-b")).state === "running");
+	okCheck("sweep-scope: the unscoped legacy call still sweeps BOTH",
+		(await registry.activeRunForCwd(cwd)) === null && (await readDisk("stale-b")).state === "aborted");
+});
+
+// --- a control command resurrects only the TARGET run's session -------------
+// Two paused records survive a "restart". Controlling A's run (first contact)
+// must not resurrect B's paused record; controlling B's in turn works.
+await withTempDir(async (cwd) => {
+	const pausedRecord = (runId: string, sessionId: string): RunRecord => ({
+		runId, cwd, sessionId,
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "paused",
+		pausedAt: "f-001",
+		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }], connections: [] },
+		input: "x",
+		recordVersion: 2,
+		firings: [{ firingId: "f-001", nodeId: "a", seq: 1, status: "paused", input: "A.\n\n## Input\nx", output: "<out:a>", stopReason: "completed", childSessionId: "child-9", startedAt: "t" }],
+		nodes: {},
+	});
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "paused-a.json"), JSON.stringify(pausedRecord("paused-a", "sess-a"), null, 2));
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "paused-b.json"), JSON.stringify(pausedRecord("paused-b", "sess-b"), null, 2));
+	const harness = makeHarness({ liveSessions: ["sess-a", "sess-b"] });
+	const registry = new RunRegistry(harness.services);
+	const abortedA = await registry.control("paused-a", { action: "abort" }, cwd);
+	okCheck("ctrl-scope: aborting A's run across the restart succeeds", abortedA.ok === true);
+	const bDisk = JSON.parse(await readFile(join(cwd, ".agent-pipeline", "runs", "paused-b.json"), "utf8")) as RunRecord;
+	okCheck("ctrl-scope: A's control command left B's paused record untouched on disk",
+		bDisk.state === "paused" && bDisk.firings[0].status === "paused");
+	okCheck("ctrl-scope: B's run has no live executor after A's control command", registry.subscribe("paused-b", () => {}) === null);
+	await waitFor("run-a finalized aborted on disk", async () => {
+		const disk = JSON.parse(await readFile(join(cwd, ".agent-pipeline", "runs", "paused-a.json"), "utf8")) as RunRecord;
+		return disk.state === "aborted";
+	});
+	const abortedB = await registry.control("paused-b", { action: "abort" }, cwd);
+	okCheck("ctrl-scope: B's own run is then controllable across the restart", abortedB.ok === true);
+	await waitFor("run-b finalized aborted on disk", async () => {
+		const disk = JSON.parse(await readFile(join(cwd, ".agent-pipeline", "runs", "paused-b.json"), "utf8")) as RunRecord;
+		return disk.state === "aborted";
+	});
+});
+
+// --- a MISSING-sessionId record: invisible scoped, served unscoped ----------
+// No record this code writes lacks `sessionId` (startRun has always required
+// it); a hand-crafted one must stay invisible to SCOPED queries — its file
+// untouched — and keep being served only by the unscoped legacy path.
+await withTempDir(async (cwd) => {
+	const naked = {
+		runId: "naked", cwd,
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		state: "paused",
+		pausedAt: "f-001",
+		graph: { agents: [{ ...agent("a", "Alpha", "A."), breakpoint: true }], connections: [] },
+		input: "x",
+		recordVersion: 2,
+		firings: [{ firingId: "f-001", nodeId: "a", seq: 1, status: "paused", input: "A.\n\n## Input\nx", output: "<out:a>", stopReason: "completed", childSessionId: "child-9", startedAt: "t" }],
+		nodes: {},
+	} as unknown as RunRecord; // no sessionId — hand-crafted through unknown
+	await mkdir(join(cwd, ".agent-pipeline", "runs"), { recursive: true });
+	await writeFile(join(cwd, ".agent-pipeline", "runs", "naked.json"), JSON.stringify(naked, null, 2));
+	const registry = new RunRegistry(makeHarness().services);
+	okCheck("naked: invisible to scoped discovery", (await registry.activeRunForCwd(cwd, "sess")) === null);
+	const untouched = JSON.parse(await readFile(join(cwd, ".agent-pipeline", "runs", "naked.json"), "utf8")) as RunRecord;
+	okCheck("naked: the scoped call left the file untouched (still paused, not resurrected)", untouched.state === "paused");
+	const unscoped = await registry.activeRunForCwd(cwd);
+	okCheck("naked: the unscoped legacy path still serves it (paused record resurrects)",
+		unscoped !== null && unscoped.runId === "naked" && unscoped.state === "paused");
+	okCheck("naked: the resurrected run is live (controllable)", registry.subscribe("naked", () => {}) !== null);
 });
 
 // --- degraded deployment: no continuable support ----------------------------
