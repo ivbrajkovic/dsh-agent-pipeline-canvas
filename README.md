@@ -128,7 +128,7 @@ restart. Details, caveats, and route verification:
 
 ```
 npm run typecheck   # tsc -p tsconfig.json (whole tree, noEmit)
-npm test            # plain tsx scripts: validate + execution + message + runner + runs
+npm test            # plain tsx scripts: validate + execution + message + runner + runs + storage
 npm run build       # tsc -p tsconfig.build.json && tsdown → lib/
 ```
 
