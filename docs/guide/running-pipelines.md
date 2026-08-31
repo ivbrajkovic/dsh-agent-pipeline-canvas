@@ -250,7 +250,14 @@ status strip (a failed run shows the failure banner and the per-agent
 statuses; a failed firing's transcript stays openable). Each row also
 carries a **Transcript** button (when the run published a child session): it
 opens the agent's durable child session, which holds the agent's full
-transcript. The route hands the selection to the child's **Chat** tab: the
+transcript. The canvas reaches the same child session in place, without the
+modal: the [node context menu](canvas.md#nodes-ports-and-connections) heads
+with **Go to transcript** (right-click an agent; enabled once the node has a
+child session — live, paused, and restored-last-run records all project one,
+and a running one-shot node gains one only when its firing settles), and the
+paused-run inspection modal carries a **Transcript** button for the parked
+child. All of these ride the same open route. It hands the selection to the
+child's **Chat** tab: the
 conversation's view-tab selection is a per-session store, so a child whose
 remembered tab is this canvas would otherwise reopen on the pipeline instead
 of its transcript. The switch is requested just before the open and consumed

@@ -46,6 +46,20 @@ edits in one are visible in the other.
   [pause-on-output breakpoint](running-pipelines.md#breakpoints-grouped-pause-the-queue-resume--rerun--steer--abort);
   the pencil opens the configuration panel.
 
+**Node context menu.** Right-click a node to select it and open a small
+per-agent menu (the browser's native menu is suppressed on nodes only — the
+canvas background keeps its own): **Go to transcript**, **Edit agent**,
+**Arm breakpoint** / **Disarm breakpoint** (the label reflects the state),
+and **Delete agent** (danger). **Go to transcript** is enabled once the node
+has a child session — live, paused, and restored-last-run records all
+project one; a running one-shot node gains its session only when its firing
+settles, and a never-fired node shows the row disabled. Every activation
+closes the menu before its action takes effect; Escape or a press outside
+dismisses it; while a connection drag is in flight a right-click opens
+nothing (Escape stays the gesture's cancel path). The transcript route is
+described in
+[running-pipelines.md](running-pipelines.md#results-and-the-continue-routes).
+
 ## Validation while editing
 
 The graph is validated **as you edit**. The toolbar shows a *Valid* /
