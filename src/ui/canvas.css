@@ -255,17 +255,16 @@
 }
 .pipeline-port {
 	position: absolute;
-	top: 50%;
-	transform: translateY(-50%);
 	width: 14px;
 	height: 14px;
 	border-radius: 50%;
 	background: var(--dsw-alias-bg-overlay);
 	border: 2px solid var(--dsw-alias-brand-primary);
 	cursor: crosshair;
+	/* left/top carry the anchor point (see portAnchor) — center on it. */
+	transform: translate(-50%, -50%);
 }
-.pipeline-port.in { left: -8px; }
-.pipeline-port.out { right: -8px; border-color: var(--dsw-alias-state-success-primary); }
+.pipeline-port.out { border-color: var(--dsw-alias-state-success-primary); }
 .pipeline-port.hover { box-shadow: 0 0 0 4px var(--dsw-alias-brand-primary); }
 .pipeline-json { border-top: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); }
 .pipeline-json pre {

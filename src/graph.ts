@@ -57,6 +57,11 @@ import { portGraph } from "./execution.ts";
 /** Input-port delivery policies a spec may declare. */
 const PORT_POLICIES = ["all-of", "any-of"] as const;
 
+/** Node edges a port may render on (edge-routing iteration 2; geometry only). */
+const PORT_SIDES = ["left", "right", "top", "bottom"] as const;
+const DEFAULT_INPUT_SIDE = "left";
+const DEFAULT_OUTPUT_SIDE = "right";
+
 /**
  * Validate a pipeline graph against the port-graph contract above.
  *
@@ -99,7 +104,7 @@ export function validateGraph(graph: unknown): ValidationResult {
 			continue;
 		}
 		const rec = agent as {
-			id?: unknown; input?: unknown; output?: unknown; inputPorts?: unknown; outputPorts?: unknown;
+			id?: unknown; input?: unknown; output?: unknown; inputPorts?: unknown; outputPorts?: unknown; outputPortSides?: unknown;
 		};
 		const id = rec.id == null ? "" : String(rec.id);
 		if (id.length === 0) {
@@ -121,7 +126,7 @@ export function validateGraph(graph: unknown): ValidationResult {
 			errors.push({ code: "agent-port-invalid", message: `agent "${id}" has an invalid output port` });
 		}
 
-		validatePortDeclarations(id, rec, errors);
+		validatePortDeclarations(id, rec, errors, warnings);
 	}
 
 	// ---- Port resolution (declared lists, else the legacy defaults) --------
@@ -249,17 +254,23 @@ function argStr(value: unknown): string {
 /**
  * Validate one agent's `inputPorts` / `outputPorts` declarations: lists when
  * present; each input port a spec with a non-empty string name, a known policy
- * ("all-of" | "any-of") and — when present — a positive-integer bound; each
- * output port a non-empty string name; names unique within their list.
+ * ("all-of" | "any-of") and — when present — a positive-integer bound and a
+ * known side; each output port a non-empty string name; names unique within
+ * their list; `outputPortSides` (when present) a name→side map over the
+ * declared output ports. Malformed side data is an error. The side cap
+ * (edge-routing iteration 2 — at most one port of a node per resolved side)
+ * is a WARNING, `cycle-present`-style: default sides stack multi-port nodes
+ * that predate explicit sides, the canvas renders the stack, and the warning
+ * tells the author how to spread the ports.
  */
-function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outputPorts?: unknown }, errors: ValidationError[]): void {
+function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outputPorts?: unknown; outputPortSides?: unknown }, errors: ValidationError[], warnings: ValidationError[]): void {
 	if (rec.inputPorts !== undefined) {
 		if (!Array.isArray(rec.inputPorts)) {
 			errors.push({ code: "agent-port-invalid", message: `agent "${id}" has an invalid inputPorts declaration (must be an array)` });
 		} else {
 			const seen = new Set<string>();
 			for (const spec of rec.inputPorts) {
-				const s = spec as { name?: unknown; policy?: unknown; bound?: unknown } | null | undefined;
+				const s = spec as { name?: unknown; policy?: unknown; bound?: unknown; side?: unknown } | null | undefined;
 				if (s == null || typeof s !== "object" || Array.isArray(s) || typeof s.name !== "string" || s.name.length === 0) {
 					errors.push({ code: "agent-port-invalid", message: `agent "${id}" has an input port without a name` });
 					continue;
@@ -275,6 +286,9 @@ function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outpu
 				if (s.bound !== undefined && (typeof s.bound !== "number" || !Number.isInteger(s.bound) || s.bound < 1)) {
 					const shown = typeof s.bound === "number" ? String(s.bound) : JSON.stringify(s.bound);
 					errors.push({ code: "agent-port-bound-invalid", message: `agent "${id}" input port "${s.name}" has an invalid bound ${shown} (must be a positive integer)` });
+				}
+				if (s.side !== undefined && !(PORT_SIDES as readonly unknown[]).includes(s.side)) {
+					errors.push({ code: "agent-port-side-invalid", message: `agent "${id}" input port "${s.name}" has an unknown side "${argStr(s.side)}" (expected "left", "right", "top" or "bottom")` });
 				}
 			}
 		}
@@ -295,6 +309,58 @@ function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outpu
 				}
 				seen.add(name);
 			}
+		}
+	}
+	// Output-port side map: a plain object of declared-output-port name → side.
+	if (rec.outputPortSides !== undefined) {
+		if (rec.outputPortSides == null || typeof rec.outputPortSides !== "object" || Array.isArray(rec.outputPortSides)) {
+			errors.push({ code: "agent-port-side-invalid", message: `agent "${id}" has an invalid outputPortSides declaration (must be an object of port name → side)` });
+		} else {
+			const declared = Array.isArray(rec.outputPorts)
+				? new Set(rec.outputPorts.filter((n): n is string => typeof n === "string" && n.length > 0))
+				: new Set<string>();
+			for (const [name, side] of Object.entries(rec.outputPortSides as Record<string, unknown>)) {
+				if (!(PORT_SIDES as readonly unknown[]).includes(side)) {
+					errors.push({ code: "agent-port-side-invalid", message: `agent "${id}" output port "${name}" has an unknown side "${argStr(side)}" (expected "left", "right", "top" or "bottom")` });
+				}
+				if (!declared.has(name)) {
+					errors.push({ code: "agent-port-side-invalid", message: `agent "${id}" outputPortSides names "${name}" but its declared output ports are: ${declared.size > 0 ? [...declared].join(", ") : "none"}` });
+				}
+			}
+		}
+	}
+	// The side cap: resolve every port's side (declared, else the side default;
+	// an absent port list still contributes its one implicit default port) and
+	// flag a side two or more ports land on.
+	const bySide = new Map<string, string[]>();
+	const take = (side: string, port: string): void => {
+		bySide.set(side, (bySide.get(side) ?? []).concat([port]));
+	};
+	if (Array.isArray(rec.inputPorts)) {
+		for (const spec of rec.inputPorts) {
+			const s = spec as { name?: unknown; side?: unknown } | null | undefined;
+			if (s != null && typeof s === "object" && typeof s.name === "string" && s.name.length > 0) {
+				take(s.side === undefined ? DEFAULT_INPUT_SIDE : String(s.side), "in:" + s.name);
+			}
+		}
+	} else {
+		take(DEFAULT_INPUT_SIDE, "in");
+	}
+	if (Array.isArray(rec.outputPorts)) {
+		const sides = (rec.outputPortSides != null && typeof rec.outputPortSides === "object" && !Array.isArray(rec.outputPortSides))
+			? (rec.outputPortSides as Record<string, unknown>)
+			: {};
+		for (const name of rec.outputPorts) {
+			if (typeof name !== "string" || name.length === 0) continue;
+			const side = sides[name] === undefined ? DEFAULT_OUTPUT_SIDE : String(sides[name]);
+			take(side, "out:" + name);
+		}
+	} else {
+		take(DEFAULT_OUTPUT_SIDE, "out");
+	}
+	for (const [side, ports] of bySide) {
+		if (ports.length > 1) {
+			warnings.push({ code: "agent-port-side-conflict", message: `agent "${id}" puts more than one port on the ${side} edge: ${ports.join(", ")} — they render stacked; assign distinct sides to spread them` });
 		}
 	}
 }

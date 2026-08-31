@@ -30,9 +30,23 @@
 // stale saved id, a failed fetch) is kept as an extra option, so it stays
 // visible and savable; any failure just shrinks the lists.
 import * as React from 'react';
-import type { AgentSettings, InputPortSpec, OutputBinding } from '../types.ts';
+import type { AgentSettings, InputPortSpec, OutputBinding, PortSide } from '../types.ts';
 import { ENDPOINT, type CanvasAgent } from './shared.ts';
 import './agent-config.css';
+
+/** The node edges a port may render on; inputs default left, outputs right. */
+const PORT_SIDES: Array<{ value: PortSide; label: string }> = [
+  { value: 'left', label: 'left' },
+  { value: 'right', label: 'right' },
+  { value: 'top', label: 'top' },
+  { value: 'bottom', label: 'bottom' },
+];
+
+function asSide(value: unknown): PortSide | null {
+  return value === 'left' || value === 'right' || value === 'top' || value === 'bottom'
+    ? value
+    : null;
+}
 
 /** One registered provider route (the Host options route's shape). */
 interface ProviderOption {
@@ -70,6 +84,7 @@ function AgentConfigPanel({
     breakpoint?: boolean;
     inputPorts?: InputPortSpec[];
     outputPorts?: string[];
+    outputPortSides?: Record<string, PortSide>;
     bindings?: OutputBinding[];
   }) => void;
   onClose: () => void;
@@ -79,6 +94,12 @@ function AgentConfigPanel({
     name: string;
     policy: 'all-of' | 'any-of';
     bound: string;
+    side: PortSide;
+  }
+  /** One editable output-port row (bound as text until save canonicalizes). */
+  interface OutputPortRow {
+    name: string;
+    side: PortSide;
   }
   /** One editable binding row (`value` empty = catch-all). */
   interface BindingRow {
@@ -128,10 +149,11 @@ function AgentConfigPanel({
       ? JSON.stringify(settings.outputSchema, null, 2)
       : '',
   );
-  // The stream-node port surface (P7): declared input ports (name / policy /
-  // bound rows), declared output ports (comma-separated), and the output
-  // bindings that route the structured result to a port. Empty editors keep
-  // the single default in/out ports — the historical shape.
+  // The stream-node port surface (P7 + edge-routing sides): declared input
+  // ports (name / policy / bound / side rows), declared output ports (name /
+  // side rows), and the output bindings that route the structured result to a
+  // port. Empty editors keep the single default in/out ports — the
+  // historical shape.
   const [inputPortRows, setInputPortRows] = React.useState<InputPortRow[]>(
     Array.isArray(agent.inputPorts)
       ? agent.inputPorts
@@ -140,11 +162,16 @@ function AgentConfigPanel({
             name: p.name,
             policy: p.policy === 'any-of' ? 'any-of' : ('all-of' as const),
             bound: p.bound != null ? String(p.bound) : '',
+            side: asSide(p.side) ?? 'left',
           }))
       : [],
   );
-  const [outputPortsText, setOutputPortsText] = React.useState(
-    Array.isArray(agent.outputPorts) ? agent.outputPorts.join(', ') : '',
+  const [outputPortRows, setOutputPortRows] = React.useState<OutputPortRow[]>(
+    Array.isArray(agent.outputPorts)
+      ? agent.outputPorts
+          .filter((n) => typeof n === 'string' && n.length > 0)
+          .map((n) => ({ name: n, side: asSide(agent.outputPortSides?.[n]) ?? 'right' }))
+      : [],
   );
   const [bindingRows, setBindingRows] = React.useState<BindingRow[]>(
     Array.isArray(agent.bindings)
@@ -329,12 +356,14 @@ function AgentConfigPanel({
   const models = catalog?.models ?? [];
 
   // Canonicalize the port surface: named rows survive; a bound is a positive
-  // integer; binding rows need both a field and a port (a row's empty value
+  // integer; a non-default side rides the port (input) or the side map
+  // (output); binding rows need both a field and a port (a row's empty value
   // means the catch-all). Empty editors yield undefined — the single default
   // in/out ports, exactly the historical shape.
   function assemblePorts(): {
     inputPorts?: InputPortSpec[];
     outputPorts?: string[];
+    outputPortSides?: Record<string, PortSide>;
     bindings?: OutputBinding[];
   } {
     const ports = inputPortRows
@@ -344,6 +373,7 @@ function AgentConfigPanel({
         const spec: InputPortSpec = {
           name: portName,
           ...(row.policy === 'any-of' ? { policy: 'any-of' } : {}),
+          ...(row.side !== 'left' ? { side: row.side } : {}),
         };
         const bound = row.bound.trim();
         if (/^\d+$/.test(bound) && parseInt(bound, 10) >= 1) {
@@ -352,10 +382,13 @@ function AgentConfigPanel({
         return spec;
       })
       .filter((s): s is InputPortSpec => s !== null);
-    const outs = outputPortsText
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
+    const outs = outputPortRows.filter((row) => row.name.trim().length > 0);
+    const outNames = outs.map((row) => row.name.trim());
+    const outSides = outs.filter((row) => row.side !== 'right');
+    const outputPortSides =
+      outs.length > 0 && outSides.length > 0
+        ? Object.fromEntries(outSides.map((row) => [row.name.trim(), row.side]))
+        : undefined;
     const rules = bindingRows
       .map((row): OutputBinding | null => {
         const fieldName = row.field.trim();
@@ -367,7 +400,8 @@ function AgentConfigPanel({
       .filter((b): b is OutputBinding => b !== null);
     return {
       ...(ports.length > 0 ? { inputPorts: ports } : {}),
-      ...(outs.length > 0 ? { outputPorts: outs } : {}),
+      ...(outNames.length > 0 ? { outputPorts: outNames } : {}),
+      ...(outputPortSides !== undefined ? { outputPortSides } : {}),
       ...(rules.length > 0 ? { bindings: rules } : {}),
     };
   }
@@ -631,6 +665,30 @@ function AgentConfigPanel({
                       }}
                       onKeyDown={stopKey}
                     />
+                    <select
+                      value={row.side}
+                      title='Node edge this port renders on — a loop whose two ports sit on the same vertical edge arcs over or under the band'
+                      aria-label='Input port side'
+                      style={{ flex: '0 0 auto', width: 'auto' }}
+                      onChange={(e) => {
+                        const side = asSide(e.target.value) ?? 'left';
+                        setInputPortRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, side } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    >
+                      {PORT_SIDES.map((s) => (
+                        <option
+                          key={s.value}
+                          value={s.value}
+                        >
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
                     <button
                       className='pipeline-btn config-mini-btn'
                       title='Remove this input port'
@@ -646,21 +704,80 @@ function AgentConfigPanel({
                 className='pipeline-btn config-mini-btn'
                 title='Declare a named input port'
                 onClick={() => {
-                  setInputPortRows((prev) => prev.concat([{ name: '', policy: 'all-of', bound: '' }]));
+                  setInputPortRows((prev) => prev.concat([{ name: '', policy: 'all-of', bound: '', side: 'left' }]));
                 }}
               >+ Add input port</button>
             </div>
             <div className='config-row'>
               <label>Output ports</label>
-              <input
-                value={outputPortsText}
-                placeholder='comma-separated names — empty keeps the default "out" port'
-                title='Named output ports. A firing emits on some of them and not on others (per the bindings below), or on all of them without bindings.'
-                onChange={(e) => {
-                  setOutputPortsText(e.target.value);
+              {outputPortRows.length === 0 ? (
+                <div className='config-hint'>
+                  Default: one "out" port. A firing emits on some of them and
+                  not on others (per the bindings below), or on all of them
+                  without bindings.
+                </div>
+              ) : (
+                outputPortRows.map((row, index) => (
+                  <div
+                    key={index}
+                    className='config-mini-row'
+                  >
+                    <input
+                      value={row.name}
+                      placeholder='port name'
+                      title='Output port name — connections leave "<agentId>:<name>"'
+                      style={{ flex: '1 1 55%' }}
+                      onChange={(e) => {
+                        setOutputPortRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, name: e.target.value } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    />
+                    <select
+                      value={row.side}
+                      title='Node edge this port renders on — a loop whose two ports sit on the same vertical edge arcs over or under the band'
+                      aria-label='Output port side'
+                      style={{ flex: '0 0 auto', width: 'auto' }}
+                      onChange={(e) => {
+                        const side = asSide(e.target.value) ?? 'right';
+                        setOutputPortRows((prev) =>
+                          prev.map((r, i) =>
+                            i === index ? { ...r, side } : r,
+                          ),
+                        );
+                      }}
+                      onKeyDown={stopKey}
+                    >
+                      {PORT_SIDES.map((s) => (
+                        <option
+                          key={s.value}
+                          value={s.value}
+                        >
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className='pipeline-btn config-mini-btn'
+                      title='Remove this output port'
+                      aria-label={'Remove output port ' + (row.name || String(index + 1))}
+                      onClick={() => {
+                        setOutputPortRows((prev) => prev.filter((_, i) => i !== index));
+                      }}
+                    >×</button>
+                  </div>
+                ))
+              )}
+              <button
+                className='pipeline-btn config-mini-btn'
+                title='Declare a named output port'
+                onClick={() => {
+                  setOutputPortRows((prev) => prev.concat([{ name: '', side: 'right' }]));
                 }}
-                onKeyDown={stopKey}
-              />
+              >+ Add output port</button>
             </div>
             <div className='config-row'>
               <label>Output bindings</label>
@@ -792,6 +909,7 @@ function AgentConfigPanel({
                 ...(breakpoint ? { breakpoint: true } : {}),
                 inputPorts: portShape.inputPorts,
                 outputPorts: portShape.outputPorts,
+                outputPortSides: portShape.outputPortSides,
                 bindings: portShape.bindings,
               });
             }}

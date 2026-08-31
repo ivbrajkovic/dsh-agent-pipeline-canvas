@@ -37,6 +37,13 @@ export interface AgentSettings {
     outputSchema?: unknown;
 }
 /**
+ * The node edge a port renders on (edge-routing iteration 2). Geometry only —
+ * the executor never reads it. Absent side = the side default ("left" for
+ * input ports, "right" for output ports). At most one port of a node may
+ * occupy a side (validateGraph enforces the cap).
+ */
+export type PortSide = "left" | "right" | "top" | "bottom";
+/**
  * One named input port on an agent (the stream node model). The wire id a
  * connection refers to is `<agentId>:<name>`.
  */
@@ -58,6 +65,12 @@ export interface InputPortSpec {
      * next arrives.)
      */
     bound?: number;
+    /**
+     * The node edge this port renders on (see PortSide). Absent = "left".
+     * A loop's return edge arcs over or under the node band depending on which
+     * vertical side its two ports occupy.
+     */
+    side?: PortSide;
 }
 /**
  * One output-port binding (selective emission — conditional-dispatch §2): maps
@@ -121,6 +134,13 @@ export interface Agent {
      * (selective emission); an empty list means it emits nowhere.
      */
     outputPorts?: string[];
+    /**
+     * The node edge each named output port renders on (see PortSide), keyed by
+     * port name. Absent entry = "right". Purely presentational — the executor
+     * never reads it. At most one port of a node may occupy a side
+     * (validateGraph enforces the cap).
+     */
+    outputPortSides?: Record<string, PortSide>;
     /**
      * Output-port bindings (see OutputBinding): the node-field that makes
      * emission selective — `field == value → port`, first match wins. Absent →
