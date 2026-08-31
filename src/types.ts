@@ -394,7 +394,8 @@ export type PipelineRunResult = PipelineRunSuccess | PipelineRunFailure;
 // rewritten atomically on every transition) so a paused run stays controllable
 // across profile restarts and page reloads. The browser follows the record over
 // SSE and issues control commands (resume / rerun / steer / abort) at pause
-// points. One run is active (running or paused) per workspace at a time.
+// points. One run is active (running or paused) per (workspace, session) at
+// a time — two sessions in one workspace may run concurrently.
 
 /** Terminal-or-not lifecycle state of a whole run. */
 export type RunState = "running" | "paused" | "completed" | "aborted" | "error";
