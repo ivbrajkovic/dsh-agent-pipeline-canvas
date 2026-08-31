@@ -4,8 +4,11 @@
 // module system consumes. This mirrors the standalone-plugin convention (the
 // harness's internal clientBundle preset is workspace-coupled and cannot be
 // reused by a plugin outside the repo): mark the loader module-table requests
-// (`react`, `react/jsx-runtime` — the automatic JSX runtime, matching the
-// harness's PLATFORM_MODULES baseline) as external and inline everything else
+// (`react`, `react/jsx-runtime` — the automatic JSX runtime — plus the
+// `@deepseek-ai/dsh-client-ui-primitives` platform module whose Menu primitive
+// backs the node context menu; all three are in the harness's
+// PLATFORM_MODULES union, statically seeded into the frozen module table) as
+// external and inline everything else
 // — including the shared validateGraph from ./src/graph.ts, which is what
 // removes the Host/browser duplication.
 //
@@ -23,7 +26,14 @@ import { dirname, relative, resolve as resolvePath } from "node:path";
 import { defineConfig } from "tsdown";
 
 /** Specifiers resolved from the browser module table (never bundled). */
-const MODULE_TABLE_EXTERNALS = new Set(["react", "react/jsx-runtime"]);
+const MODULE_TABLE_EXTERNALS = new Set([
+	"react",
+	"react/jsx-runtime",
+	// Host platform module (deepseek-harness PLATFORM_MODULES): the Menu
+	// primitive behind the node context menu. Types come from the local shim
+	// src/ui/ui-primitives.d.ts — the package is not a devDependency here.
+	"@deepseek-ai/dsh-client-ui-primitives",
+]);
 
 const PLUGIN_ID = "dsh-agent-pipeline-canvas";
 

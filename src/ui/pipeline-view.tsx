@@ -21,6 +21,7 @@
 // returns and the nodes keep their final statuses; the modal itself stays
 // closed (the user closed it before leaving).
 import * as React from "react";
+import type { MenuEntry } from "@deepseek-ai/dsh-client-ui-primitives";
 import { validateGraph } from "../graph.ts";
 import { classifyGraph, topoOrder } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
@@ -30,6 +31,7 @@ import { AgentConfigPanel } from "./agent-config.tsx";
 import { RunModal } from "./run-modal.tsx";
 import { ResultModal } from "./result-modal.tsx";
 import { InspectModal } from "./inspect-modal.tsx";
+import { NodeMenu, type NodeMenuTarget } from "./node-menu.tsx";
 import {
 	ENDPOINT,
 	EMPTY_ITEMS,
@@ -110,6 +112,9 @@ function PipelineView({
 	// A connection drafted between two multi-port endpoints: the edge needs
 	// its port names before it is added (the picker overlay completes it).
 	const [edgeDraft, setEdgeDraft] = React.useState<{ id: string; source: string; target: string; sourcePort: string; targetPort: string } | null>(null);
+	// The node context menu: which agent it opened on and the viewport point
+	// (clientX/clientY) it opened at; null when closed.
+	const [nodeMenu, setNodeMenu] = React.useState<NodeMenuTarget | null>(null);
 	const runTextRef = React.useRef("");
 	const runFilesRef = React.useRef<string[]>([]);
 	/** The live SSE subscription for the active run's record. */
@@ -159,6 +164,12 @@ function PipelineView({
 		if (sseRef.current !== null) { sseRef.current.close(); sseRef.current = null; }
 	}, []);
 
+	// A menu whose agent vanished (Delete key, toolbar Delete, Clear) has
+	// nothing left to act on — close it.
+	React.useEffect(() => {
+		if (nodeMenu !== null && !agents.some((a) => a.id === nodeMenu.agentId)) setNodeMenu(null);
+	}, [agents, nodeMenu]);
+
 	function newId(prefix: string): string {
 		idRef.current += 1;
 		return prefix + "-" + idRef.current;
@@ -177,8 +188,10 @@ function PipelineView({
 	function outPoint(a: CanvasAgent): { x: number; y: number } { return { x: a.x + NODE_W, y: a.y + NODE_H / 2 }; }
 	function inPoint(a: CanvasAgent): { x: number; y: number } { return { x: a.x, y: a.y + NODE_H / 2 }; }
 
-	// node drag (pointer capture on the node)
+	// node drag (pointer capture on the node). Primary button only: a
+	// right-button press must not drag the node — it opens the context menu.
 	function onNodePointerDown(e: React.PointerEvent, agent: CanvasAgent) {
+		if (e.button !== 0) return;
 		e.preventDefault(); e.stopPropagation();
 		if (canvasRef.current) canvasRef.current.focus();
 		e.currentTarget.setPointerCapture(e.pointerId);
@@ -196,8 +209,10 @@ function PipelineView({
 		dragRef.current = null;
 	}
 
-	// connect output -> input
+	// connect output -> input (primary button only — a right-button press must
+	// not draft a connection; the event bubbles to the node's context menu)
 	function onOutputPointerDown(e: React.PointerEvent, agent: CanvasAgent) {
+		if (e.button !== 0) return;
 		e.preventDefault(); e.stopPropagation();
 		if (canvasRef.current) canvasRef.current.focus();
 		const p = canvasPoint(e.clientX, e.clientY);
@@ -285,6 +300,39 @@ function PipelineView({
 		setSeq(1); idRef.current = 0;
 		setRunResult(null); setResultOpen(false); setShowRunModal(false); setDoneRun(null);
 		runTextRef.current = ""; runFilesRef.current = [];
+	}
+
+	// ---- Node context menu ----------------------------------------------------
+	// Right-click a node: select it and open the harness Menu at the pointer
+	// (native menu suppressed on nodes only — the canvas background keeps it).
+	// The entries are the pinned shape minus the transcript route (N2).
+	function onNodeContextMenu(e: React.MouseEvent, agent: CanvasAgent) {
+		e.preventDefault(); e.stopPropagation();
+		setSelectedId(agent.id);
+		setNodeMenu({ agentId: agent.id, x: e.clientX, y: e.clientY });
+	}
+	function nodeMenuEntries(agent: CanvasAgent): MenuEntry[] {
+		return [
+			{ id: "edit", label: "Edit agent" },
+			{ id: "breakpoint", label: agent.breakpoint ? "Disarm breakpoint" : "Arm breakpoint" },
+			{ type: "separator", id: "menu-sep-delete" },
+			{ id: "delete", label: "Delete agent", danger: true },
+		];
+	}
+	function runNodeMenuAction(id: string) {
+		if (nodeMenu === null) return;
+		const agentId = nodeMenu.agentId;
+		if (id === "edit") {
+			setConfigAgentId(agentId);
+		} else if (id === "breakpoint") {
+			// Same toggle the node's breakpoint button performs.
+			setAgents((prev) => prev.map((a) => (a.id === agentId ? { ...a, breakpoint: !a.breakpoint } : a)));
+		} else if (id === "delete") {
+			// Same removal as deleteSelected: the node plus its connections.
+			setAgents((prev) => prev.filter((a) => a.id !== agentId));
+			setConnections((prev) => prev.filter((c) => c.source !== agentId && c.target !== agentId));
+			if (selectedId === agentId) setSelectedId(null);
+		}
 	}
 
 	// ---- Durable run lifecycle ----------------------------------------------
@@ -805,6 +853,7 @@ function PipelineView({
 				onPointerDown={(e) => { onNodePointerDown(e, agent); }}
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
+				onContextMenu={(e) => { onNodeContextMenu(e, agent); }}
 			>
 				<button
 					className={"node-breakpoint" + (agent.breakpoint ? " armed" : "")}
@@ -844,7 +893,10 @@ function PipelineView({
 					className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
 					onPointerEnter={(e) => { onInputPointerEnter(e, agent); }}
 					onPointerLeave={(e) => { onInputPointerLeave(e, agent); }}
-					onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+					// The port only swallows the primary press (nothing to do —
+					// connections start at the output); a right-button press goes
+					// unhandled so it bubbles to the node and opens the menu.
+					onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); }}
 					title="Input"
 				/>
 				<div
@@ -863,6 +915,15 @@ function PipelineView({
 
 	let configAgent: CanvasAgent | null = null;
 	for (let k = 0; k < agents.length; k++) if (agents[k].id === configAgentId) configAgent = agents[k];
+
+	// The context menu's entries re-compute per its agent, so the breakpoint
+	// label always reflects the live state; while the agent is mid-vanish
+	// (before the close effect lands) the list simply renders empty.
+	let menuAgent: CanvasAgent | null = null;
+	if (nodeMenu !== null) {
+		for (let m = 0; m < agents.length; m++) if (agents[m].id === nodeMenu.agentId) menuAgent = agents[m];
+	}
+	const menuEntries: readonly MenuEntry[] = menuAgent !== null ? nodeMenuEntries(menuAgent) : [];
 
 	const inspectNode: ProjectedNode | undefined = pausedNodeId !== null && runProjection ? runProjection.nodes[pausedNodeId] : undefined;
 
@@ -1081,6 +1142,18 @@ function PipelineView({
 					onSendTo={sendToSession}
 					onClose={() => { setResultOpen(false); setContinueStatus(null); }}
 				/>
+			) : null}
+			{nodeMenu !== null ? (
+				// The wrapper div swallows contextmenu over the open menu itself —
+				// the portaled list must not surface the browser's native menu.
+				<div onContextMenu={(e) => { e.preventDefault(); }}>
+					<NodeMenu
+						target={nodeMenu}
+						entries={menuEntries}
+						onAction={runNodeMenuAction}
+						onClose={() => { setNodeMenu(null); }}
+					/>
+				</div>
 			) : null}
 		</div>
 	);
