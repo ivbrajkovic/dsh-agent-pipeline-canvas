@@ -55,9 +55,10 @@ has a child session — live, paused, and restored-last-run records all
 project one; a running one-shot node gains its session only when its firing
 settles, and a never-fired node shows the row disabled. Every activation
 closes the menu before its action takes effect; Escape or a press outside
-dismisses it; while a connection drag is in flight a right-click opens
-nothing (Escape stays the gesture's cancel path). The transcript route is
-described in
+dismisses it. Any canvas press ends an in-flight connection drag — a
+right-click included — so right-clicking a node during a drag cancels the
+drag (Escape also cancels it) and then opens the menu. The transcript route
+is described in
 [running-pipelines.md](running-pipelines.md#results-and-the-continue-routes).
 
 ## Validation while editing
