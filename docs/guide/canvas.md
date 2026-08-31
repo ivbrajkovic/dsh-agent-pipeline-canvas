@@ -28,12 +28,16 @@ edits in one are visible in the other.
   **Delete** removes the selection and **Clear** empties the canvas.
 - Every agent has **named input and output ports**. Undeclared, an agent has
   exactly one of each — the `in` / `out` ports (`<id>:in` / `<id>:out`).
-  Declared ports (with per-port policies, bounds, and output bindings) are
-  edited in the configuration panel's [port
-  surface](#the-port-surface--ports-policies-bounds-bindings) below. Drag
-  from an agent's output port to another agent's input port to connect them;
-  edges are directed and arrow-marked. When a node declares several ports
-  the connection editor offers **port pickers** on both ends.
+  Declared ports (with per-port policies, bounds, sides, and output bindings)
+  are edited in the configuration panel's [port
+  surface](#the-port-surface--ports-policies-bounds-bindings) below. Declared
+  ports each render as their own tick on a node edge — inputs default left,
+  outputs right, and each port may take the top or bottom edge instead — and
+  edges anchor at their port's tick, leaving and entering perpendicular to
+  that edge. Drag from an agent's output port to another agent's input port
+  to connect them; edges are directed and arrow-marked. When a node declares
+  several ports the connection editor offers **port pickers** on both ends,
+  defaulted to the tick the drag started from.
 - Connections are flexible: an output may **fan out** to many inputs, and an
   input may **fan in** from many sources. Semantically, `A → B` means A's
   output becomes (part of) B's input. There are no explicit
@@ -41,6 +45,10 @@ edits in one are visible in the other.
   ([running-pipelines.md](running-pipelines.md#how-a-run-executes)).
 - **Cycles are legal wiring** — the executor loops until a port goes quiet.
   A cycle shows as a non-fatal warning in the issue strip, not an error.
+  Rendering keeps loops readable: put a loop's two ports on the same top or
+  bottom edge and the return edge routes as an orthogonal bracket over or
+  under the node band, arrowhead rising straight into the port; a leftward
+  wire on horizontal edges falls back to a lane below the nodes.
 - Each node carries a **breakpoint dot** (top-left) and an **edit button**
   (pencil, top-right). The dot arms the
   [pause-on-output breakpoint](running-pipelines.md#breakpoints-grouped-pause-the-queue-resume--rerun--steer--abort);
@@ -153,6 +161,12 @@ The port fields make the canvas author the full stream model:
   every wired upstream of the port has delivered a message — fan-in joins
   for free. `any-of` fires on the first arrival — a join that proceeds on
   whichever branch ran.
+- **Sides** decide WHERE on the node a port renders: left (the input
+  default), right (the output default), top, or bottom — at most one port per
+  edge (a second port on one edge warns and renders stacked). Geometry only,
+  but it is how a loop stays readable: put the loop's two ports on the same
+  vertical edge and the return line routes as a bracket over or under the
+  band instead of crossing the forward wires.
 - **Bounds** decide HOW OFTEN a port may receive. The bound is a delivery
   count over the whole run (the run input's seed message counts), which is
   what makes a feedback loop terminate: cap the loop's input port and the

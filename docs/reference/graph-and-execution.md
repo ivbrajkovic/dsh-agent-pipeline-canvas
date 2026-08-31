@@ -14,8 +14,9 @@ The pipeline is a directed graph over two arrays:
 {
   "agents":      [ { "id", "name", "description", "instructions",
                      "x", "y", "input": "<id>:in", "output": "<id>:out",
-                     "inputPorts"?: [ { "name", "policy"?, "bound"? } ],
+                     "inputPorts"?: [ { "name", "policy"?, "bound"?, "side"? } ],
                      "outputPorts"?: [ "<name>" ],
+                     "outputPortSides"?: { "<name>": "side" },
                      "bindings"?: [ { "field", "port", "value"? } ] } ],
   "connections": [ { "id", "source", "target",
                      "sourcePort": "<source>:<outputPort>",
@@ -28,12 +29,21 @@ The pipeline is a directed graph over two arrays:
 - Each agent has named input and output ports. Undeclared, an agent has
   **exactly one** of each — the `<id>:in` / `<id>:out` convention (declared on
   the agent as `input`/`output`). `inputPorts` declares named input ports,
-  each with a delivery `policy` (`"all-of"` default, `"any-of"`) and an
-  optional `bound` (positive integer); `outputPorts` declares named output
-  ports; `bindings` maps a structured-output field to an output port
+  each with a delivery `policy` (`"all-of"` default, `"any-of"`), an
+  optional `bound` (positive integer), and an optional `side`;
+  `outputPorts` declares named output ports, with per-port rendering sides in
+  the separate `outputPortSides` map (absent entry = `"right"`);
+  `bindings` maps a structured-output field to an output port
   (`field == value → port`; `value` omitted = catch-all; first match wins).
   A present list replaces the single default; a wire port id is
   `<agentId>:<portName>`.
+- **Port sides are pure canvas geometry** (`"left"` / `"right"` / `"top"` /
+  `"bottom"`; inputs default `left`, outputs `right`): the executor never
+  reads them. At most one port of a node may occupy a side — a second port on
+  a resolved side (including two ports stacked on the default) is the
+  non-fatal `agent-port-side-conflict` *warning*. A loop whose two ports sit
+  on the same vertical edge renders as an arc over or under the node band
+  ([edge-routing](../proposals/edge-routing.md)).
 - **Fan-out** is allowed (a source id may appear in many connections);
   **fan-in** is allowed (a target id may appear in many connections — all
   edges into one port queue there).
@@ -65,6 +75,8 @@ non-empty and never affects `ok`:
 | `agent-port-policy-invalid` | An input port's `policy` is not `"all-of"` or `"any-of"`. |
 | `agent-port-bound-invalid` | An input port's `bound` is not a positive integer. |
 | `agent-port-duplicate` | The same port name declared twice in one list. |
+| `agent-port-side-invalid` | A port `side` / `outputPortSides` value is not one of `"left"`, `"right"`, `"top"`, `"bottom"`, or the map names a port the agent does not declare. |
+| `agent-port-side-conflict` *(warning)* | More than one of the agent's ports resolves to the same node edge (including two stacked on a default) — they render stacked; assign distinct sides to spread them. |
 | `connection-invalid` | A connection entry is not an object. |
 | `connection-missing-source` / `connection-missing-target` | The connection names no source/target agent. |
 | `connection-source-missing` / `connection-target-missing` | The referenced agent id does not exist. |

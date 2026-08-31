@@ -8,7 +8,7 @@
 // (src/client.tsx): the dynamic ctx proxy rejects property reads of undeclared
 // services, and nested Remote namespaces need their own dotted entry.
 
-import type { AgentSettings, InputPortSpec, OutputBinding, PipelineGraph, RunFiring } from "../types.ts";
+import type { AgentSettings, InputPortSpec, OutputBinding, PipelineGraph, PortSide, RunFiring } from "../types.ts";
 
 export const ENDPOINT = "/dsh-agent-pipeline";
 export const SAVE_DEBOUNCE_MS = 250;
@@ -37,6 +37,12 @@ export interface CanvasAgent {
 	 */
 	inputPorts?: InputPortSpec[];
 	outputPorts?: string[];
+	/**
+	 * The node edge each named output port renders on (see PortSide in
+	 * types.ts), keyed by port name; absent entry = "right". Purely
+	 * presentational — the executor never reads it.
+	 */
+	outputPortSides?: Record<string, PortSide>;
 	/**
 	 * Output-port bindings (selective emission): `field == value → port`,
 	 * first match wins, no `value` = catch-all. See OutputBinding in types.ts.
@@ -227,6 +233,7 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 			// input/output strings during validation and execution).
 			...(a.inputPorts !== undefined ? { inputPorts: a.inputPorts } : {}),
 			...(a.outputPorts !== undefined ? { outputPorts: a.outputPorts } : {}),
+			...(a.outputPortSides !== undefined && Object.keys(a.outputPortSides).length > 0 ? { outputPortSides: a.outputPortSides } : {}),
 			...(a.bindings !== undefined ? { bindings: a.bindings } : {}),
 			...(a.settings ? { settings: a.settings } : {}),
 			...(a.breakpoint === true ? { breakpoint: true } : {}),
@@ -259,6 +266,7 @@ export function loadAgent(raw: unknown): {
 	breakpoint?: boolean;
 	inputPorts?: InputPortSpec[];
 	outputPorts?: string[];
+	outputPortSides?: Record<string, PortSide>;
 	bindings?: OutputBinding[];
 } {
 	const rawAgent = (raw ?? {}) as Record<string, unknown>;
@@ -282,6 +290,9 @@ export function loadAgent(raw: unknown): {
 	// a hand-written file must not lose them.
 	const inputPorts = Array.isArray(rawAgent.inputPorts) ? (rawAgent.inputPorts as InputPortSpec[]) : undefined;
 	const outputPorts = Array.isArray(rawAgent.outputPorts) ? (rawAgent.outputPorts as string[]) : undefined;
+	const outputPortSides = rawAgent.outputPortSides != null && typeof rawAgent.outputPortSides === "object" && !Array.isArray(rawAgent.outputPortSides)
+		? (rawAgent.outputPortSides as Record<string, PortSide>)
+		: undefined;
 	const bindings = Array.isArray(rawAgent.bindings) ? (rawAgent.bindings as OutputBinding[]) : undefined;
 	return {
 		systemPrompt,
@@ -289,6 +300,7 @@ export function loadAgent(raw: unknown): {
 		...(breakpoint ? { breakpoint: true } : {}),
 		...(inputPorts !== undefined ? { inputPorts } : {}),
 		...(outputPorts !== undefined ? { outputPorts } : {}),
+		...(outputPortSides !== undefined ? { outputPortSides } : {}),
 		...(bindings !== undefined ? { bindings } : {}),
 	};
 }

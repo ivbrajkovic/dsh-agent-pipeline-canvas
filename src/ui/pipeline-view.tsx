@@ -26,7 +26,7 @@ import { validateGraph } from "../graph.ts";
 import { classifyGraph, topoOrder } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
-import type { ValidationResult } from "../types.ts";
+import type { PortSide, ValidationResult } from "../types.ts";
 import { AgentConfigPanel } from "./agent-config.tsx";
 import { RunModal } from "./run-modal.tsx";
 import { ResultModal } from "./result-modal.tsx";
@@ -122,7 +122,7 @@ function PipelineView({
 	const canvasRef = React.useRef<HTMLDivElement | null>(null);
 	const idRef = React.useRef(0);
 	const dragRef = React.useRef<{ id: string; startClientX: number; startClientY: number; startX: number; startY: number } | null>(null);
-	const connectRef = React.useRef<{ from: string; cursor: { x: number; y: number }; hoverTarget: string | null } | null>(null);
+	const connectRef = React.useRef<{ from: string; cursor: { x: number; y: number }; hoverTarget: string | null; startPort?: string } | null>(null);
 	// Persistence plumbing.
 	const cwdRef = React.useRef<string | undefined>(undefined);
 	const loadedRef = React.useRef(false);
@@ -185,8 +185,37 @@ function PipelineView({
 		setSelectedId(agent.id);
 		return agent;
 	}
-	function outPoint(a: CanvasAgent): { x: number; y: number } { return { x: a.x + NODE_W, y: a.y + NODE_H / 2 }; }
-	function inPoint(a: CanvasAgent): { x: number; y: number } { return { x: a.x, y: a.y + NODE_H / 2 }; }
+	// Per-port anchor points (edge-routing iteration 2): each port renders on
+	// its declared node edge — inputs default left, outputs default right, and
+	// an explicit side may place a port on the top or bottom edge so a loop
+	// arcs over or under the band. Several ports resolving to one side
+	// (validateGraph flags the overlap) stack along that side's axis.
+	type Side = PortSide;
+	const SIDE_NORMAL: Record<Side, { x: number; y: number }> = {
+		left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 },
+	};
+	// A hand-edited file can carry a side validateGraph rejects — render it as
+	// the side default instead of producing NaN anchors.
+	function asSide(value: unknown): Side | null {
+		return value === "left" || value === "right" || value === "top" || value === "bottom" ? value : null;
+	}
+	function inputPortSide(a: CanvasAgent, port: string): Side {
+		const spec = Array.isArray(a.inputPorts) ? a.inputPorts.find((p) => p != null && p.name === port) : undefined;
+		return asSide(spec?.side) ?? "left";
+	}
+	function outputPortSide(a: CanvasAgent, port: string): Side {
+		return asSide(a.outputPortSides?.[port]) ?? "right";
+	}
+	function portAnchor(a: CanvasAgent, kind: "in" | "out", port: string): { x: number; y: number; side: Side } {
+		const sideOf = (n: string) => (kind === "in" ? inputPortSide(a, n) : outputPortSide(a, n));
+		const side = sideOf(port);
+		const sameSide = (kind === "in" ? inputPortNamesOf(a.id) : outputPortNamesOf(a.id)).filter((n) => sideOf(n) === side);
+		const frac = (Math.max(0, sameSide.indexOf(port)) + 1) / (sameSide.length + 1);
+		if (side === "left") return { x: a.x, y: a.y + NODE_H * frac, side };
+		if (side === "right") return { x: a.x + NODE_W, y: a.y + NODE_H * frac, side };
+		if (side === "top") return { x: a.x + NODE_W * frac, y: a.y, side };
+		return { x: a.x + NODE_W * frac, y: a.y + NODE_H, side };
+	}
 
 	// node drag (pointer capture on the node). Primary button only: a
 	// right-button press must not drag the node — it opens the context menu.
@@ -210,13 +239,15 @@ function PipelineView({
 	}
 
 	// connect output -> input (primary button only — a right-button press must
-	// not draft a connection; the event bubbles to the node's context menu)
-	function onOutputPointerDown(e: React.PointerEvent, agent: CanvasAgent) {
+	// not draft a connection; the event bubbles to the node's context menu).
+	// The grab remembers which output tick it started from so the picker can
+	// default to it (edge-routing proposal 1).
+	function onOutputPointerDown(e: React.PointerEvent, agent: CanvasAgent, port: string) {
 		if (e.button !== 0) return;
 		e.preventDefault(); e.stopPropagation();
 		if (canvasRef.current) canvasRef.current.focus();
 		const p = canvasPoint(e.clientX, e.clientY);
-		connectRef.current = { from: agent.id, cursor: { x: p.x, y: p.y }, hoverTarget: null };
+		connectRef.current = { from: agent.id, cursor: { x: p.x, y: p.y }, hoverTarget: null, startPort: port };
 		setConnectCursor({ x: p.x, y: p.y });
 		setSelectedId(agent.id);
 	}
@@ -249,15 +280,17 @@ function PipelineView({
 				const conn = { id: newId("conn"), source: c.from, target };
 				// Named ports (P7): when either endpoint declares several, the
 				// edge must say which ones — the picker completes it. A node
-				// with a single (or default) port wires without ceremony.
+				// with a single (or default) port wires without ceremony. The
+				// grabbed output tick defaults the source side.
 				const srcPorts = outputPortNamesOf(c.from);
+				const sourcePort = c.startPort && srcPorts.includes(c.startPort) ? c.startPort : srcPorts[0];
 				const tgtPorts = inputPortNamesOf(target);
 				if (srcPorts.length > 1 || tgtPorts.length > 1) {
-					setEdgeDraft({ ...conn, sourcePort: srcPorts[0], targetPort: tgtPorts[0] });
+					setEdgeDraft({ ...conn, sourcePort, targetPort: tgtPorts[0] });
 				} else {
 					setConnections((prev) => prev.concat([{
 						...conn,
-						...(srcPorts[0] !== "out" ? { sourcePort: srcPorts[0] } : {}),
+						...(sourcePort !== "out" ? { sourcePort } : {}),
 						...(tgtPorts[0] !== "in" ? { targetPort: tgtPorts[0] } : {}),
 					}]));
 				}
@@ -740,6 +773,7 @@ function PipelineView({
 						x: Number(r.x) || 0, y: Number(r.y) || 0,
 						...(load.inputPorts !== undefined ? { inputPorts: load.inputPorts } : {}),
 						...(load.outputPorts !== undefined ? { outputPorts: load.outputPorts } : {}),
+						...(load.outputPortSides !== undefined ? { outputPortSides: load.outputPortSides } : {}),
 						...(load.bindings !== undefined ? { bindings: load.bindings } : {}),
 						settings: load.settings,
 						...(r.breakpoint === true ? { breakpoint: true } : {}),
@@ -813,8 +847,81 @@ function PipelineView({
 	}, [agents, connections]);
 
 	const gesture = connectRef.current;
-	function edgePath(s: { x: number; y: number }, t: { x: number; y: number }): string {
-		return "M" + s.x + " " + s.y + " C" + (s.x + 60) + " " + s.y + " " + (t.x - 60) + " " + t.y + " " + t.x + " " + t.y;
+	// Edge geometry (edge-routing iteration 2): the path leaves perpendicular
+	// to the source port's edge and arrives perpendicular to the target port's
+	// edge (60px control offset), so top/bottom ports arc over/under the band
+	// and left/right ports keep the classic S-curve. One fallback keeps
+	// iteration 1's lane rule: a wire whose ends are BOTH on horizontal edges
+	// and whose target sits left of its source routes through a lane below the
+	// node band instead of a flat back-and-forth S.
+	const EDGE_OFF = 60;
+	const BRACKET_CLEAR = 30;
+	const BRACKET_R = 8;
+	// The tick renders 14px + a 2px border (content-box) — its rim sits 9px
+	// from the anchor. Arrow paths stop TICK_R + HEAD_CLEAR short of the
+	// anchor so the head lands just off the rim, never under the dot.
+	const TICK_R = 9;
+	const HEAD_CLEAR = 2;
+	function edgeGeometry(
+		s: { x: number; y: number; side: Side },
+		t: { x: number; y: number; side: Side },
+	): { d: string; mx: number; my: number } {
+		// Same-side vertical ports route as an orthogonal bracket: out of the
+		// port, along a lane past the node band, and straight back into the
+		// port's own axis — the arrowhead lands on that final vertical run
+		// (a bezier curling into a vertical port reads badly at the tip).
+		if (s.side === t.side && (s.side === "top" || s.side === "bottom")) {
+			const down = s.side === "bottom";
+			const vdir = down ? 1 : -1;
+			const lane = down ? Math.max(s.y, t.y) + BRACKET_CLEAR : Math.min(s.y, t.y) - BRACKET_CLEAR;
+			const endY = t.y + vdir * (TICK_R + HEAD_CLEAR);
+			const sx = Math.sign(t.x - s.x);
+			const r = Math.min(BRACKET_R, Math.abs(t.x - s.x) / 2, Math.abs(lane - s.y), Math.abs(lane - endY));
+			let d: string;
+			if (!Number.isFinite(r) || r < 1 || sx === 0) {
+				// Nodes nearly aligned: sharp corners (or a straight drop).
+				d = "M" + s.x + " " + s.y + " L" + s.x + " " + lane + " L" + t.x + " " + lane + " L" + t.x + " " + endY;
+			} else {
+				d = "M" + s.x + " " + s.y
+					+ " L" + s.x + " " + (lane - vdir * r)
+					+ " Q" + s.x + " " + lane + " " + (s.x + sx * r) + " " + lane
+					+ " L" + (t.x - sx * r) + " " + lane
+					+ " Q" + t.x + " " + lane + " " + t.x + " " + (lane - vdir * r)
+					+ " L" + t.x + " " + endY;
+			}
+			// Label rides the bracket's horizontal run (above it for a bottom
+			// lane, below it for a top lane).
+			return { d, mx: (s.x + t.x) / 2, my: down ? lane - 5 : lane + 14 };
+		}
+		// Everything else: leave perpendicular to the source edge, arrive
+		// perpendicular to the target edge. One fallback keeps iteration 1's
+		// lane rule: a wire whose ends are BOTH on horizontal edges and whose
+		// target sits left of its source routes through a lane below the node
+		// band instead of a flat back-and-forth S.
+		const n1 = SIDE_NORMAL[s.side], n2 = SIDE_NORMAL[t.side];
+		let c1: { x: number; y: number }, c2: { x: number; y: number };
+		if (n1.y === 0 && n2.y === 0 && t.x < s.x - 1) {
+			const lane = Math.max(s.y, t.y) + NODE_H / 2 + 46;
+			c1 = { x: s.x + EDGE_OFF, y: lane };
+			c2 = { x: t.x - EDGE_OFF, y: lane };
+		} else {
+			c1 = { x: s.x + n1.x * EDGE_OFF, y: s.y + n1.y * EDGE_OFF };
+			c2 = { x: t.x + n2.x * EDGE_OFF, y: t.y + n2.y * EDGE_OFF };
+		}
+		// Stop short of the anchor: the port tick renders above the edge layer,
+		// so a path ending at the anchor buries the arrowhead under the dot.
+		// End on the rim instead — tick radius + a hair of clearance — along
+		// the arrival direction (c2 -> anchor).
+		const arrX = t.x - c2.x, arrY = t.y - c2.y;
+		const arrLen = Math.hypot(arrX, arrY);
+		const head = TICK_R + HEAD_CLEAR;
+		const ex = arrLen > head ? t.x - (arrX / arrLen) * head : t.x;
+		const ey = arrLen > head ? t.y - (arrY / arrLen) * head : t.y;
+		const d = "M" + s.x + " " + s.y + " C" + c1.x + " " + c1.y + " " + c2.x + " " + c2.y + " " + ex + " " + ey;
+		// Exact cubic midpoint of the full curve — the label rides the curve.
+		const mx = (s.x + 3 * c1.x + 3 * c2.x + t.x) / 8;
+		const my = (s.y + 3 * c1.y + 3 * c2.y + t.y) / 8 - 6;
+		return { d, mx, my };
 	}
 	const edges = connections.map((c) => {
 		let src: CanvasAgent | null = null, tgt: CanvasAgent | null = null;
@@ -823,20 +930,21 @@ function PipelineView({
 			if (agents[i].id === c.target) tgt = agents[i];
 		}
 		if (!src || !tgt) return null;
-		const s = outPoint(src);
-		const t = inPoint(tgt);
 		const sourceName = c.sourcePort ?? "out";
 		const targetName = c.targetPort ?? "in";
+		const s = portAnchor(src, "out", sourceName);
+		const t = portAnchor(tgt, "in", targetName);
 		// A non-default port name is labeled at the edge midpoint — the canvas
 		// shows the real dataflow (design principle 2). A quiet port (its
 		// binding simply never matched) needs no extra rendering: an edge is
 		// only labeled wiring, never a promise the message arrived.
 		const labeled = sourceName !== "out" || targetName !== "in";
+		const geo = edgeGeometry(s, t);
 		return (
 			<g key={c.id}>
-				<path d={edgePath(s, t)} className="pipeline-edge" markerEnd="url(#pipeline-arrow)" />
+				<path d={geo.d} className="pipeline-edge" markerEnd="url(#pipeline-arrow)" />
 				{labeled ? (
-					<text x={(s.x + t.x) / 2} y={(s.y + t.y) / 2 - 5} className="pipeline-edge-label" textAnchor="middle">
+					<text x={geo.mx} y={geo.my} className="pipeline-edge-label" textAnchor="middle">
 						{sourceName + " → " + targetName}
 					</text>
 				) : null}
@@ -848,10 +956,10 @@ function PipelineView({
 		let src0: CanvasAgent | null = null;
 		for (let j = 0; j < agents.length; j++) if (agents[j].id === gesture.from) src0 = agents[j];
 		if (src0) {
-			const s0 = outPoint(src0);
+			const s0 = portAnchor(src0, "out", gesture.startPort ?? "out");
 			const cx = gesture.cursor ? gesture.cursor.x : s0.x;
 			const cy = gesture.cursor ? gesture.cursor.y : s0.y;
-			tempEdge = <path d={edgePath(s0, { x: cx, y: cy })} className="pipeline-edge-temp" />;
+			tempEdge = <path d={edgeGeometry(s0, { x: cx, y: cy, side: "left" }).d} className="pipeline-edge-temp" />;
 		}
 	}
 
@@ -907,21 +1015,37 @@ function PipelineView({
 				<div className="node-name">{agent.name}</div>
 				<div className="node-sub">{agent.id}</div>
 				{showStatus ? <div className={"node-status status-" + status}>{status}</div> : null}
-				<div
-					className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
-					onPointerEnter={(e) => { onInputPointerEnter(e, agent); }}
-					onPointerLeave={(e) => { onInputPointerLeave(e, agent); }}
-					// The port only swallows the primary press (nothing to do —
-					// connections start at the output); a right-button press goes
-					// unhandled so it bubbles to the node and opens the menu.
-					onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); }}
-					title="Input"
-				/>
-				<div
-					className="pipeline-port out"
-					onPointerDown={(e) => { onOutputPointerDown(e, agent); }}
-					title="Output"
-				/>
+				{inputPortNamesOf(agent.id).map((portName) => {
+					const anchor = portAnchor(agent, "in", portName);
+					const multiple = inputPortNamesOf(agent.id).length > 1 || anchor.side !== "left";
+					return (
+						<div
+							key={portName}
+							className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
+							style={{ left: (anchor.x - agent.x) + "px", top: (anchor.y - agent.y) + "px" }}
+							onPointerEnter={(e) => { onInputPointerEnter(e, agent); }}
+							onPointerLeave={(e) => { onInputPointerLeave(e, agent); }}
+							// The port only swallows the primary press (nothing to do —
+							// connections start at the output); a right-button press goes
+							// unhandled so it bubbles to the node and opens the menu.
+							onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); }}
+							title={multiple ? portName : "Input"}
+						/>
+					);
+				})}
+				{outputPortNamesOf(agent.id).map((portName) => {
+					const anchor = portAnchor(agent, "out", portName);
+					const multiple = outputPortNamesOf(agent.id).length > 1 || anchor.side !== "right";
+					return (
+						<div
+							key={portName}
+							className="pipeline-port out"
+							style={{ left: (anchor.x - agent.x) + "px", top: (anchor.y - agent.y) + "px" }}
+							onPointerDown={(e) => { onOutputPointerDown(e, agent, portName); }}
+							title={multiple ? portName : "Output"}
+						/>
+					);
+				})}
 			</div>
 		);
 	});
@@ -1074,6 +1198,7 @@ function PipelineView({
 									// field from the persisted graph).
 									inputPorts: updated.inputPorts,
 									outputPorts: updated.outputPorts,
+									outputPortSides: updated.outputPortSides,
 									bindings: updated.bindings,
 									...(updated.breakpoint === true ? { breakpoint: true } : { breakpoint: undefined }),
 								}

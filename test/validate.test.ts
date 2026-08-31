@@ -89,6 +89,33 @@ check("inputPorts not an array", { agents: [{ id: "a", name: "a", description: "
 check("input port spec missing name", { agents: [portsAgent("a", [{ policy: "any-of" }])], connections: [] }, false, ["agent-port-invalid"]);
 check("outputPorts entry not a string", { agents: [portsAgent("a", undefined, [7])], connections: [] }, false, ["agent-port-invalid"]);
 
+// --- port sides (edge-routing iteration 2) ------------------------------
+// Sides are presentational; more than one port on a resolved node edge warns
+// (agent-port-side-conflict) and renders stacked.
+{
+	const result = validateGraph({
+		agents: [{
+			id: "a", name: "a", description: "", instructions: "", x: 0, y: 0,
+			inputPorts: [{ name: "in" }, { name: "feedback", policy: "any-of", bound: 3, side: "bottom" }],
+			outputPorts: ["feedback", "result"],
+			outputPortSides: { feedback: "top" },
+		}],
+		connections: [],
+	});
+	deepStrictEqual(result.ok, true, "one port per side validates");
+	deepStrictEqual(result.warnings, undefined, "one port per side raises no side warning");
+	passed++;
+	console.log("ok    one port per side (all four edges) validates without warnings");
+}
+check("two default-left input ports stack with a warning", { agents: [portsAgent("a", [{ name: "x" }, { name: "y" }])], connections: [] }, true, [], ["agent-port-side-conflict"]);
+check("input left vs output pulled to left warns", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "x" }], outputPorts: ["y"], outputPortSides: { y: "left" } }], connections: [] }, true, [], ["agent-port-side-conflict"]);
+check("two outputs on the default right warn but stay valid", { agents: [portsAgent("a", undefined, ["mail", "slack"])], connections: [] }, true, [], ["agent-port-side-conflict"]);
+check("sided loop cycle still legal wiring", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "resp" }], outputPorts: ["request"], outputPortSides: { request: "bottom" } }, { id: "b", name: "b", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "req", policy: "any-of" }, { name: "fix", policy: "any-of", bound: 3, side: "bottom" }], outputPorts: ["out"] }], connections: [portConn("c1", "a", "a:request", "b", "b:req"), portConn("c2", "b", "b:out", "a", "a:resp")] }, true, [], ["cycle-present"]);
+check("unknown input side value", { agents: [portsAgent("a", [{ name: "x", side: "north" }])], connections: [] }, false, ["agent-port-side-invalid"]);
+check("unknown output side value", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["y"], outputPortSides: { y: "up" } }], connections: [] }, false, ["agent-port-side-invalid"]);
+check("outputPortSides names an undeclared port", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["y"], outputPortSides: { z: "top" } }], connections: [] }, false, ["agent-port-side-invalid"]);
+check("outputPortSides not an object", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["y"], outputPortSides: "top" }], connections: [] }, false, ["agent-port-side-invalid"]);
+
 // --- bindings (selective emission, P7) ---------------------------------
 check("binding to a declared output port validates", { agents: [portsAgent("a", undefined, ["mail", "slack"])], connections: [] }, true, []);
 // portsAgent has no settings slot; the raw agent spread carries bindings.

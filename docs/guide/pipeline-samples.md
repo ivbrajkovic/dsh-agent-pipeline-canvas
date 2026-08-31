@@ -88,13 +88,17 @@ only one runs.
 `Router` has a structured output schema and **bindings** that map its
 `action` field to one of two output ports. Only the selected branch runs;
 the quiet branch never receives a message and its subtree stays idle. The
-comparison is executor-side — no extra model call.
+comparison is executor-side — no extra model call. The two output ports
+spread over the **top** and **bottom** edges (`outputPortSides`), so the
+fan-out reads at a glance — and one port per edge keeps the canvas free of
+the stacked-ticks warning.
 
 ```json
 {
   "agents": [
     { "id": "agent-1", "name": "Router", "description": "", "instructions": "Decide: does the input ask about billing or something else? Report {\"action\": \"billing\"} or {\"action\": \"other\"} via the structured_output tool.",
       "outputPorts": [ "billing", "other" ],
+      "outputPortSides": { "billing": "top", "other": "bottom" },
       "bindings": [
         { "field": "action", "port": "billing", "value": "billing" },
         { "field": "action", "port": "other",   "value": "other" }
@@ -125,7 +129,9 @@ fixes BACK to the coder's `feedback` port, or approves and emits on
 `result`. The loop ends when the reviewer approves (the feedback port goes
 quiet → quiescence) — and the `bound` on the coder's feedback port is the
 hard stop: after 3 fix rounds the next arrival is dropped and recorded in
-the run's `dropped` list.
+the run's `dropped` list. Both loop ports sit on the **bottom** edge (a
+`side` on the input spec, `outputPortSides` for the output), so the return
+edge routes as a bracket under the node band instead of crossing the forward wires.
 
 ```json
 {
@@ -133,10 +139,11 @@ the run's `dropped` list.
     { "id": "agent-1", "name": "Task", "description": "", "instructions": "Restate the run input as a one-sentence coding task.",
       "x": 40, "y": 80, "input": "agent-1:in", "output": "agent-1:out" },
     { "id": "agent-2", "name": "Coder", "description": "", "instructions": "Write the requested function. Address any review feedback you receive, then output the final code.",
-      "inputPorts": [ { "name": "in", "policy": "any-of" }, { "name": "feedback", "policy": "any-of", "bound": 3 } ],
+      "inputPorts": [ { "name": "in", "policy": "any-of" }, { "name": "feedback", "policy": "any-of", "side": "bottom", "bound": 3 } ],
       "x": 260, "y": 80, "input": "agent-2:in", "output": "agent-2:out" },
     { "id": "agent-3", "name": "Reviewer", "description": "", "instructions": "Review the code you receive. If it needs changes, report {\"verdict\": \"fix\"}; if it is good, report {\"verdict\": \"approve\"}.",
       "outputPorts": [ "feedback", "result" ],
+      "outputPortSides": { "feedback": "bottom" },
       "bindings": [
         { "field": "verdict", "port": "feedback", "value": "fix" },
         { "field": "verdict", "port": "result",   "value": "approve" }
