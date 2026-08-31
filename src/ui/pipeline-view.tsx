@@ -305,14 +305,20 @@ function PipelineView({
 	// ---- Node context menu ----------------------------------------------------
 	// Right-click a node: select it and open the harness Menu at the pointer
 	// (native menu suppressed on nodes only — the canvas background keeps it).
-	// The entries are the pinned shape minus the transcript route (N2).
+	// Entries are the pinned shape, headed by Go to transcript — enabled once
+	// the projection holds a child session for the node (live, paused, and
+	// restored-last-run records all project one; a never-fired node shows the
+	// row disabled, and disabled rows never dispatch).
 	function onNodeContextMenu(e: React.MouseEvent, agent: CanvasAgent) {
 		e.preventDefault(); e.stopPropagation();
 		setSelectedId(agent.id);
 		setNodeMenu({ agentId: agent.id, x: e.clientX, y: e.clientY });
 	}
 	function nodeMenuEntries(agent: CanvasAgent): MenuEntry[] {
+		const childSessionId = runProjection?.nodes[agent.id]?.childSessionId;
 		return [
+			{ id: "transcript", label: "Go to transcript", disabled: typeof childSessionId !== "string" || childSessionId.length === 0 },
+			{ type: "separator", id: "menu-sep-edit" },
 			{ id: "edit", label: "Edit agent" },
 			{ id: "breakpoint", label: agent.breakpoint ? "Disarm breakpoint" : "Arm breakpoint" },
 			{ type: "separator", id: "menu-sep-delete" },
@@ -332,6 +338,11 @@ function PipelineView({
 			setAgents((prev) => prev.filter((a) => a.id !== agentId));
 			setConnections((prev) => prev.filter((c) => c.source !== agentId && c.target !== agentId));
 			if (selectedId === agentId) setSelectedId(null);
+		} else if (id === "transcript") {
+			// Re-read at dispatch — the projection may have moved since open.
+			// The wrapper closes the menu before this runs.
+			const childSessionId = runProjection?.nodes[agentId]?.childSessionId;
+			if (typeof childSessionId === "string" && childSessionId.length > 0) openTranscript(childSessionId);
 		}
 	}
 
