@@ -62,7 +62,7 @@ scripts run with no install step:
 
 ```
 npm run typecheck   # tsc -p tsconfig.json (whole tree, noEmit)
-npm test            # plain tsx scripts: validate + execution + message + runner + runs
+npm test            # plain tsx scripts: validate + execution + message + runner + runs + storage
 npm run build       # tsc -p tsconfig.build.json && tsdown → lib/
 ```
 
@@ -78,7 +78,7 @@ In order: edit `src/` → build → re-run the tests → sync to the profile
   (`allowImportingTsExtensions` rewrites them to `.js` on emit) — keep new
   imports in that style.
 - The test suites are plain `tsx` scripts (no framework): `validate`,
-  `execution`, `message`, `runner`, and `runs`, mirroring the pure core and
-  the runner/run registry. See
+  `execution`, `message`, `runner`, `runs`, and `storage`, mirroring the pure
+  core and the runner/run registry. See
   [../reference/architecture.md](../reference/architecture.md) for what each
   module owns.
