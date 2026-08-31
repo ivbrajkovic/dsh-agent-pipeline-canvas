@@ -7,7 +7,9 @@
 // which the hero variant renders too) opening a panel in `shell.overlay` (the
 // documented additive frame-wide surface), which renders in EVERY app state.
 // The panel binds to the CURRENT session read off the root `useSessions`
-// standard hook (the graph itself is stored per workspace cwd), so composing
+// standard hook (the graph is stored per session — a session's first edit
+// forks its own file from the workspace's `pipeline.json`, which keeps
+// serving as the read-through fallback until then), so composing
 // and running work from a brand-new session too — new sessions are born
 // attached to a workspace, so the cwd is already known there.
 import * as React from "react";
@@ -125,7 +127,7 @@ function PipelinePanel({ useSessions, useWorkspaces, services }: {
 				) : (
 					<div className="pipeline-shell-empty">
 						{hasSessions
-							? "Open a session to compose and run pipelines — the graph is stored per workspace."
+							? "Open a session to compose and run pipelines — the graph is stored per session."
 							: "The session feed is unavailable here; open the Pipelines tab inside a session instead."}
 					</div>
 				)}

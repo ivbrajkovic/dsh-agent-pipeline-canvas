@@ -62,8 +62,12 @@
 // first-class agent field, `Agent.systemPrompt` (see types.ts and
 // docs/reference/system-prompt.md).
 //
-// Persistence: the graph is backed by the project's `.agent-pipeline/pipeline.json`
-// (written by the Host half via the `/dsh-agent-pipeline` route). The view
+// Persistence: the graph is stored PER SESSION — the view's load GET and
+// debounced save POST carry the session id, so each session owns
+// `.agent-pipeline/pipelines/<sessionId>.json` (written by the Host half via
+// the `/dsh-agent-pipeline` route); the first edit in a session forks that
+// file from the legacy workspace-wide `.agent-pipeline/pipeline.json`, which
+// keeps serving as the read-through fallback until then. The view
 // recovers the session's workspace root (cwd) from the framework standard kit
 // (`useSessions`), loads the saved graph on mount, and persists the graph after
 // every structural change (add / delete / clear / connect / move). Because the

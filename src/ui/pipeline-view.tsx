@@ -6,9 +6,17 @@
 // per-session view tab AND the frame-wide shell panel (see ./shell-panel.tsx);
 // the two hosts differ only in the props below.
 //
+// Persistence is PER SESSION: the load GET and the debounced save POST carry
+// the session id, so each session owns
+// `.agent-pipeline/pipelines/<sessionId>.json` — the first edit forks that
+// file from the legacy workspace `pipeline.json`, which keeps serving as the
+// read-through fallback until then. The effect refires on a session switch
+// (the shell panel stays mounted) and resets the previous session's run view
+// state before the new graph lands.
+//
 // Running is DURABLE: the Run dialog POSTs the snapshot to the Host's /run
 // route, which starts a run executor in the Host process and returns a runId
-// immediately (one active run per workspace — a 409 reports the other run).
+// immediately (one active run per session — a 409 reports the other run).
 // The view then follows the run's record over SSE (snapshot on connect/reconnect,
 // update per transition); EventSource's auto-reconnect self-heals a profile
 // restart. When the record pauses at a breakpointed agent, the inspection modal
@@ -125,6 +133,10 @@ function PipelineView({
 	const connectRef = React.useRef<{ from: string; cursor: { x: number; y: number }; hoverTarget: string | null; startPort?: string } | null>(null);
 	// Persistence plumbing.
 	const cwdRef = React.useRef<string | undefined>(undefined);
+	// The session key rides beside cwdRef for the same reason: the save
+	// effect's deps are the graph only, so both request scopes are read at
+	// save time, not from a possibly stale closure.
+	const sessionIdRef = React.useRef("");
 	const loadedRef = React.useRef(false);
 	const skipNextPersistRef = React.useRef(false);
 	const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -150,6 +162,7 @@ function PipelineView({
 		return entry ? entry.cwd : undefined;
 	});
 	cwdRef.current = cwd;
+	sessionIdRef.current = sessionId;
 	// Workspace sessions offered as "Send to session…" targets (same cwd,
 	// excluding this session and subagent rows). Empty constants keep the
 	// selector results stable across snapshots.
@@ -533,8 +546,16 @@ function PipelineView({
 				}
 				return data.runId;
 			})
-			.then((runId) => { connectRunEvents(runId); })
+			.then((runId) => {
+				// The start may resolve after a session switch (the load-effect
+				// reset has already run by then): the run belongs to the session
+				// it was started from, so the other session's view must neither
+				// follow its stream nor surface its failure.
+				if (sessionIdRef.current !== sessionId) return;
+				connectRunEvents(runId);
+			})
 			.catch((err: unknown) => {
+				if (sessionIdRef.current !== sessionId) return;
 				setRunResult({ ok: false, error: err instanceof Error ? err.message : String(err) });
 				setResultOpen(true);
 			})
@@ -748,13 +769,33 @@ function PipelineView({
 		}
 	}
 
-	// Load the saved graph once the workspace root is known. The response's
-	// `run` field re-discovers an active run after a page reload (the SSE
-	// stream is re-attached; a paused run's inspection modal reopens).
+	// Load the saved graph once the workspace root is known, scoped to THIS
+	// session (the Host falls back to the legacy workspace file while the
+	// session has none). The response's `run` field re-discovers the session's
+	// active run after a page reload (the SSE stream is re-attached; a paused
+	// run's inspection modal reopens).
+	//
+	// The effect refires on a session switch (the shell panel stays mounted
+	// across switches), so (re)entry first drops the per-run view state the
+	// previous session left behind: its SSE stream (events for the old run
+	// must never land in the new session's view), the active/terminal records
+	// and with them the result modal (the previous session's `resultOpen`
+	// must not pop the new session's restored lastRun open), a pending
+	// debounced save (a timer scheduled for the old session would write the
+	// OLD graph into the NEW session's file — the callback reads stateRef at
+	// fire time), and a node menu anchored to ids the new graph may reuse.
 	React.useEffect(() => {
+		disconnectRunEvents();
+		setActiveRun(null);
+		setDoneRun(null);
+		setRunResult(null);
+		setResultOpen(false);
+		setNodeMenu(null);
+		if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
 		if (typeof cwd !== "string" || cwd.length === 0) return;
 		let cancelled = false;
-		fetch(ENDPOINT + "?cwd=" + encodeURIComponent(cwd), { cache: "no-store" })
+		fetch(ENDPOINT + "?cwd=" + encodeURIComponent(cwd)
+			+ (sessionId.length > 0 ? "&sessionId=" + encodeURIComponent(sessionId) : ""), { cache: "no-store" })
 			.then((r) => r.json())
 			.then((data) => {
 				if (cancelled) return;
@@ -824,11 +865,15 @@ function PipelineView({
 			})
 			.catch(() => { loadedRef.current = true; });
 		return () => { cancelled = true; };
-	}, [cwd]);
+	}, [cwd, sessionId]);
 
 	// Persist on every graph change (debounced so an in-progress drag
 	// coalesces into one write). A freshly-loaded graph is not written back
-	// immediately (skipNextPersist consumed once).
+	// immediately (skipNextPersist consumed once). The save is keyed to the
+	// session — the fork: with a session id the Host writes THAT session's own
+	// file (`.agent-pipeline/pipelines/<id>.json`) and leaves the legacy
+	// workspace graph untouched; without one it keeps the legacy cwd-only
+	// write. Both scopes read off the refs at save time.
 	React.useEffect(() => {
 		stateRef.current = { agents, connections };
 		if (!loadedRef.current) return;
@@ -841,7 +886,11 @@ function PipelineView({
 			fetch(ENDPOINT, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ cwd: cwdRef.current, graph: g }),
+				body: JSON.stringify({
+					cwd: cwdRef.current,
+					...(sessionIdRef.current.length > 0 ? { sessionId: sessionIdRef.current } : {}),
+					graph: g,
+				}),
 			}).catch(() => {});
 		}, SAVE_DEBOUNCE_MS);
 	}, [agents, connections]);
