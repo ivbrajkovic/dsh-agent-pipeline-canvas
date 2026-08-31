@@ -40,6 +40,7 @@ documents remain the design record.
 | [proposals/node-context-menu.md](proposals/node-context-menu.md) | **Built.** The node context menu — right-click on an agent node for **Go to transcript** (the projected child session) plus the node actions, on the harness `Menu` primitive. Phased plan; living phase-delta handoff alongside. |
 | [proposals/edge-routing.md](proposals/edge-routing.md) | **Built.** Readable connection lines, two iterations: per-port ticks with sides on any node edge (a loop's ports on one vertical edge arc over or under the band), tangent-aware edge paths, and the one-per-side cap as a non-fatal warning. |
 | [proposals/run-operations.md](proposals/run-operations.md) | Designed, not built: run reuse (rerun from node X), a run history browser, per-firing token accounting, and per-node timeouts — plus recorded known limits. The firing log is the foundation this builds on. |
+| [proposals/per-session-pipelines.md](proposals/per-session-pipelines.md) | **Planned.** Per-session pipelines — each session owns its graph via a copy-on-write fork of the legacy workspace file, session-scoped run discovery and the single-active-run rule, and per-session load/save in the view. Phased plan; living phase-delta handoff alongside. |
 | [proposals/implementation-plan.md](proposals/implementation-plan.md) | The phased build plan for the stream executor — each phase's gate, plus the append-only phase-deltas log recording where implementation met constraints. |
 
 Suggested reading order for a new contributor:
