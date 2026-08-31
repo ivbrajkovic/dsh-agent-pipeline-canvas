@@ -50,6 +50,24 @@ import {
 } from "./shared.ts";
 import "./canvas.css";
 
+// One-shot "show this session's Chat" navigation request, set by the
+// transcript/continue routes right before they open another session. The
+// conversation view-tab selection is a PER-SESSION store, and the only write
+// handle bound to a given session's store is the openView prop its OWN view
+// receives — a click site's openView writes the PREVIOUS session's store and
+// cannot reach the target. So the request is stashed here and consumed by the
+// PipelineView instance that mounts under the target session (which is exactly
+// the case where the target's remembered tab is this canvas instead of Chat).
+let pendingChatView: string | null = null;
+
+/** Stash a request and let it self-expire when no pipeline view mounts for it
+ * (the target already shows Chat — nothing to switch). The window only has to
+ * cover the open + history replay of the target session. */
+function requestChatView(sessionId: string) {
+	pendingChatView = sessionId;
+	window.setTimeout(() => { if (pendingChatView === sessionId) pendingChatView = null; }, 5000);
+}
+
 function PipelineView({
 	sessionId, useSessions, useWorkspaces, inputActions, openView, services, onDismiss,
 }: {
@@ -106,6 +124,17 @@ function PipelineView({
 	const skipNextPersistRef = React.useRef(false);
 	const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 	const stateRef = React.useRef<{ agents: CanvasAgent[]; connections: CanvasConnection[] }>({ agents: [], connections: [] });
+
+	// Consume a pending chat-navigation request (see pendingChatView): when this
+	// canvas is the view the TARGET session remembered, hand the tab to Chat —
+	// the transcript/continue route's whole point. Only when this host supplied
+	// openView (the per-session tab store write path).
+	React.useEffect(() => {
+		if (pendingChatView !== null && pendingChatView === sessionId && typeof openView === "function") {
+			pendingChatView = null;
+			openView("chat", "");
+		}
+	}, [sessionId, openView]);
 
 	// The session's workspace root, read off the framework session list
 	// (same source the shipped Chat view uses). Undefined until the
@@ -443,10 +472,23 @@ function PipelineView({
 	// Open one agent's durable child session (the run's transcript). Navigating
 	// to another session unmounts this view and drops the live view of the run —
 	// that is the accepted cost of every route that leaves the canvas; the run
-	// itself continues server-side.
+	// itself continues server-side. The child may remember this canvas as its
+	// tab (the view store is per session), so a chat request is stashed for the
+	// instance that mounts under the child — otherwise the user lands on the
+	// same canvas again and never sees the transcript. When THIS canvas already
+	// is the target (a child's own row, viewed from its canvas), no navigation
+	// remounts anything — this instance's openView is the direct write path.
 	function openTranscript(childSessionId: string) {
+		if (childSessionId === sessionId) {
+			if (typeof openView === "function") openView("chat", "");
+			else if (onDismiss) onDismiss();
+			return;
+		}
 		const sessions = services && services.sessions;
-		if (sessions && typeof sessions.open === "function") sessions.open(childSessionId);
+		if (sessions && typeof sessions.open === "function") {
+			requestChatView(childSessionId);
+			sessions.open(childSessionId);
+		}
 		if (onDismiss) onDismiss();
 	}
 
@@ -552,7 +594,10 @@ function PipelineView({
 			const newId = await uiWorkspace.connectWorkspace(ws.workspaceId);
 			if (typeof newId !== "string" || newId.length === 0) throw new Error("no session could be created for this workspace");
 			const sessions = services && services.sessions;
-			if (sessions && typeof sessions.open === "function") sessions.open(newId);
+			if (sessions && typeof sessions.open === "function") {
+				requestChatView(newId);
+				sessions.open(newId);
+			}
 			if (!stageDraft(newId, continueText)) throw new Error("composer access unavailable");
 			setResultOpen(false);
 			if (onDismiss) onDismiss();
@@ -567,7 +612,10 @@ function PipelineView({
 		setContinueStatus(null);
 		try {
 			const sessions = services && services.sessions;
-			if (sessions && typeof sessions.open === "function") sessions.open(targetId);
+			if (sessions && typeof sessions.open === "function") {
+				requestChatView(targetId);
+				sessions.open(targetId);
+			}
 			if (!stageDraft(targetId, continueText)) throw new Error("composer access unavailable");
 			setResultOpen(false);
 			if (onDismiss) onDismiss();

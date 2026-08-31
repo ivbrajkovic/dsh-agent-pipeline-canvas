@@ -250,7 +250,15 @@ status strip (a failed run shows the failure banner and the per-agent
 statuses; a failed firing's transcript stays openable). Each row also
 carries a **Transcript** button (when the run published a child session): it
 opens the agent's durable child session, which holds the agent's full
-transcript.
+transcript. The route hands the selection to the child's **Chat** tab: the
+conversation's view-tab selection is a per-session store, so a child whose
+remembered tab is this canvas would otherwise reopen on the pipeline instead
+of its transcript. The switch is requested just before the open and consumed
+by the view that mounts under the child (a short self-expiry bounds the
+request); on the child's own row, clicked from its own Pipelines tab, the
+mounted view hands the tab over directly. The frame-wide overlay panel's
+host receives no `openView`, so there the route can only close the panel
+over the underlying tab.
 
 The modal offers three continue routes — every route only **prefills a
 composer and lets the user send**; nothing is ever auto-sent:
