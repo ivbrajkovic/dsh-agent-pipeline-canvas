@@ -22,3 +22,15 @@ Do not record anything the plan or the code already shows.
   unit suite covers `index.ts`), so any future curl/browser matrix should
   include it — a corrupt `pipelines/<id>.json` must serve `null`, not the
   legacy graph.
+
+- **S2 (commit e7726ba, scrutinized post-implementation — verdict: ship; no
+  blocking findings).** One consequence of a plan pin, recorded so the S4
+  docs sweep carries it: `getRun` stays unscoped ("a runId is a UUID
+  address"), which keeps the run GET and SSE routes unscoped
+  sweep/resurrect entry points — a lookup whose id has no live executor (a
+  stale reconnect, a curl probe) lazily loads the workspace unscoped and
+  can sweep or resurrect ANY session's records, so the control gate's
+  session isolation is deliberately not airtight across those two routes.
+  Session-scoped discovery through the pipeline GET (S2) and the client's
+  per-session keying (S3) are the isolation path; the S4 route docs should
+  state the run GET/SSE behavior explicitly.
