@@ -844,7 +844,7 @@ function PipelineView({
 					if (v > maxSeq) maxSeq = v;
 				});
 				setSeq(maxSeq + 1);
-				// Discovery: adopt the workspace's active run (if any) and follow it.
+				// Discovery: adopt the session's active run (if any) and follow it.
 				const active = data && data.ok === true && data.run !== null && typeof data.run === "object" ? data.run as RunRecordLike : null;
 				if (active !== null && (active.state === "running" || active.state === "paused") && typeof active.runId === "string") {
 					setActiveRun(active);
@@ -1145,7 +1145,7 @@ function PipelineView({
 						className={"pipeline-run-live" + (failedNodeId !== null ? " failed" : "")}
 						title={failedNodeId !== null
 							? "A firing failed — the run ends after the in-flight agents finish; completed outputs are preserved"
-							: "A run is active in this workspace — canvas edits affect the NEXT run only"}
+							: "A run is active in this session — canvas edits affect the NEXT run only"}
 					>
 						{failedNodeId !== null
 							? "Failed at " + nameOf(failedNodeId) + " — finishing in-flight agents…"
@@ -1168,7 +1168,7 @@ function PipelineView({
 				<button
 					className="pipeline-btn pipeline-btn-run"
 					disabled={runActive || startPending || !validation.ok}
-					title={runActive ? "A run is already active in this workspace" : startPending ? "Starting the run…" : "Open the run dialog"}
+					title={runActive ? "A run is already active in this session" : startPending ? "Starting the run…" : "Open the run dialog"}
 					onClick={() => { setShowRunModal(true); }}
 				>{runActive ? "Running…" : startPending ? "Starting…" : "Run"}</button>
 				{runActive || startPending ? (

@@ -390,7 +390,7 @@ export type PipelineRunResult = PipelineRunSuccess | PipelineRunFailure;
 // ---- Durable runs -----------------------------------------------------------------
 // A run is no longer a blocking request/response: POST /run starts a run
 // executor in the Host process and returns a runId immediately. The executor's
-// state lives in a per-workspace record (`.agent-pipeline/runs/<runId>.json`,
+// state lives in a durable record (`.agent-pipeline/runs/<runId>.json`,
 // rewritten atomically on every transition) so a paused run stays controllable
 // across profile restarts and page reloads. The browser follows the record over
 // SSE and issues control commands (resume / rerun / steer / abort) at pause

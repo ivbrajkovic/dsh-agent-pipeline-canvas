@@ -39,7 +39,9 @@ the full project layout. The behavioral rules themselves live in
   (tsdown inlines it like `graph.ts`). Reads legacy v1 records too.
 
 `src/storage.ts` implements the atomic temp-file+rename write protocol shared
-by the pipeline file and the run records.
+by the legacy pipeline file, the per-session pipeline graphs, and the run
+records, and owns the pure path seam for the per-session files
+(`isValidSessionKey` / `sessionPipelineFilePath`).
 
 ## The Host half (Node)
 
@@ -48,10 +50,10 @@ row `agent-pipeline-canvas` and registers exact `webServer` routes:
 
 | Route | Purpose |
 |-------|---------|
-| `GET\|POST /dsh-agent-pipeline` | Persistence. `GET ?cwd=<absolute project root>` reads `<cwd>/.agent-pipeline/pipeline.json` (or `null` when absent) and also returns `run` — the workspace's active run record (or `null`) — plus `lastRun`, the newest record of any state (or `null` while a run is active), from which a remounted canvas restores the last run's result. `POST { cwd, graph }` writes it atomically. A relative or empty `cwd` is refused, so the file can only land under a real project directory. Both responses carry a `validation` field (the `validateGraph` result for the graph on disk) without changing the load/save behaviour. |
-| `POST /dsh-agent-pipeline/run` | Starts a durable run and returns `{ ok, runId }` immediately. One run is active per workspace — a second concurrent start answers `409 { ok: false, activeRunId }`. |
-| `GET /dsh-agent-pipeline/run` | One run's full record (`?id=…&cwd=…`; debug/fallback for the SSE stream). |
-| `GET /dsh-agent-pipeline/run/events` | The run's SSE stream: `event: snapshot` (full record) on every connect/reconnect, `event: update` per transition. |
+| `GET\|POST /dsh-agent-pipeline` | Persistence. `GET ?cwd=<absolute project root>[&sessionId=<key>]` reads the graph: with a valid `sessionId`, the session's own `<cwd>/.agent-pipeline/pipelines/<sessionId>.json` when it exists, else read-through to the legacy `<cwd>/.agent-pipeline/pipeline.json` (a GET never forks; an invalid key answers `400 invalid or missing sessionId`). Without a `sessionId` (or with an empty one) the behavior is the legacy workspace file exactly. The GET also returns `run` — the active run record, scoped to the given session when a valid `sessionId` is present and workspace-level otherwise — plus `lastRun`, the newest record of any state (or `null` while a run is active), from which a remounted canvas restores the last run's result. `POST { cwd, graph, sessionId? }` writes atomically: a non-empty valid `sessionId` writes the session's own file — the fork, fired by the session's first edit — leaving the legacy file untouched; without one it writes the legacy file. A relative or empty `cwd` is refused, so the file can only land under a real project directory. Both responses carry a `validation` field (the `validateGraph` result for the graph on disk) without changing the load/save behaviour. |
+| `POST /dsh-agent-pipeline/run` | Starts a durable run and returns `{ ok, runId }` immediately. One run is active per (workspace, session) — a second concurrent start in the SAME session answers `409 { ok: false, activeRunId }`; two sessions in one workspace may run concurrently (their agents can collide on the same repository files — that is the feature's known caveat). |
+| `GET /dsh-agent-pipeline/run` | One run's full record (`?id=…&cwd=…`; debug/fallback for the SSE stream). Addressed by exact `runId` and deliberately NOT session-scoped: a lookup whose id has no live executor lazily loads the workspace unscoped and may sweep or resurrect ANY session's records, so a stale reconnect or a curl probe works across sessions. Session-scoped discovery through the persistence GET above is the isolation path. |
+| `GET /dsh-agent-pipeline/run/events` | The run's SSE stream: `event: snapshot` (full record) on every connect/reconnect, `event: update` per transition. Same unscoped by-id behavior as the run GET — a reconnect re-attaches by `runId` regardless of session. |
 | `POST /dsh-agent-pipeline/control` | Resume / rerun / steer / abort a run: `{ runId, cwd, action, feedback? }` → `{ ok }` or a typed error. |
 | `GET /dsh-agent-pipeline/options?provider=<id>` | The registered LLM provider routes plus one route's advertised models, read server-side off the `llm` service (per-provider model catalogs are not remotely callable). Degrades to empty lists so the settings fields stay free-form. |
 
@@ -66,7 +68,8 @@ Supporting modules:
   pending-pause queue, steer/rerun routing, abort drain), per-node parent
   anchor lifecycle, the commit writer (one chained transition per record
   mutation), the subagent/end settlement matcher, the restart sweep, and the
-  single-active-run rule.
+  single-active-run rule (one active run per (workspace, session); discovery
+  and the sweep are session-scoped when asked).
 
 ## The browser half
 
@@ -94,9 +97,11 @@ The canvas registers into three additive slots:
 `lib/client.js` in the `window.__ModuleLoader__.load(...)` format the browser
 module system consumes, and is picked into the browser roster because
 `package.json` declares `dsh.client` and `exports["./client"]`. The view
-reads the session's workspace root (cwd) from the framework standard kit
-(`useSessions`), loads on mount, and saves after every graph change — which
-is what survives the view-tab switch that would otherwise drop
+reads the session's workspace root (cwd) and the session id from the
+framework standard kit (`useSessions`), loads on mount keyed to the session
+— a session without a graph of its own reads through to the legacy workspace
+file until its first edit forks one — and saves after every graph change,
+which is what survives the view-tab switch that would otherwise drop
 component-local React state.
 
 The Host and the browser touch harness services through minimal structural
@@ -139,9 +144,12 @@ dsh-agent-pipeline-canvas/
                         node, computed from the firing log — shared by the
                         tests and the browser bundle (inlined by tsdown)
   src/storage.ts        the atomic temp-file+rename write protocol shared by the
-                        pipeline file and the run records
+                        legacy pipeline file, the per-session pipeline graphs,
+                        and the run records, plus the per-session path seam
+                        (isValidSessionKey / sessionPipelineFilePath)
   src/index.ts          Host half: Cordis plugin row + the webServer routes
-                        (persistence with atomic writes, durable run start +
+                        (persistence — the legacy file plus the per-session
+                        fork — with atomic writes, durable run start +
                         record read + SSE stream + control, options catalog)
   src/runner.ts         per-agent primitives: runOneAgent (one-shot `spawn` child
                         with settings forwarding), startContinuableAgent /
@@ -151,7 +159,9 @@ dsh-agent-pipeline-canvas/
                         task per firing, the control plane (pause mailbox,
                         pending-pause queue, abort drain), per-node parent anchor
                         lifecycle, the commit writer, the subagent/end settlement
-                        matcher, restart sweep, single-active-run rule
+                        matcher, restart sweep, session-scoped discovery and the
+                        single-active-run rule (one active run per
+                        (workspace, session))
   src/client.tsx        browser entry: slot registration only (components in
                         src/ui/ — pipeline-view, agent-config, run-modal,
                         result-modal, inspect-modal, shell-panel, shared; each

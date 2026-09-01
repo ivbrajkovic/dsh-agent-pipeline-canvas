@@ -41,9 +41,9 @@ tab, or even the profile's lifetime — runs outlive the tab by design (use
   (`GET /dsh-agent-pipeline/run/events?id=…&cwd=…`): an `event: snapshot`
   full record on every connect/reconnect and an `event: update` per
   transition. `EventSource` auto-reconnect self-heals a profile restart.
-- A page reload re-discovers the workspace's active run through the `run`
-  field of `GET /dsh-agent-pipeline?cwd=…` — mid-run reloads re-attach and
-  the run continues.
+- A page reload re-discovers the session's active run through the `run`
+  field of `GET /dsh-agent-pipeline?cwd=…&sessionId=…` — mid-run reloads
+  re-attach and the run continues.
 - When nothing is active, the same GET's `lastRun` field (the newest record
   of any state) restores the **last run's outcome** after leaving and
   re-entering the view (or a reload): the Result button returns to the
@@ -54,10 +54,11 @@ tab, or even the profile's lifetime — runs outlive the tab by design (use
 
 ### The run record
 
-The record persists per workspace at
+The record persists at
 `<cwd>/.agent-pipeline/runs/<runId>.json`, rewritten **atomically** (temp
-file + rename) on every transition — the same protocol as `pipeline.json`.
-It carries:
+file + rename) on every transition — the same protocol as the pipeline
+files. It carries the `sessionId` it was started from (run discovery is
+scoped to that session; see the single-active-run rule below). It carries:
 
 - the immutable graph snapshot, the pipeline input, and the `maxInFlight` cap;
 - the **firing log** — one entry per firing (`f-001`, `f-002`, …) with the
@@ -121,8 +122,11 @@ exception, on purpose: a **Rerun/Steer of a parked head** that settles
 non-completed re-parks for another decision — the user is present; only
 unattended firings fail the run.)
 
-**One run is active (running|paused) per workspace**; a second `POST /run`
-answers `409 { ok: false, activeRunId }`.
+**One run is active (running|paused) per (workspace, session)**; a second
+`POST /run` from the same session answers `409 { ok: false, activeRunId }`.
+Different sessions in one workspace may run concurrently — the caveat is
+that the two pipelines' agents can then collide on the same repository
+files; the isolation is per session, not per working tree.
 
 ## Breakpoints: grouped pause, the queue, resume / rerun / steer / abort
 
@@ -204,7 +208,7 @@ load:
   NodeRunner task per firing, the control plane (pause mailbox, queue,
   steer/rerun routing, abort drain), per-node anchor lifecycle, the commit
   writer (one chained write per transition), the restart sweep, and the
-  single-active-run rule.
+  per-session single-active-run rule.
 - `src/projection.ts` — the per-node view computed from the firing log.
 - `src/runner.ts` — `runOneAgent` (one-shot) and the continuable/steer
   primitives.

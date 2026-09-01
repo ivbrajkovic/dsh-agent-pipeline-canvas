@@ -2,7 +2,7 @@
 //
 // Replaces the old blocking `POST /run` with a durable execution model: a run
 // is an executor fiber in the Host process whose whole state lives in a
-// per-workspace record, `<cwd>/.agent-pipeline/runs/<runId>.json`, rewritten
+// durable record, `<cwd>/.agent-pipeline/runs/<runId>.json`, rewritten
 // atomically on every transition (same protocol as pipeline.json — see
 // storage.ts). The browser starts a run, then follows the record over SSE and
 // issues control commands; the run — including a PAUSE — survives page reloads
@@ -1561,7 +1561,7 @@ class RunExecutor {
 export type ControlOutcome = { ok: true } | { ok: false; error: string };
 
 /**
- * The per-workspace run registry: starts executors, lazily loads and sweeps
+ * The durable run registry: starts executors, lazily loads and sweeps
  * persisted records, and routes control commands. One registry per plugin
  * fiber; one active (running|paused) run per (workspace, session).
  */
@@ -1807,7 +1807,7 @@ export class RunRegistry {
 	}
 
 	/**
-	 * Lazy per-workspace load: sweep stale `running` records to `aborted`
+	 * Lazy disk load: sweep stale `running` records to `aborted`
 	 * (their executor died with the previous process), resurrect `paused`
 	 * records as controllable executors, and return the newest active record
 	 * (or null). In-memory executors always win over their disk copies. With a
