@@ -91,6 +91,19 @@ export interface CycleClosingVerdict {
  */
 export declare function cycleClosingFlip(graph: unknown, connection: unknown): CycleClosingVerdict;
 /**
+ * The control ids lying on at least one directed cycle of the HONEST graph —
+ * the canvas's membership test for the run view's iteration display
+ * (docs/proposals/loops.md L4: an if on a cycle shows the loop's iteration).
+ * A control lies on a cycle exactly when the drawn graph can walk back to it
+ * (feeder → control → branch → … → feeder); a feeder that sits on some other
+ * loop does not pull its control in, and a branch aimed into an unrelated
+ * cycle does not either — participation, not presence (the cycleClosingFlip
+ * precedent). Lowering contracts each such cycle onto the feeder, so every
+ * cycle found here is one the kernel really runs. Total over malformed
+ * declarations; never throws.
+ */
+export declare function loopControlIds(graph: unknown): ReadonlySet<string>;
+/**
  * The agent ids lying on at least one directed cycle of the LOWERED graph —
  * the canvas's membership test for the branch editor's shadowing diagnosis
  * (which branches wire back into a loop). Lowered self-loops count (a branch

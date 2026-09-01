@@ -8,7 +8,7 @@
 // to exactly its hand-authored ports+bindings twin), the ""-value catch-all
 // normalization, and lowering's totality over malformed records.
 import { validateGraph } from "../lib/graph.js";
-import { firedBranches, lowerControls } from "../lib/controls.js";
+import { countThreshold, firedBranches, lowerControls } from "../lib/controls.js";
 import { deepStrictEqual } from "node:assert";
 
 let passed = 0;
@@ -447,6 +447,53 @@ check("a future control kind validates as a plain endpoint", {
 		deepStrictEqual(firedBranches(null, ["billing"]), []);
 		deepStrictEqual(firedBranches(branches, [null, 7, "billing"]), ["billing"]);
 		deepStrictEqual(firedBranches([null, { name: "" }, { name: "x" }] as never, ["x"]), ["x"]);
+	});
+}
+
+// --- the run view's iteration budget: countThreshold (loops L4) --------------
+{
+	let ok = true;
+	const attempt = (name: string, run: () => void) => {
+		try {
+			run();
+			passed++;
+			console.log(`ok    ${name}`);
+		} catch (error) {
+			ok = false;
+			failed++;
+			console.error(`FAIL  ${name} — ${error && (error as Error).message}`);
+		}
+	};
+	attempt("a valued $count >= row parses as the budget", () => {
+		deepStrictEqual(countThreshold([
+			{ name: "exhausted", field: "$count", value: "3", op: ">=" },
+			{ name: "retry" },
+		]), 3);
+	});
+	attempt("the first matching row wins", () => {
+		deepStrictEqual(countThreshold([
+			{ name: "a", field: "$count", value: "1", op: ">=" },
+			{ name: "b", field: "$count", value: "5", op: ">=" },
+		]), 1);
+	});
+	attempt("an == count row is not a budget (shape-only, never judged as terminating)", () => {
+		deepStrictEqual(countThreshold([{ name: "done", field: "$count", value: "3" }]), null);
+	});
+	attempt("a valueless $count row is the catch-all, not a threshold", () => {
+		deepStrictEqual(countThreshold([{ name: "else", field: "$count" }]), null);
+		deepStrictEqual(countThreshold([{ name: "else", field: "$count", value: "" }]), null);
+	});
+	attempt("a >= row whose value is not a finite number parses to nothing (validation reports it)", () => {
+		deepStrictEqual(countThreshold([{ name: "done", field: "$count", value: "abc", op: ">=" }]), null);
+	});
+	attempt("content rows and branch-less inputs give no budget", () => {
+		deepStrictEqual(countThreshold([{ name: "billing", field: "action", value: "billing" }]), null);
+		deepStrictEqual(countThreshold([]), null);
+		deepStrictEqual(countThreshold(undefined), null);
+		deepStrictEqual(countThreshold(null), null);
+	});
+	attempt("total over malformed rows, never throws", () => {
+		deepStrictEqual(countThreshold([null, "x", { name: "done", field: "$count", value: "2.5", op: ">=" }] as never), 2.5);
 	});
 }
 

@@ -36,8 +36,8 @@
 // closed (the user closed it before leaving).
 import * as React from "react";
 import type { MenuEntry } from "@deepseek-ai/dsh-client-ui-primitives";
-import { validateGraph, cycleClosingFlip, cycleNodeIds } from "../graph.ts";
-import { firedBranches, lowerControls } from "../controls.ts";
+import { validateGraph, cycleClosingFlip, cycleNodeIds, loopControlIds } from "../graph.ts";
+import { countThreshold, firedBranches, lowerControls } from "../controls.ts";
 import { classifyGraph, topoOrder, COUNT_KEY } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
@@ -90,19 +90,33 @@ function requestChatView(sessionId: string) {
 
 /** One if control's DERIVED run state (see controlRunState): the decision
  * state the border and branch edges show plus the branch names the source's
- * firing chose. */
-type ControlRunState = { state: "idle" | "armed" | "fired" | "quiet"; chosen: string[] };
+ * firing chose. `iter` rides along only on a loop decision (docs/proposals/
+ * loops.md L4): the count is the feeding agent's firing number and the
+ * threshold the `$count >= M` row parsed off the branches (null when none). */
+type ControlRunState = { state: "idle" | "armed" | "fired" | "quiet"; chosen: string[]; iter?: { count: number; threshold: number | null } };
+
+/** The iteration chip's text: "iter 2", promoted to "iter 2/3" by a parsed threshold. */
+function iterLabel(iter: { count: number; threshold: number | null }): string {
+	return "iter " + iter.count + (iter.threshold !== null ? "/" + iter.threshold : "");
+}
+
+/** The iteration in words for the tooltips: "iteration 2", "iteration 2 of 3". */
+function iterWords(iter: { count: number; threshold: number | null }): string {
+	return "iteration " + iter.count + (iter.threshold !== null ? " of " + iter.threshold : "");
+}
 
 /** The if control's hover tooltip: names the decision and its branches — the
- * words no longer rendered as a node tag. */
+ * words no longer rendered as a node tag — plus the loop iteration when the
+ * control sits on a cycle. */
 function controlRunTitle(runState: ControlRunState): string {
+	const iter = runState.iter !== undefined ? " — " + iterWords(runState.iter) : "";
 	return runState.state === "fired"
-		? "The decision fired — branch " + runState.chosen.join(", ")
+		? "The decision fired — branch " + runState.chosen.join(", ") + iter
 		: runState.state === "quiet"
-			? "The feeding agent's result matched no branch — nothing downstream of the if ran"
+			? "The feeding agent's result matched no branch — nothing downstream of the if ran" + iter
 			: runState.state === "armed"
-				? "No branch decision recorded — the feeding agent's last firing never reached emission"
-				: "The run has not reached this decision yet";
+				? "No branch decision recorded — the feeding agent's last firing never reached emission" + iter
+				: "The run has not reached this decision yet" + iter;
 }
 
 /** The statuses that render on an agent node — pending renders nothing
@@ -714,15 +728,34 @@ function PipelineView({
 	// empty selection (the source emitted on no branch); armed is anything
 	// in flight or settled without reaching emission. Null when no run view
 	// exists at all.
+	//
+	// The loop membership (docs/proposals/loops.md L4) is a GRAPH fact, so it
+	// is computed once per graph edit rather than per render; the iteration
+	// count itself stays a per-render derivation off the record's firings —
+	// derived, never stored.
+	const loopControls = React.useMemo(
+		() => loopControlIds(buildGraph(agents, connections, controls)),
+		[agents, connections, controls],
+	);
 	function controlRunState(control: CanvasControl): ControlRunState | null {
 		if (runProjection === null) return null;
 		const sourceId = connections.find((c) => c.target === control.id)?.source;
 		const node = sourceId !== undefined ? runProjection.nodes[sourceId] : undefined;
-		const firing = node !== undefined && node.firings.length > 0 ? node.firings[node.firings.length - 1] : undefined;
-		if (node === undefined || firing === undefined) return { state: "idle", chosen: [] };
-		if (!Array.isArray(firing.emittedTo)) return { state: "armed", chosen: [] };
+		if (node === undefined || node.firings.length === 0) return { state: "idle", chosen: [] };
+		const firing = node.firings[node.firings.length - 1];
+		// On a loop the feeding agent's firing count IS the iteration number
+		// (its feeder fires once per pass), promoted with the threshold a
+		// `$count >= M` row declares. Only a firing that happened counts —
+		// before the first one the diamond stays idle and shows nothing.
+		const iter = loopControls.has(control.id)
+			? { count: node.firings.length, threshold: countThreshold(control.branches) }
+			: undefined;
+		const withIter = iter !== undefined ? { iter } : {};
+		if (!Array.isArray(firing.emittedTo)) return { state: "armed", chosen: [], ...withIter };
 		const chosen = firedBranches(control.branches, firing.emittedTo);
-		return chosen.length > 0 ? { state: "fired", chosen } : { state: "quiet", chosen: [] };
+		return chosen.length > 0
+			? { state: "fired", chosen, ...withIter }
+			: { state: "quiet", chosen: [], ...withIter };
 	}
 
 	function disconnectRunEvents() {
@@ -1647,6 +1680,14 @@ function PipelineView({
 				{warnings.length > 0 ? (
 					<div className="node-warn" title={warnings.map((w) => w.message).join("\n")}>
 						{"⚠ " + warnings.length}
+					</div>
+				) : null}
+				{runState?.iter !== undefined ? (
+					<div
+						className="node-iter"
+						title={iterWords(runState.iter) + " — the feeding agent's firing count on this loop"}
+					>
+						{iterLabel(runState.iter)}
 					</div>
 				) : null}
 				<div

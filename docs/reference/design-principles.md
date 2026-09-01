@@ -58,6 +58,12 @@ LLM calls are the scarce resource; the model treats them that way.
 - Firing is unbounded by default, so **bounds are core**: a port may declare a
   maximum delivery count; further messages are dropped and recorded. A loop
   budget is a port bound, not a loop feature.
+- **Every cycle carries its guard** — the bound's sibling rule: a directed
+  cycle without a budget is a bug by definition, so the runner refuses it
+  (`cycle-unguarded`). The guard is DATA — a port `bound` or a valued
+  `$count` branch escaping the loop — never a node kind; the loop stays the
+  flowchart shape (a decision diamond plus a back edge), and a guarded cycle
+  is legal wiring like any other.
 - A paused run halts new firings but **lets in-flight turns finish** —
   cancelling paid work to pause would throw that money away.
 - **Parent anchors** (the hidden parent session of a continuable child) are

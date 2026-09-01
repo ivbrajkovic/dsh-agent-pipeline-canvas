@@ -407,9 +407,10 @@
 .control-branch.side-bottom .branch-label { top: calc(100% + 5px); right: calc(50% + 5px); }
 /* The control's warning chip (never-fire sources, side stacking) hangs below
    the diamond's bottom vertex — a control has no status badge (its run state
-   rides the border), so the slot is the authoring warning's alone. A
-   bottom-side branch tick anchors on that same vertex; the chip's base
-   overlay keeps both readable when they coexist. */
+   rides the border). A bottom-side branch tick anchors on that same vertex;
+   the chip's base overlay keeps both readable when they coexist. The run
+   view's iteration chip (.node-iter below) mirrors it on the top vertex, so
+   the two slots never collide. */
 .pipeline-node .node-warn {
 	position: absolute;
 	bottom: -8px;
@@ -422,6 +423,26 @@
 	background: var(--dsw-alias-bg-overlay);
 	border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 50%, transparent);
 	color: var(--dsw-alias-state-warning-primary, #f59e0b);
+}
+/* The loop-iteration chip (the run view, loops L4): on a cycle the diamond's
+   top vertex carries `iter N`, promoted to `iter N/M` when a `$count >= M`
+   row parses off the branches — the count is derived from the record's
+   firings, never stored. Neutral colors: it is run information, not a
+   warning (the border keeps the fired/quiet vocabulary); a top-side branch
+   tick anchors on the same vertex, and the DOM order (chips render before
+   the ticks) keeps the tick the live pointer target. */
+.pipeline-node .node-iter {
+	position: absolute;
+	top: -8px;
+	left: 50%;
+	transform: translateX(-50%);
+	font-size: 9px;
+	line-height: 1;
+	padding: 2px 7px;
+	border-radius: 999px;
+	background: var(--dsw-alias-bg-overlay);
+	border: 1px solid color-mix(in srgb, var(--dsw-alias-label-secondary) 45%, transparent);
+	color: var(--dsw-alias-label-primary);
 }
 /* The owner-handoff dialog's body text. */
 .pipeline-edge-picker .handoff-text { font-size: 12px; color: var(--dsw-alias-label-primary); line-height: 1.5; }
