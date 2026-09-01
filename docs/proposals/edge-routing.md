@@ -38,6 +38,11 @@ highlight shows on the target's port ticks), and the Connect-ports
 picker still selects names. One refinement: drafting from a specific output
 tick defaults the picker's source port to that tick.
 
+*(Later iteration — port reveal — supersedes the always-visible-tick part:
+ticks now hide at rest and reveal on hover / during a drag, the whole node
+became the drop zone, and the drafted wire snaps to the nearest input tick.
+See [canvas.md](../guide/canvas.md#nodes-ports-and-connections).)*
+
 ## Proposal 2 — back-edge lane
 
 `edgePath` gains one geometric rule: when the target anchor sits left of the
