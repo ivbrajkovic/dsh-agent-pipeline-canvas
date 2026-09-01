@@ -1,6 +1,11 @@
 # The if control — conditional routing as a first-class node
 
-**Status:** plan, ready for phased implementation.
+**Status: Built** — all four phases shipped (C1 pure core, C2 canvas
+authoring, C3 run experience, C4 docs + scrutiny). The guides describe the
+shipped behavior: [the canvas guide](../guide/canvas.md#the-if-control--the-fork-as-a-node),
+the [conditional-router sample](../guide/pipeline-samples.md), and the
+[graph/execution reference](../reference/graph-and-execution.md#the-if-control-honest-graph-lowered-execution);
+the living phase-delta handoff lives in each phase's Delta section below.
 **Extends:** [conditional-dispatch.md](conditional-dispatch.md) — the
 port/binding mechanics are **built** and stay as the runtime substrate; this
 plan adds the authoring surface on top of them.

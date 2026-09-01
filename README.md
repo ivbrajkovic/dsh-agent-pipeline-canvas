@@ -39,7 +39,8 @@ first edit.
 - **Per-agent configuration** — system prompt (the harness persona slot),
   provider/model/reasoning/tokens, tool filter, delegation-depth cap, an
   output schema, named input ports with firing policies and delivery
-  bounds, named output ports with bindings (conditional dispatch), and the
+  bounds, named output ports with bindings (conditional dispatch), an **If
+  control** that makes a conditional fork a visible node, and the
   pause-on-output breakpoint; empty fields inherit the parent session.
 - **Concurrent durable runs** — a run executes in the Host process as a
   firing log: ready agents run concurrently (capped), fail-fast errors end
@@ -71,7 +72,7 @@ The full manual lives in [docs/index.md](docs/index.md). Read what you need:
 |----------|--------|
 | [docs/guide/canvas.md](docs/guide/canvas.md) | Building pipelines: nodes, ports, connections, validation, the configuration panel (including the port surface), persistence. |
 | [docs/guide/running-pipelines.md](docs/guide/running-pipelines.md) | The run dialog, the firing-kernel execution model, durable runs and SSE, grouped pause / queue / fail-fast, breakpoints (resume / rerun / steer / abort), results and continue routes. |
-| [docs/guide/pipeline-samples.md](docs/guide/pipeline-samples.md) | Short sample graphs: fan-out/fan-in, any-of joins, conditional routers via bindings, feedback loops with a bound. |
+| [docs/guide/pipeline-samples.md](docs/guide/pipeline-samples.md) | Short sample graphs: fan-out/fan-in, any-of joins, conditional routers via the if control (or hand-authored bindings), feedback loops with a bound. |
 | [docs/guide/deployment.md](docs/guide/deployment.md) | Profile wiring, the sync loop, route verification, dev scripts and change discipline. |
 | [docs/reference/architecture.md](docs/reference/architecture.md) | Host routes, browser slots and bundling, the pure core and the firing kernel, project layout. |
 | [docs/reference/graph-and-execution.md](docs/reference/graph-and-execution.md) | The graph schema, every validation error code, the kernel firing rules, and the firing-log record. |

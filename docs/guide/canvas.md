@@ -1,7 +1,8 @@
 # Building pipelines on the canvas
 
 This guide covers the editing experience: how a pipeline gets built on the
-canvas, how an agent is configured, and where the graph is stored. For what
+canvas, how an agent is configured, how the if control makes a conditional
+fork a visible node, and where the graph is stored. For what
 happens when you press **Run**, see
 [running-pipelines.md](running-pipelines.md); for the formal rules the editor
 enforces, see [../reference/graph-and-execution.md](../reference/graph-and-execution.md).
@@ -84,7 +85,12 @@ strip lists current problems:
 - **duplicate agent ids**, non-array `agents`/`connections`;
 - malformed **port declarations** (unnamed ports, unknown policies,
   non-positive-integer bounds, duplicate port names) — see the full rule set
-  in [../reference/graph-and-execution.md](../reference/graph-and-execution.md).
+  in [../reference/graph-and-execution.md](../reference/graph-and-execution.md);
+- malformed **control records** and broken **if wiring** — a control with no
+  (or several) feeders, a control fed by a control, a feeding agent that
+  keeps its own emission config, unnamed or duplicated branches, a catch-all
+  that is not last, an edge naming an undeclared branch (see [the if
+  control](#the-if-control--the-fork-as-a-node) below).
 
 A **directed cycle** is reported as a *warning* (legal wiring), and the
 toolbar chip gains a warning count. An absent or empty graph is valid (there
@@ -97,8 +103,9 @@ data — the exact shape the plugin persists and the runner consumes.
 
 ## The agent configuration panel
 
-Click an agent's edit button to open a wide two-column card with everything
-visible. A plain click on the node still just selects it.
+Open an agent's configuration panel from its right-click context menu
+(**Edit agent**) — nodes carry no edit button. A wide two-column card shows
+everything visible; a plain click on the node still just selects it.
 
 ### Left column — behavior
 
@@ -182,6 +189,63 @@ The port fields make the canvas author the full stream model:
 
 Short sample graphs for each pattern live in
 [pipeline-samples.md](pipeline-samples.md).
+
+## The if control — the fork as a node
+
+A conditional can live inside the producing agent (the output ports +
+bindings above) or become a visible **If control** node — the decision as
+something you can see and point at:
+
+```
+                 ┌── "billing" ──→ [Billing]
+[Router] ──→ ⟨ if ⟩ ── "other" ───→ [General]
+```
+
+- **Palette.** Drag an **If** from the palette onto the canvas like an agent
+  (`if-1`, `if-2`, … — a separate id space from `agent-N`). The control
+  renders as a flowchart decision diamond: one unnamed input tick on the
+  left vertex, and one **labeled tick per branch** on the edge that branch's
+  `side` picks (default right; two branches on one edge render stacked, same
+  as ports).
+- **One owner.** Exactly one agent feeds the control, and the if **owns**
+  that agent's entire emission surface: the agent declares no output ports
+  or bindings of its own, feeds only this control, and has no other outgoing
+  edges (`if-owner-conflict` otherwise). The agent keeps its **output
+  schema** — the structured result shape belongs to the model call; the if
+  owns only the decision. Wiring an agent that still carries ports or
+  bindings into an if opens the **handoff dialog**: **Move into the if**
+  folds them into branch rules (bindings first, in evaluation order; a
+  trailing catch-all stays last), **Clear on the agent** drops them, and
+  **Not now** lands the edge and leaves the conflict to the validation
+  strip.
+- **Branches.** Right-click the control → **Edit branches** (nodes carry no
+  edit button; the menu is the only editor path). One row per branch —
+  `name | field == value | side` — with reorder, add, and remove. Branches
+  evaluate top to bottom against the feeding agent's **structured output**:
+  first match wins, and the empty value is the catch-all and must stay last
+  (the editor enforces both live and blocks Save on a broken shape). A
+  branch tick drags to the agent that handles it like any output tick — the
+  port picker opens with the branch list on every control-sourced draft.
+- **Warnings.** The control's ⚠ chip (and the same messages under the
+  editor's rows) shows the non-fatal findings that name it: branches sharing
+  one edge (`if-side-conflict`), and the never-fire cases — a source without
+  `settings.outputSchema` or a breakpointed source can never produce the
+  structured result the branches compare, so they would never fire. The
+  fatal rules land in the issue strip; the full list is in
+  [../reference/graph-and-execution.md](../reference/graph-and-execution.md#validation-validategraphgraph).
+- **At run time** the control never fires a child session: the executor
+  **lowers** it onto the feeding agent's output ports + bindings before the
+  kernel starts — an if-graph runs exactly like the hand-authored bindings
+  form ([the lowering
+  contract](../reference/graph-and-execution.md#the-if-control-honest-graph-lowered-execution)).
+  On the canvas the diamond shows a status chip derived from the feeding
+  agent's latest firing — **idle** (the run has not reached the fork),
+  **armed** (the firing has not reached emission), **fired** (the tooltip
+  names the chosen branches, and the chosen branch's edge lights success
+  green), **quiet** (the result matched no branch — nothing downstream of
+  the if ran, and the untouched branch edges dim). Deleting an agent
+  cascade-deletes any control it feeds and that control's edges; **Clear**
+  empties controls too.
 
 ## Persistence
 

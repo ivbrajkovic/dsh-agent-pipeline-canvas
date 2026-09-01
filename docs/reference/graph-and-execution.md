@@ -20,7 +20,10 @@ The pipeline is a directed graph over two arrays:
                      "bindings"?: [ { "field", "port", "value"? } ] } ],
   "connections": [ { "id", "source", "target",
                      "sourcePort": "<source>:<outputPort>",
-                     "targetPort": "<target>:<inputPort>" } ]
+                     "targetPort": "<target>:<inputPort>" } ],
+  "controls"?:   [ { "id": "if-N", "kind": "if",
+                     "branches": [ { "name", "field", "value"?, "side"? } ],
+                     "x", "y" } ]
 }
 ```
 
@@ -44,6 +47,23 @@ The pipeline is a directed graph over two arrays:
   non-fatal `agent-port-side-conflict` *warning*. A loop whose two ports sit
   on the same vertical edge renders as an arc over or under the node band
   ([edge-routing](../proposals/edge-routing.md)).
+- **Controls** (additive — a graph without `controls` is exactly the
+  pre-control graph): first-class decision nodes, one kind in v1 — `if`. An
+  if control owns its feeding agent's whole emission surface: the agent
+  declares only its **output schema** (the structured result shape belongs
+  to the model call), and the control's branches are the decision —
+  `field == value → name` against the firing's structured result, evaluated
+  in declaration order, first match wins. An absent **or empty-string**
+  `value` is the catch-all and belongs last; `side` is where the branch tick
+  renders on the control (default `"right"` — geometry only, the executor
+  never reads it). The canvas serializes by pinned conventions: a
+  control-sourced connection always names its branch as `sourcePort`
+  (`"if-1:billing"`), a control-targeted connection carries **no
+  `targetPort`** (the control takes a single unnamed input), and branch
+  records are minimal (an empty value/field pair drops both keys, a default
+  side drops `side`). A hand-authored ports+bindings graph keeps working
+  unchanged — the control is an authoring upgrade over the same mechanism
+  (see [the lowering contract](#the-if-control-honest-graph-lowered-execution)).
 - **Fan-out** is allowed (a source id may appear in many connections);
   **fan-in** is allowed (a target id may appear in many connections — all
   edges into one port queue there).
@@ -77,6 +97,14 @@ non-empty and never affects `ok`:
 | `agent-port-duplicate` | The same port name declared twice in one list. |
 | `agent-port-side-invalid` | A port `side` / `outputPortSides` value is not one of `"left"`, `"right"`, `"top"`, `"bottom"`, or the map names a port the agent does not declare. |
 | `agent-port-side-conflict` *(warning)* | More than one of the agent's ports resolves to the same node edge (including two stacked on a default) — they render stacked; assign distinct sides to spread them. |
+| `control-invalid` | A malformed control record: `controls` present but not an array, an entry that is not an object, a blank or missing `id`/`kind`, a duplicate control id, or a control id colliding with an agent id (control ids live in their own space — endpoint resolution must stay unambiguous). |
+| `if-source-invalid` | The control does not have exactly one incoming connection, or its feeder is another control (no control-to-control chaining). |
+| `if-owner-conflict` | The feeding agent declares its own `outputPorts`/`bindings`, or has other outgoing connections — an if owns its source's whole emission surface. |
+| `if-branch-invalid` | A branch rule is broken: no branches at all, an unnamed or duplicated branch name, a valued branch without a `field`, a catch-all that is not the last branch, or an unknown `side`. |
+| `if-edge-port-unknown` | A control-sourced connection's `sourcePort` names no declared branch, or a control-targeted connection names a `targetPort`. |
+| `if-side-conflict` *(warning)* | Two or more branches of one control resolve to the same node edge — they render stacked; assign distinct sides (mirrors `agent-port-side-conflict`). |
+| `if-source-no-schema` *(warning)* | The feeding agent has no `settings.outputSchema` — the branches compare a structured result, so they can never fire. |
+| `if-source-breakpointed` *(warning)* | The feeding agent is breakpointed — a continuable child cannot produce structured output, so the branches can never fire. |
 | `connection-invalid` | A connection entry is not an object. |
 | `connection-missing-source` / `connection-missing-target` | The connection names no source/target agent. |
 | `connection-source-missing` / `connection-target-missing` | The referenced agent id does not exist. |
@@ -85,6 +113,13 @@ non-empty and never affects `ok`:
 | `connection-source-port-mismatch` / `connection-target-port-mismatch` | The port is present but names none of the agent's declared (or default) output/input ports. |
 | `connection-duplicate` | The same source → target edge over the same ports declared twice. |
 | `cycle-present` *(warning)* | The graph contains a directed cycle — legal wiring for the stream executor; informational only. |
+
+Control endpoints are **exempt from the agent port rules**: a control-targeted
+edge never trips `connection-missing-target-port` (it must carry no port at
+all), and a control-sourced edge's `sourcePort` is checked against the
+control's declared **branches**, not agent ports. `cycle-present` unions
+each control with its producer when walking, so a loop through a control
+warns exactly as the lowered graph's loop would — and names agents only.
 
 An absent/empty graph is valid — there is nothing to run.
 
@@ -127,6 +162,39 @@ pipeline-level `pipelineInput`.
   structured result — selects no port (the honest quiet; starved downstream
   nodes surface in the starvation report). A delivery a port's `bound`
   refuses is dropped and recorded.
+
+### The if control: honest graph, lowered execution
+
+The control is a persisted node that never runs. The run path's one
+insertion sits at the top of `RunExecutor.run()` (`src/runs.ts`):
+`lowerControls` (`src/controls.ts`) rewrites the honest graph onto the
+port/binding mechanics — the feeding agent gains the branch names as its
+`outputPorts` and the branch rules as its `bindings`, every
+`K:<branch> → T:<port>` connection re-prefixes to `A:<branch> → T:<port>`,
+non-default branch sides forward into the agent's `outputPortSides` (the map
+omitted when it would be empty), and the control with its feeding edge
+drops. The kernel consumes a graph indistinguishable from the hand-authored
+twin — **decision semantics are the bindings semantics**: first match wins,
+catch-all last, no match (or no structured result — e.g. a breakpointed
+source) emits on no branch; the quiet branch never fires and starvation
+surfaces through the existing run report.
+
+The lowering is **total** over malformed records — a hand-edited control
+normalizes or skips, never throws: the resurrection path re-enters `run()`
+without passing `validateGraph`, so the lowering is the last line of
+defense. A branch authored `value: ""` lowers to a binding with **no
+`value` key** — the executor's catch-all test is `value === undefined`, so a
+literal empty string would compare against `""` and never catch.
+
+The lowered graph is **never persisted**: the record's `graph` snapshot
+carries the honest controls (a resumed run re-enters `run()` and re-lowers
+from the snapshot), while the firings, the `nodes` map, and the results name
+**agents only** — a control never appears in the record. The canvas derives
+a control's run display from the feeding agent's latest firing's `emittedTo`
+(`firedBranches` in `src/controls.ts` — lowering names each port after its
+branch, so the emission record IS the branch list): `idle` until the run
+reaches the fork, `armed` while the last firing never recorded emission,
+`fired` once branches were chosen, `quiet` on the decided-empty selection.
 
 ### One structured input per agent, keyed by source
 
@@ -180,7 +248,7 @@ parallel per-node status bookkeeping; the per-node view is computed by
 {
   "recordVersion": 2,
   "state": "running | paused | completed | aborted | error",
-  "graph": …, "input": …, "maxInFlight": 4,
+  "graph": …, "input": …, "maxInFlight": 4,   // graph = the HONEST snapshot (controls included; execution lowered it, never persisted lowered)
   "pausedAt": "f-002",                    // the paused FIRING (queue head)
   "firings": [ {
     "firingId": "f-002", "nodeId": "agent-2", "seq": 1,
