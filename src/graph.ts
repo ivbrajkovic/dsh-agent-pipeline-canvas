@@ -64,7 +64,7 @@
 // duplicates, the cycle walk — which runs over the LOWERED graph, where the
 // controls are already gone and every edge is what the kernel runs).
 
-import type { InputPortSpec, OutputBinding, PipelineGraph, PortGraph, ValidationError, ValidationResult } from "./types.ts";
+import type { InputPortSpec, OutputBinding, PipelineGraph, PortGraph, PortSide, ValidationError, ValidationResult } from "./types.ts";
 import { COUNT_KEY, isValuedRow, portGraph } from "./execution.ts";
 import { lowerControls, validateControls, type ControlAnalysis } from "./controls.ts";
 
@@ -206,6 +206,32 @@ export function validateGraph(graph: unknown): ValidationResult {
 		});
 	}
 
+	// ---- Wired output ports no binding selects (the minted-wire shadow) ----
+	// A node WITH bindings emits only on the first matched binding's port — a
+	// wired output port no row names can never carry a message (the honest
+	// quiet). Legal wiring, so a warning and not an error — but hand-wiring one
+	// is the mistake the canvas's minted ports make easy (a wire dragged from a
+	// fresh edge of a bindings-carrying node), and the author deserves to see
+	// it in the strip rather than discover the quiet downstream.
+	for (const agent of agents) {
+		if (agent == null || typeof agent !== "object") continue;
+		const rec = agent as { id?: unknown; bindings?: unknown };
+		if (!Array.isArray(rec.bindings)) continue;
+		const id = rec.id == null ? "" : String(rec.id);
+		const node = ports.byId[id];
+		if (node === undefined) continue;
+		const selected = new Set(
+			(rec.bindings as unknown[]).map((b) => (b != null && typeof b === "object" ? argStr((b as { port?: unknown }).port) : "")).filter((p) => p.length > 0),
+		);
+		for (const port of node.outputs) {
+			if (port.edges.length === 0 || selected.has(port.name)) continue;
+			warnings.push({
+				code: "agent-port-unselected",
+				message: `agent "${id}" output port "${port.name}" is wired to ${port.targets.length} downstream node${port.targets.length === 1 ? "" : "s"} but no binding row selects it — bindings are first-match, so those wires never carry a message; add a binding row targeting "${port.name}"`,
+			});
+		}
+	}
+
 	// ---- Connections -------------------------------------------------------
 	const seenEdges = new Set<string>();
 
@@ -338,11 +364,12 @@ function argStr(value: unknown): string {
  * ("all-of" | "any-of") and — when present — a positive-integer bound and a
  * known side; each output port a non-empty string name; names unique within
  * their list; `outputPortSides` (when present) a name→side map over the
- * declared output ports. Malformed side data is an error. The side cap
- * (edge-routing iteration 2 — at most one port of a node per resolved side)
- * is a WARNING, `cycle-present`-style: default sides stack multi-port nodes
- * that predate explicit sides, the canvas renders the stack, and the warning
- * tells the author how to spread the ports.
+ * declared output ports. Malformed side data is an error. The side cap — at
+ * most one port of a node per DIRECTION per resolved side (an input and an
+ * output may share an edge; two of the same direction stack) — is a WARNING,
+ * `cycle-present`-style: default sides stack multi-port nodes that predate
+ * explicit sides, the canvas renders the stack, and the warning tells the
+ * author how to spread the ports.
  */
 function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outputPorts?: unknown; outputPortSides?: unknown }, errors: ValidationError[], warnings: ValidationError[]): void {
 	if (rec.inputPorts !== undefined) {
@@ -410,22 +437,25 @@ function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outpu
 			}
 		}
 	}
-	// The side cap: resolve every port's side (declared, else the side default;
-	// an absent port list still contributes its one implicit default port) and
-	// flag a side two or more ports land on.
-	const bySide = new Map<string, string[]>();
-	const take = (side: string, port: string): void => {
-		bySide.set(side, (bySide.get(side) ?? []).concat([port]));
+	// The side cap (edge-routing iteration 2), PER DIRECTION since the
+	// four-point model: a node edge hosts at most one port of each direction —
+	// an input and an output sharing an edge is the normal two-tick shape (the
+	// four connection points), so only two ports of the SAME direction on one
+	// side stack and warn.
+	const byDirSide = new Map<string, string[]>();
+	const take = (dir: "in" | "out", side: string, port: string): void => {
+		const key = dir + ":" + side;
+		byDirSide.set(key, (byDirSide.get(key) ?? []).concat([port]));
 	};
 	if (Array.isArray(rec.inputPorts)) {
 		for (const spec of rec.inputPorts) {
 			const s = spec as { name?: unknown; side?: unknown } | null | undefined;
 			if (s != null && typeof s === "object" && typeof s.name === "string" && s.name.length > 0) {
-				take(s.side === undefined ? DEFAULT_INPUT_SIDE : String(s.side), "in:" + s.name);
+				take("in", s.side === undefined ? DEFAULT_INPUT_SIDE : String(s.side), s.name);
 			}
 		}
 	} else {
-		take(DEFAULT_INPUT_SIDE, "in");
+		take("in", DEFAULT_INPUT_SIDE, "in");
 	}
 	if (Array.isArray(rec.outputPorts)) {
 		const sides = (rec.outputPortSides != null && typeof rec.outputPortSides === "object" && !Array.isArray(rec.outputPortSides))
@@ -434,14 +464,17 @@ function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outpu
 		for (const name of rec.outputPorts) {
 			if (typeof name !== "string" || name.length === 0) continue;
 			const side = sides[name] === undefined ? DEFAULT_OUTPUT_SIDE : String(sides[name]);
-			take(side, "out:" + name);
+			take("out", side, name);
 		}
 	} else {
-		take(DEFAULT_OUTPUT_SIDE, "out");
+		take("out", DEFAULT_OUTPUT_SIDE, "out");
 	}
-	for (const [side, ports] of bySide) {
+	for (const [key, ports] of byDirSide) {
 		if (ports.length > 1) {
-			warnings.push({ code: "agent-port-side-conflict", message: `agent "${id}" puts more than one port on the ${side} edge: ${ports.join(", ")} — they render stacked; assign distinct sides to spread them` });
+			const at = key.indexOf(":");
+			const dir = key.slice(0, at);
+			const side = key.slice(at + 1);
+			warnings.push({ code: "agent-port-side-conflict", message: `agent "${id}" puts more than one ${dir} port on the ${side} edge: ${ports.join(", ")} — they render stacked; assign distinct sides to spread them` });
 		}
 	}
 }
@@ -926,4 +959,397 @@ export function cycleNodeIds(graph: unknown): ReadonlySet<string> {
 		if (reachableFrom(adjacency, id).has(id)) onCycle.add(id);
 	}
 	return onCycle;
+}
+
+// ---- The canvas authoring assist: ports materialize from wiring ------------
+// The four-point model: every node presents one connection point per edge and
+// direction is read off the WIRE — the grabbed side becomes an output, the
+// dropped side an input. These are the pure decisions behind that gesture:
+// which port a drop uses, which declarations to mint when the node does not
+// have one yet, and which orphaned declarations to retract when a wire goes
+// away. Like cycleClosingFlip, they are total over malformed input and pure —
+// the browser half applies the returned patches in the same update as the
+// edge (one commit, one debounced persist), so the honest graph always says
+// what the canvas shows.
+
+/** A per-agent port-declaration patch the canvas applies verbatim. A field set to undefined CLEARS it (the owner-handoff strip precedent). */
+export interface PortPatch {
+	inputPorts?: InputPortSpec[];
+	outputPorts?: string[];
+	outputPortSides?: Record<string, PortSide>;
+}
+
+/** The canvas's description of one wire gesture: where it left, where it landed, and the tick it grabbed (when it grabbed one). */
+export interface WireDropDraft {
+	source: string;
+	target: string;
+	/** The node edge the drag left from; default "right" when the grab pinned no tick. */
+	sourceSide?: PortSide;
+	/** The node edge the drop landed on (read for agent targets only — a control takes its single unnamed input). */
+	targetSide?: PortSide;
+	/** The grabbed output tick's port name — pins the source side when the edge stacks several. */
+	grabbedSourcePort?: string;
+}
+
+/** One wire-drop resolution: the connection's port names plus the declarations to author in the same update. */
+export interface WireDropVerdict {
+	/** The resolved source port NAME (omitted = the default "out"). */
+	sourcePort?: string;
+	/** The resolved target port NAME (omitted = the default "in"; always omitted for a control target). */
+	targetPort?: string;
+	/** Per-agent patches to apply with the edge (minted ports, the folded cycle-entry flip). */
+	agentUpdates: Record<string, PortPatch>;
+}
+
+/** True when `value` is one of the four node edges. */
+function isPortSide(value: unknown): value is PortSide {
+	return value === "left" || value === "right" || value === "top" || value === "bottom";
+}
+
+function sideOr(side: unknown, fallback: PortSide): PortSide {
+	return isPortSide(side) ? side : fallback;
+}
+
+interface DeclaredPort {
+	name: string;
+	side: PortSide;
+}
+
+/** One agent record's declared input ports with resolved sides (junk skipped; an absent list means the implicit default). */
+function declaredInputSpecs(rec: Record<string, unknown>): DeclaredPort[] {
+	const list = rec.inputPorts;
+	if (!Array.isArray(list)) return [];
+	const out: DeclaredPort[] = [];
+	for (const spec of list) {
+		if (spec == null || typeof spec !== "object") continue;
+		const name = argStr((spec as { name?: unknown }).name);
+		if (name.length === 0) continue;
+		out.push({ name, side: sideOr((spec as { side?: unknown }).side, DEFAULT_INPUT_SIDE) });
+	}
+	return out;
+}
+
+/** One agent record's declared output ports with resolved sides (junk skipped; an absent list means the implicit default). */
+function declaredOutputNames(rec: Record<string, unknown>): DeclaredPort[] {
+	const list = rec.outputPorts;
+	if (!Array.isArray(list)) return [];
+	const sides = rec.outputPortSides != null && typeof rec.outputPortSides === "object" && !Array.isArray(rec.outputPortSides)
+		? (rec.outputPortSides as Record<string, unknown>)
+		: {};
+	const out: DeclaredPort[] = [];
+	for (const entry of list) {
+		if (typeof entry !== "string" || entry.length === 0) continue;
+		out.push({ name: entry, side: sideOr(sides[entry], DEFAULT_OUTPUT_SIDE) });
+	}
+	return out;
+}
+
+/**
+ * The input port NAME living on one node edge of an agent record — the first
+ * declared port resolving there, the implicit "in" on the default edge of an
+ * undeclared node, or null when the edge is open (a drop there mints one).
+ * Shared by the canvas's snap ring and the drop resolution, so the preview
+ * and the commit can never disagree.
+ */
+export function inputPortOnSide(agent: unknown, side: PortSide): string | null {
+	if (agent == null || typeof agent !== "object") return null;
+	const rec = agent as Record<string, unknown>;
+	if (!Array.isArray(rec.inputPorts)) return side === DEFAULT_INPUT_SIDE ? "in" : null;
+	for (const port of declaredInputSpecs(rec)) {
+		if (port.side === side) return port.name;
+	}
+	return null;
+}
+
+/**
+ * The output port NAME living on one node edge of an agent record — same
+ * reading as inputPortOnSide with the output defaults (implicit "out" on the
+ * right edge of an undeclared node).
+ */
+export function outputPortOnSide(agent: unknown, side: PortSide): string | null {
+	if (agent == null || typeof agent !== "object") return null;
+	const rec = agent as Record<string, unknown>;
+	if (!Array.isArray(rec.outputPorts)) return side === DEFAULT_OUTPUT_SIDE ? "out" : null;
+	for (const port of declaredOutputNames(rec)) {
+		if (port.side === side) return port.name;
+	}
+	return null;
+}
+
+/** A minted port name: the base (the edge's own name is the honest default), numbered when taken. */
+function mintPortName(base: string, taken: ReadonlySet<string>): string {
+	if (!taken.has(base)) return base;
+	for (let i = 2; ; i++) {
+		const candidate = base + "-" + i;
+		if (!taken.has(candidate)) return candidate;
+	}
+}
+
+/** One control record's declared branch names (the control's output vocabulary). */
+function controlBranchNames(graph: { controls?: unknown }, id: string): string[] {
+	for (const entry of Array.isArray(graph.controls) ? graph.controls : []) {
+		if (entry == null || typeof entry !== "object") continue;
+		if (argStr((entry as { id?: unknown }).id) !== id) continue;
+		const branches = (entry as { branches?: unknown }).branches;
+		if (!Array.isArray(branches)) return [];
+		return branches.map((b) => (b != null && typeof b === "object" ? argStr((b as { name?: unknown }).name) : "")).filter((n) => n.length > 0);
+	}
+	return [];
+}
+
+/**
+ * The wire-drop resolution (the four-point model's whole brain). Given the
+ * honest graph WITHOUT the wire and where the wire was grabbed/dropped:
+ *
+ * - Source side: the grabbed tick pins the port; else the first declared
+ *   output on the grabbed edge; else one is MINTED — named after the edge
+ *   ("top"/"bottom"/"left"; "out" on the default right edge), numbered when
+ *   taken, declared in `outputPorts` (+ `outputPortSides` for non-default
+ *   edges) in the same update. Minting onto an undeclared node declares the
+ *   default "out" too — a present list REPLACES the default, and the right
+ *   point must keep working.
+ * - Target side (agent targets): the first declared input on the landed edge,
+ *   else a minted `{ name, side }` spec — with the same declare-the-default
+ *   rule for `inputPorts`. A control target resolves to nothing (it owns no
+ *   input port) and patches nothing.
+ * - The cycle-entry flip (cycleClosingFlip) is folded in: it runs on the
+ *   graph WITH the minted declarations and the prospective wire, so a
+ *   cycle-closing drop that mints its own entry port flips THAT port to
+ *   any-of; a control-sourced edge answers through its owner exactly as the
+ *   kernel will run it.
+ *
+ * Total over malformed input: unresolved ids return `{ agentUpdates: {} }`,
+ * never throws. The graph argument is always the canvas's buildGraph output —
+ * the default in-port is composed as `<id>:in` there, and hand-edited legacy
+ * `input` strings never reach canvas state (loadAgent drops them) — so this
+ * resolution needs no legacy-wire-id guard of its own; the folded
+ * cycleClosingFlip keeps its own guard, being a public helper that also
+ * answers over persisted shapes.
+ */
+export function resolveWireDrop(graph: unknown, draft: unknown): WireDropVerdict {
+	const out: WireDropVerdict = { agentUpdates: {} };
+	if (graph == null || typeof graph !== "object" || Array.isArray(graph)) return out;
+	if (draft == null || typeof draft !== "object") return out;
+	const g = graph as { agents?: unknown; connections?: unknown; controls?: unknown };
+	const d = draft as WireDropDraft;
+	const source = argStr(d.source);
+	const target = argStr(d.target);
+	if (source.length === 0 || target.length === 0) return out;
+
+	const controlIds = new Set<string>();
+	collectIds(g.controls, controlIds);
+	const sourceRec = agentRecord(g, source);
+	const targetRec = agentRecord(g, target);
+	const sourceIsControl = sourceRec === undefined && controlIds.has(source);
+	const targetIsControl = targetRec === undefined && controlIds.has(target);
+	if (!sourceIsControl && sourceRec === undefined) return out;
+	if (!targetIsControl && targetRec === undefined) return out;
+	const updates = out.agentUpdates;
+
+	// ---- Source side ----
+	if (sourceIsControl) {
+		// A control's output side is its BRANCH list — identity the drop cannot
+		// infer; the picker's pick is echoed when declared, else the first.
+		const branches = controlBranchNames(g, source);
+		const grabbed = argStr(d.grabbedSourcePort);
+		const picked = grabbed.length > 0 && branches.includes(grabbed) ? grabbed : branches[0];
+		if (picked !== undefined && picked.length > 0) out.sourcePort = picked;
+	} else {
+		const rec = sourceRec as Record<string, unknown>;
+		const grabbed = argStr(d.grabbedSourcePort);
+		const declaredNames = new Set(declaredOutputNames(rec).map((p) => p.name));
+		const grabsDefault = grabbed === "out" && !Array.isArray(rec.outputPorts);
+		if (grabbed.length > 0 && (declaredNames.has(grabbed) || grabsDefault)) {
+			out.sourcePort = grabbed;
+		} else {
+			const side = sideOr(d.sourceSide, DEFAULT_OUTPUT_SIDE);
+			const onSide = outputPortOnSide(rec, side);
+			if (onSide !== null) {
+				out.sourcePort = onSide;
+			} else {
+				const name = mintPortName(side === DEFAULT_OUTPUT_SIDE ? "out" : side, declaredNames);
+				out.sourcePort = name;
+				const patch: PortPatch = updates[source] ?? {};
+				if (Array.isArray(rec.outputPorts)) {
+					patch.outputPorts = [...(rec.outputPorts as unknown[]).filter((n): n is string => typeof n === "string" && n.length > 0), name];
+				} else {
+					// A present list replaces the implicit default — declare "out" beside the mint.
+					patch.outputPorts = ["out", name];
+				}
+				if (side !== DEFAULT_OUTPUT_SIDE) {
+					const base = rec.outputPortSides != null && typeof rec.outputPortSides === "object" && !Array.isArray(rec.outputPortSides)
+						? (rec.outputPortSides as Record<string, PortSide>)
+						: {};
+					patch.outputPortSides = { ...base, [name]: side };
+				}
+				updates[source] = patch;
+			}
+		}
+	}
+
+	// ---- Target side ----
+	if (!targetIsControl) {
+		const rec = targetRec as Record<string, unknown>;
+		const side = sideOr(d.targetSide, DEFAULT_INPUT_SIDE);
+		const onSide = inputPortOnSide(rec, side);
+		if (onSide !== null) {
+			out.targetPort = onSide;
+		} else {
+			const taken = new Set(declaredInputSpecs(rec).map((p) => p.name));
+			const name = mintPortName(side === DEFAULT_INPUT_SIDE ? "in" : side, taken);
+			out.targetPort = name;
+			const spec: InputPortSpec = { name, ...(side !== DEFAULT_INPUT_SIDE ? { side } : {}) };
+			const patch: PortPatch = updates[target] ?? {};
+			if (Array.isArray(rec.inputPorts)) {
+				patch.inputPorts = [...(rec.inputPorts as InputPortSpec[]), spec];
+			} else {
+				patch.inputPorts = [{ name: "in" }, spec];
+			}
+			updates[target] = patch;
+		}
+	}
+
+	// ---- The folded cycle-entry flip ----
+	// Rebuild the honest graph WITH the minted declarations and the
+	// prospective wire (persisted shape), and let cycleClosingFlip answer over
+	// exactly the state the commit will produce — a minted entry port is
+	// declared in time to be the one that flips.
+	const afterAgents = (Array.isArray(g.agents) ? g.agents : []).map((a) => {
+		const id = a != null && typeof a === "object" ? argStr((a as { id?: unknown }).id) : "";
+		const patch = id.length > 0 ? updates[id] : undefined;
+		return patch !== undefined ? { ...(a as Record<string, unknown>), ...patch } : a;
+	});
+	const connection = {
+		id: "wire-prospective",
+		source,
+		target,
+		sourcePort: source + ":" + (out.sourcePort ?? "out"),
+		...(targetIsControl ? {} : { targetPort: target + ":" + (out.targetPort ?? "in") }),
+	};
+	const flip = cycleClosingFlip({ agents: afterAgents, connections: g.connections, controls: g.controls }, connection);
+	if (flip.inputPorts !== undefined && !targetIsControl) {
+		const patch: PortPatch = updates[target] ?? {};
+		patch.inputPorts = flip.inputPorts;
+		updates[target] = patch;
+	}
+	return out;
+}
+
+/**
+ * The unwire retraction (the mint's other half): after a connection goes
+ * away, each endpoint port it used that now wires nowhere — and carries
+ * nothing the author shaped — is retracted, so the honest graph never
+ * accumulates invisible declarations behind deleted wires.
+ *
+ * A port survives when it still wires somewhere; when a binding row names it
+ * (an emission target is behavior); or — on the input side — when it declares
+ * a `bound` (a loop budget is deliberate numeric authoring; silently
+ * deleting numbers is never right). Everything else retracts, including an
+ * assist-flipped any-of policy: the flip existed for its wire, and re-drawing
+ * the loop re-flips. Retraction canonicalizes back to the historical shape
+ * when only a plain default remains (`outputPorts: ["out"]` still rendering
+ * right, a bare `[{ name: "in" }]`) — the undeclared form the graph would
+ * have had all along. An output port's side-map entry goes with it.
+ *
+ * Connection records are read tolerantly (wire-id or bare port names — the
+ * canvas state and the persisted shape both work). Only the passed
+ * connections' endpoints are touched; the graph is the AFTER-REMOVAL state.
+ */
+export function retractOrphanPorts(graphAfter: unknown, removed: readonly unknown[]): { agentUpdates: Record<string, PortPatch> } {
+	const out: { agentUpdates: Record<string, PortPatch> } = { agentUpdates: {} };
+	if (graphAfter == null || typeof graphAfter !== "object" || Array.isArray(graphAfter)) return out;
+	const g = graphAfter as { agents?: unknown; controls?: unknown };
+	const controlIds = new Set<string>();
+	collectIds(g.controls, controlIds);
+
+	// The port uses the removed wires leaves behind, per endpoint (control
+	// endpoints own no ports).
+	type Use = { agent: string; dir: "in" | "out"; name: string };
+	const uses: Use[] = [];
+	for (const conn of removed) {
+		if (conn == null || typeof conn !== "object") continue;
+		const rec = conn as { source?: unknown; target?: unknown; sourcePort?: unknown; targetPort?: unknown };
+		const source = argStr(rec.source);
+		const target = argStr(rec.target);
+		if (source.length === 0 && target.length === 0) continue;
+		const sourceRaw = argStr(rec.sourcePort);
+		const targetRaw = argStr(rec.targetPort);
+		const sourceName = sourceRaw.startsWith(source + ":") ? sourceRaw.slice(source.length + 1) : sourceRaw.length > 0 ? sourceRaw : "out";
+		const targetName = targetRaw.startsWith(target + ":") ? targetRaw.slice(target.length + 1) : targetRaw.length > 0 ? targetRaw : "in";
+		if (source.length > 0 && !controlIds.has(source)) uses.push({ agent: source, dir: "out", name: sourceName });
+		if (target.length > 0 && !controlIds.has(target)) uses.push({ agent: target, dir: "in", name: targetName });
+	}
+	if (uses.length === 0) return out;
+
+	const ports = portGraph(graphAfter);
+
+	// Per-agent working state, so several removed wires touching one agent
+	// (deleting a node that fed two of its minted ports) retract cumulatively
+	// instead of overwriting each other's patches.
+	interface Working {
+		rec: Record<string, unknown>;
+		specs: InputPortSpec[] | null;
+		outs: string[] | null;
+		sides: Array<[string, PortSide]>;
+	}
+	const working = new Map<string, Working>();
+	const stateOf = (agentId: string): Working | null => {
+		const rec = agentRecord(g, agentId);
+		if (rec === undefined) return null;
+		let state = working.get(agentId);
+		if (state !== undefined) return state;
+		const sidesRaw = rec.outputPortSides;
+		state = {
+			rec,
+			specs: Array.isArray(rec.inputPorts) ? (rec.inputPorts as InputPortSpec[]) : null,
+			outs: Array.isArray(rec.outputPorts) ? (rec.outputPorts as unknown[]).filter((n): n is string => typeof n === "string" && n.length > 0) : null,
+			sides: sidesRaw != null && typeof sidesRaw === "object" && !Array.isArray(sidesRaw)
+				? Object.entries(sidesRaw as Record<string, unknown>).filter((e): e is [string, PortSide] => isPortSide(e[1]))
+				: [],
+		};
+		working.set(agentId, state);
+		return state;
+	};
+
+	for (const use of uses) {
+		const node = ports.byId[use.agent];
+		if (node === undefined) continue;
+		const state = stateOf(use.agent);
+		if (state === null) continue;
+		const patch: PortPatch = out.agentUpdates[use.agent] ?? {};
+		if (use.dir === "out") {
+			const port = node.outputs.find((p) => p.name === use.name);
+			if (port === undefined || port.edges.length > 0) continue;
+			// A binding row naming the port keeps it declared — an emission
+			// target is behavior, not wiring residue.
+			const bindings = Array.isArray(state.rec.bindings) ? (state.rec.bindings as unknown[]) : [];
+			if (bindings.some((b) => b != null && typeof b === "object" && argStr((b as { port?: unknown }).port) === use.name)) continue;
+			if (state.outs === null) continue; // the implicit default — nothing declared to retract
+			if (!state.outs.includes(use.name)) continue;
+			const keptOuts = state.outs.filter((n) => n !== use.name);
+			const keptSides = state.sides.filter(([n]) => n !== use.name);
+			const plainDefaultLeft = keptOuts.length === 1 && keptOuts[0] === "out" && !keptSides.some(([n, s]) => n === "out" && s !== DEFAULT_OUTPUT_SIDE);
+			patch.outputPorts = plainDefaultLeft || keptOuts.length === 0 ? undefined : keptOuts;
+			patch.outputPortSides = keptSides.length > 0 ? Object.fromEntries(keptSides) : undefined;
+			state.outs = keptOuts;
+			state.sides = keptSides;
+		} else {
+			const port = node.inputs.find((p) => p.name === use.name);
+			if (port === undefined || port.edges.length > 0) continue;
+			if (state.specs === null) continue; // the implicit default — nothing declared to retract
+			const hit = state.specs.find((s) => s != null && typeof s === "object" && argStr(s.name) === use.name);
+			if (hit === undefined) continue;
+			// A bound is the loop budget — deliberate authoring survives unwiring.
+			if (typeof hit.bound === "number") continue;
+			const keptSpecs = state.specs.filter((s) => !(s != null && typeof s === "object" && argStr(s.name) === use.name));
+			const plainDefaultLeft = keptSpecs.length === 1
+				&& keptSpecs[0] != null && typeof keptSpecs[0] === "object"
+				&& argStr(keptSpecs[0].name) === "in"
+				&& keptSpecs[0].policy === undefined && keptSpecs[0].bound === undefined && keptSpecs[0].side === undefined;
+			patch.inputPorts = plainDefaultLeft || keptSpecs.length === 0 ? undefined : keptSpecs;
+			state.specs = keptSpecs;
+		}
+		out.agentUpdates[use.agent] = patch;
+	}
+	return out;
 }

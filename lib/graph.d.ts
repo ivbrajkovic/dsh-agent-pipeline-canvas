@@ -1,4 +1,4 @@
-import type { InputPortSpec, PipelineGraph, ValidationResult } from "./types.ts";
+import type { InputPortSpec, PipelineGraph, PortSide, ValidationResult } from "./types.ts";
 /**
  * Validate a pipeline graph against the port-graph contract above.
  *
@@ -112,4 +112,97 @@ export declare function loopControlIds(graph: unknown): ReadonlySet<string>;
  * Total over malformed declarations; never throws.
  */
 export declare function cycleNodeIds(graph: unknown): ReadonlySet<string>;
+/** A per-agent port-declaration patch the canvas applies verbatim. A field set to undefined CLEARS it (the owner-handoff strip precedent). */
+export interface PortPatch {
+    inputPorts?: InputPortSpec[];
+    outputPorts?: string[];
+    outputPortSides?: Record<string, PortSide>;
+}
+/** The canvas's description of one wire gesture: where it left, where it landed, and the tick it grabbed (when it grabbed one). */
+export interface WireDropDraft {
+    source: string;
+    target: string;
+    /** The node edge the drag left from; default "right" when the grab pinned no tick. */
+    sourceSide?: PortSide;
+    /** The node edge the drop landed on (read for agent targets only — a control takes its single unnamed input). */
+    targetSide?: PortSide;
+    /** The grabbed output tick's port name — pins the source side when the edge stacks several. */
+    grabbedSourcePort?: string;
+}
+/** One wire-drop resolution: the connection's port names plus the declarations to author in the same update. */
+export interface WireDropVerdict {
+    /** The resolved source port NAME (omitted = the default "out"). */
+    sourcePort?: string;
+    /** The resolved target port NAME (omitted = the default "in"; always omitted for a control target). */
+    targetPort?: string;
+    /** Per-agent patches to apply with the edge (minted ports, the folded cycle-entry flip). */
+    agentUpdates: Record<string, PortPatch>;
+}
+/**
+ * The input port NAME living on one node edge of an agent record — the first
+ * declared port resolving there, the implicit "in" on the default edge of an
+ * undeclared node, or null when the edge is open (a drop there mints one).
+ * Shared by the canvas's snap ring and the drop resolution, so the preview
+ * and the commit can never disagree.
+ */
+export declare function inputPortOnSide(agent: unknown, side: PortSide): string | null;
+/**
+ * The output port NAME living on one node edge of an agent record — same
+ * reading as inputPortOnSide with the output defaults (implicit "out" on the
+ * right edge of an undeclared node).
+ */
+export declare function outputPortOnSide(agent: unknown, side: PortSide): string | null;
+/**
+ * The wire-drop resolution (the four-point model's whole brain). Given the
+ * honest graph WITHOUT the wire and where the wire was grabbed/dropped:
+ *
+ * - Source side: the grabbed tick pins the port; else the first declared
+ *   output on the grabbed edge; else one is MINTED — named after the edge
+ *   ("top"/"bottom"/"left"; "out" on the default right edge), numbered when
+ *   taken, declared in `outputPorts` (+ `outputPortSides` for non-default
+ *   edges) in the same update. Minting onto an undeclared node declares the
+ *   default "out" too — a present list REPLACES the default, and the right
+ *   point must keep working.
+ * - Target side (agent targets): the first declared input on the landed edge,
+ *   else a minted `{ name, side }` spec — with the same declare-the-default
+ *   rule for `inputPorts`. A control target resolves to nothing (it owns no
+ *   input port) and patches nothing.
+ * - The cycle-entry flip (cycleClosingFlip) is folded in: it runs on the
+ *   graph WITH the minted declarations and the prospective wire, so a
+ *   cycle-closing drop that mints its own entry port flips THAT port to
+ *   any-of; a control-sourced edge answers through its owner exactly as the
+ *   kernel will run it.
+ *
+ * Total over malformed input: unresolved ids return `{ agentUpdates: {} }`,
+ * never throws. The graph argument is always the canvas's buildGraph output —
+ * the default in-port is composed as `<id>:in` there, and hand-edited legacy
+ * `input` strings never reach canvas state (loadAgent drops them) — so this
+ * resolution needs no legacy-wire-id guard of its own; the folded
+ * cycleClosingFlip keeps its own guard, being a public helper that also
+ * answers over persisted shapes.
+ */
+export declare function resolveWireDrop(graph: unknown, draft: unknown): WireDropVerdict;
+/**
+ * The unwire retraction (the mint's other half): after a connection goes
+ * away, each endpoint port it used that now wires nowhere — and carries
+ * nothing the author shaped — is retracted, so the honest graph never
+ * accumulates invisible declarations behind deleted wires.
+ *
+ * A port survives when it still wires somewhere; when a binding row names it
+ * (an emission target is behavior); or — on the input side — when it declares
+ * a `bound` (a loop budget is deliberate numeric authoring; silently
+ * deleting numbers is never right). Everything else retracts, including an
+ * assist-flipped any-of policy: the flip existed for its wire, and re-drawing
+ * the loop re-flips. Retraction canonicalizes back to the historical shape
+ * when only a plain default remains (`outputPorts: ["out"]` still rendering
+ * right, a bare `[{ name: "in" }]`) — the undeclared form the graph would
+ * have had all along. An output port's side-map entry goes with it.
+ *
+ * Connection records are read tolerantly (wire-id or bare port names — the
+ * canvas state and the persisted shape both work). Only the passed
+ * connections' endpoints are touched; the graph is the AFTER-REMOVAL state.
+ */
+export declare function retractOrphanPorts(graphAfter: unknown, removed: readonly unknown[]): {
+    agentUpdates: Record<string, PortPatch>;
+};
 //# sourceMappingURL=graph.d.ts.map

@@ -42,11 +42,30 @@ The pipeline is a directed graph over two arrays:
   `<agentId>:<portName>`.
 - **Port sides are pure canvas geometry** (`"left"` / `"right"` / `"top"` /
   `"bottom"`; inputs default `left`, outputs `right`): the executor never
-  reads them. At most one port of a node may occupy a side — a second port on
-  a resolved side (including two ports stacked on the default) is the
-  non-fatal `agent-port-side-conflict` *warning*. A loop whose two ports sit
-  on the same vertical edge renders as an arc over or under the node band
+  reads them. At most one port of a node per DIRECTION may occupy a side — an
+  input and an output sharing an edge is the normal four-point shape, while a
+  second port of the same direction on a resolved side (including two stacked
+  on the default) is the non-fatal `agent-port-side-conflict` *warning*. A
+  loop whose two ports sit on the same vertical edge renders as an arc over
+  or under the node band
   ([edge-routing](../proposals/edge-routing.md)).
+- **The canvas authors port declarations from the wiring** (the four-point
+  model): every node presents one connection point per edge, direction is
+  read off the wire — the grabbed side becomes an output, the dropped side an
+  input — and a drop onto an edge with no port of that direction MINTS one
+  (`resolveWireDrop` in `src/graph.ts`): named after the edge
+  (`top`/`bottom`/`left`; `out` on the default right edge), numbered when
+  taken, declared in the same update as the edge — a mint onto an undeclared
+  node declares the default port beside it, because a present list REPLACES
+  the implicit single port. The cycle-entry flip (`cycleClosingFlip`) folds
+  into the same resolution, so a cycle-closing drop that mints its own entry
+  port flips that port to `any-of`. Deleting a wire retracts what it left
+  wireless (`retractOrphanPorts`): a port with no remaining edges, no binding
+  row naming it, and — on the input side — no `bound` is removed, and a node
+  left with only its plain default ports returns to the undeclared shape
+  (a flipped `any-of` entry reverts; a `bound` is deliberate budget authoring
+  and survives). The executor is unaffected: it only ever reads the resolved
+  port graph, exactly as if the declarations had been hand-authored.
 - **The condition language is expression-free** — and it gains a counter
   ([loops](../proposals/loops.md)): a branch or binding row carries an
   optional `op`, serialized only when `">="` (absent — or `"=="` — is the
@@ -117,7 +136,8 @@ non-empty and never affects `ok`:
 | `agent-port-bound-invalid` | An input port's `bound` is not a positive integer. |
 | `agent-port-duplicate` | The same port name declared twice in one list. |
 | `agent-port-side-invalid` | A port `side` / `outputPortSides` value is not one of `"left"`, `"right"`, `"top"`, `"bottom"`, or the map names a port the agent does not declare. |
-| `agent-port-side-conflict` *(warning)* | More than one of the agent's ports resolves to the same node edge (including two stacked on a default) — they render stacked; assign distinct sides to spread them. |
+| `agent-port-side-conflict` *(warning)* | More than one of the agent's ports of the SAME direction resolves to the same node edge (including two stacked on a default) — they render stacked; assign distinct sides to spread them. An input and an output sharing an edge is the four-point shape and warns nothing. |
+| `agent-port-unselected` *(warning)* | A bindings-carrying agent has a WIRED output port that no binding row names — bindings are first-match, so that wire can never carry a message; add a row targeting the port (the canvas's minted wires make this easy to author by accident). |
 | `agent-binding-invalid` | A malformed `bindings` declaration: not an array, an entry without a `field` or a `port`, an unknown `op` (expected `"=="` or `">="`), or a `">="` whose value is not a finite number (the numeric comparison could never match; the refusal keeps execution's catch-all reading of a valueless row out of play). |
 | `agent-binding-port-mismatch` | A binding's `port` names none of the agent's declared (or default) output ports. |
 | `control-invalid` | A malformed control record: `controls` present but not an array, an entry that is not an object, a blank or missing `id`/`kind`, a duplicate control id, or a control id colliding with an agent id (control ids live in their own space — endpoint resolution must stay unambiguous). |

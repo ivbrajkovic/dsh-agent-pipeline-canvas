@@ -31,22 +31,43 @@ edits in one are visible in the other.
   exactly one of each — the `in` / `out` ports (`<id>:in` / `<id>:out`).
   Declared ports (with per-port policies, bounds, sides, and output bindings)
   are edited in the configuration panel's [port
-  surface](#the-port-surface--ports-policies-bounds-bindings) below. Declared
-  ports each render as their own tick on a node edge — inputs default left,
-  outputs right, and each port may take the top or bottom edge instead — and
-  edges anchor at their port's tick, leaving and entering perpendicular to
-  that edge.
-- **Ports stay hidden until they are needed.** At rest a node's border is
-  uninterrupted and wires land flush on it; the arrows are the wiring story.
-  Hovering a node (or selecting it) fades in its ticks; dragging from an
-  output tick starts a connection, the source keeps its ticks for the whole
-  drag, and every other node on the canvas reveals its input ticks — the
-  drop targets. The **whole node is the drop target**: the drafted wire
-  snaps to the input tick nearest the cursor (the tick lights up), and
-  dropping anywhere on the node connects. When a node declares several
-  ports the connection editor offers **port pickers** on both ends,
-  defaulted to the tick the drag started from and the input the wire snapped
-  to. Edges are directed and arrow-marked.
+  surface](#the-port-surface--ports-policies-bounds-bindings) below — but the
+  canvas authors the declarations too: **ports materialize from wiring**
+  (below). Declared ports each render as their own tick on a node edge —
+  inputs default left, outputs right, and each port may take the top or
+  bottom edge instead — and edges anchor at their port's tick, leaving and
+  entering perpendicular to that edge. An input and an output may share one
+  edge (the ticks split the edge's axis); two ports of the same direction on
+  one edge stack, with a warning suggesting distinct sides.
+- **Every node presents four connection points, one per edge, and direction
+  is read off the wire.** Ports stay hidden at rest — a node's border stays
+  uninterrupted and wires land flush on it — but hovering (or selecting) a
+  node fades in its ticks plus an **open point** (a dashed, direction-neutral
+  ring) on every edge that hosts no port yet. Any revealed point can START a
+  wire and the whole node accepts a drop; the drag decides in vs out, never
+  the point: the side a wire leaves becomes an **output**, the side it lands
+  on becomes an **input**. Where the node has no port for that side yet, the
+  commit **mints** one — named after the edge (`top`/`bottom`/`left`; `out` on
+  the default right edge), numbered when the name is taken — and the
+  declaration appears in the agent panel and View JSON exactly as if it had
+  been authored there. The edge the wire lands on is the entry: the drafted
+  wire snaps to the aimed edge's tick (which lights up) or, on an open edge,
+  to the edge midpoint where the minted tick will sit. Dropping on the same
+  point a drag started from connects nothing.
+- **Only a control's branch still needs a picker.** An If's outputs are named
+  branches — identity a drop cannot infer — so a control-sourced draft opens
+  a one-choice picker for the branch; the target side resolves (or mints)
+  just like a direct drop. Agent→agent wires never open a dialog: the points
+  are the port choice. The owner handoff (wiring an agent that carries its
+  own output ports or bindings into an If) is unchanged — see
+  [the If control](#the-if-control--the-fork-as-a-node).
+- **Deleting a wire retracts what it minted.** A port the removed wire leaves
+  wireless — and that carries no authored behavior — disappears again in the
+  same update: a minted input vanishes from `inputPorts`, an unused minted
+  output from `outputPorts` (with its side entry), and a node left with only
+  its plain default ports returns to the undeclared shape. A port with a
+  **bound** (a loop budget) or one a **binding row** names survives; an
+  assist-flipped `any-of` entry reverts, and redrawing the loop re-flips it.
 - Connections are flexible: an output may **fan out** to many inputs, and an
   input may **fan in** from many sources. Semantically, `A → B` means A's
   output becomes (part of) B's input. There are no explicit
@@ -116,6 +137,10 @@ strip lists current problems:
 - malformed **port declarations** (unnamed ports, unknown policies,
   non-positive-integer bounds, duplicate port names) — see the full rule set
   in [../reference/graph-and-execution.md](../reference/graph-and-execution.md);
+- a **wired output port no binding selects** (a warning): a bindings-carrying
+  node emits only on the first matched binding's port, so a wire dragged from
+  a fresh edge of such an agent would silently never carry a message — the
+  strip names the port and the fix (add a binding row targeting it);
 - malformed **control records** and broken **if wiring** — a control with no
   (or several) feeders, a control fed by a control, a feeding agent that
   keeps its own emission config, unnamed or duplicated branches, a catch-all
@@ -202,18 +227,22 @@ fields are forwarded to the harness subagent start request for that agent.
 
 ### The port surface — ports, policies, bounds, bindings
 
-The port fields make the canvas author the full stream model:
+The port fields make the canvas author the full stream model. The canvas
+authors some of it itself — wiring mints and retracts the declarations (see
+[nodes, ports, and connections](#nodes-ports-and-connections)) — so the panel
+is where the **behavior** behind a port is shaped:
 
 - **Policies** decide WHEN a node fires. `all-of` (the default) waits until
   every wired upstream of the port has delivered a message — fan-in joins
   for free. `any-of` fires on the first arrival — a join that proceeds on
   whichever branch ran.
 - **Sides** decide WHERE on the node a port renders: left (the input
-  default), right (the output default), top, or bottom — at most one port per
-  edge (a second port on one edge warns and renders stacked). Geometry only,
-  but it is how a loop stays readable: put the loop's two ports on the same
-  vertical edge and the return line routes as a bracket over or under the
-  band instead of crossing the forward wires.
+  default), right (the output default), top, or bottom — at most one port of
+  each direction per edge (an input and an output may share an edge; a second
+  port of the same direction on one edge warns and renders stacked). Geometry
+  only, but it is how a loop stays readable: put the loop's two ports on the
+  same vertical edge and the return line routes as a bracket over or under
+  the band instead of crossing the forward wires.
 - **Bounds** decide HOW OFTEN a port may receive. The bound is a delivery
   count over the whole run (the run input's seed message counts), which is
   what makes a feedback loop terminate: cap the loop's input port and the
@@ -270,10 +299,11 @@ something you can see and point at:
   whose value is not a finite number is flagged on the row, and a valued
   `$count` row that sits BELOW a row wiring back into the loop shows the
   shadowing inline — that arrangement makes the count row no guard
-  (`cycle-unguarded` names the same rows in the strip). A branch tick drags
-  to the agent that handles it like any output tick — the port picker opens
-  with the branch list on every control-sourced draft, and the whole target
-  node is the drop target exactly as with agents.
+  (`cycle-unguarded` names the same rows in the strip). A branch tick — or the
+  control's open points — drags to the agent that handles it like any output
+  point; the branch picker opens on every control-sourced draft (the branch
+  is the one identity a drop cannot infer), and the whole target node is the
+  drop target exactly as with agents.
 - **The loop — the if with a back edge.** A flowchart loop is this control
   drawn with one arrow rising back into the body: drag the `retry` branch's
   tick back to an earlier agent and the canvas closes the cycle for you in
