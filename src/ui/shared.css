@@ -81,7 +81,7 @@
 	box-sizing: border-box;
 	width: 100%;
 }
-.pipeline-modal-notice { font-size: 11px; color: var(--dsw-alias-state-warning-primary); }
+.pipeline-modal-notice { font-size: 11px; color: var(--dsw-alias-state-warning-primary, #f59e0b); }
 .pipeline-modal-status { font-size: 11px; color: var(--dsw-alias-state-error-primary); }
 .pipeline-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; align-items: center; }
 .pipeline-modal-actions .spacer { flex: 1; }

@@ -133,8 +133,9 @@ control **lowers** onto the router's output ports + bindings before the
 kernel starts, so this graph executes exactly like the hand-authored form
 below — the run record names agents only.
 
-Run it: a billing question fires `Billing` only (the control's chip reads
-*fired* and the billing edge lights green); anything else flips the
+Run it: a billing question fires `Billing` only (the diamond's border lights
+green and the billing edge — line and arrowhead — lights with it, the other
+branch dimming to dashed gray); anything else flips the
 highlight to `other`; a value that matches no branch with no catch-all
 present starves the downstream nodes — the result modal lists them as
 pending, and the host log names the waiting nodes.
@@ -240,7 +241,8 @@ answer is adopted and flows downstream on Resume.
 
 There is no continue-on-error: a firing that settles as anything but
 `completed` (error, refusal, max-tokens) ends the run in `state: "error"` —
-the toolbar banner and the node chip show it live, in-flight agents drain,
+the toolbar banner and the failing node's red border and ✕ badge show it
+live, in-flight agents drain,
 completed outputs stay inspectable in the record, and nothing downstream of
 the failure runs. To see it deliberately: set an agent's model in the edit
 panel to a name the deployment does not register and run the graph.

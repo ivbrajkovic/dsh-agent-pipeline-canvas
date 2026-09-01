@@ -116,7 +116,8 @@ closes the halt gate run-wide, lets in-flight firings finish (the same
 cost discipline as pause and abort), and finalizes the run `state: "error"`
 with all completed outputs preserved. Nothing downstream of a failure
 starts. The failure is live: the toolbar banner reads *Failed at
-&lt;agent&gt; — finishing in-flight agents…*, the node chip shows the error,
+&lt;agent&gt; — finishing in-flight agents…*, the failing node's red border
+and ✕ badge show the error,
 and the record keeps the firing's `error` + `stopReason` permanently. (One
 exception, on purpose: a **Rerun/Steer of a parked head** that settles
 non-completed re-parks for another decision — the user is present; only
@@ -224,7 +225,7 @@ load:
   lifecycle, determinism.
 
 The flows are additionally verified end-to-end against the live app:
-concurrent chips with strict fan-in ordering, breakpoint-while-in-flight,
+concurrent node states with strict fan-in ordering, breakpoint-while-in-flight,
 the double-breakpoint queue, abort mid-fan-out, a page reload mid-run with
 re-discovery, steering while the other branch is in flight, the failure
 surface, and the anchor sessions' zero-model-turn guarantee.
