@@ -105,12 +105,25 @@ export interface InputPortSpec {
  * a schema (and when a breakpoint makes structured output impossible).
  */
 export interface OutputBinding {
-	/** The structured-result field to compare (top-level property name). */
+	/**
+	 * The field to compare. A top-level property of the structured result —
+	 * EXCEPT the executor-reserved `$count`, which tests the firing's own
+	 * per-node sequence (1-based, the `seq` the firing log records) instead of
+	 * the record, and so matches even without a structured result.
+	 */
 	field: string;
 	/** The output PORT NAME to emit on when the predicate holds. */
 	port: string;
 	/** The value the field must equal; omitted = catch-all (matches any result). */
 	value?: unknown;
+	/**
+	 * The comparison operator. Absent (or "==") is the default: strict equality
+	 * with the existing String-coerced fallback. ">=" compares numerically —
+	 * `Number(actual) >= Number(value)`, matching only when both sides coerce
+	 * to finite numbers, otherwise the row does not match. The key is dropped
+	 * on serialize when it means "==" (the house convention for non-defaults).
+	 */
+	op?: "==" | ">=";
 }
 
 /** One pipeline agent node on the canvas. */
@@ -214,10 +227,20 @@ export interface Connection {
 export interface IfBranch {
 	/** The branch/output-port name ("billing"); unique non-empty within the control. */
 	name: string;
-	/** The structured-output field to compare ("action"); required on valued branches. */
+	/**
+	 * The field to compare ("action"); required on valued branches. The
+	 * executor-reserved `$count` turns the row into a counter test — the
+	 * feeding agent's firing sequence for this firing (1-based), matchable
+	 * even when the firing produced no structured result.
+	 */
 	field: string;
 	/** The value the field must equal; absent (or "") = the catch-all (else). */
 	value?: string;
+	/**
+	 * The comparison operator; see OutputBinding.op. Absent (or "==") is the
+	 * default equality; ">=" compares numerically and is the only other value.
+	 */
+	op?: "==" | ">=";
 	/**
 	 * The control edge this branch tick renders on (see PortSide). Absent =
 	 * "right". Geometry only — the executor never reads it; on lowering the

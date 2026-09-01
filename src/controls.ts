@@ -31,11 +31,15 @@
 // without passing validateGraph, so the lowering is the last line of defense
 // (the portGraph discipline: this view stays total, validation reports).
 
+import { COUNT_KEY } from "./execution.ts";
 import type { Connection, ControlNode, IfBranch, OutputBinding, PipelineGraph, PortSide, ValidationError } from "./types.ts";
 
 /** Node edges a branch tick may render on (same vocabulary as graph.ts). */
 const PORT_SIDES = ["left", "right", "top", "bottom"] as const;
 const DEFAULT_BRANCH_SIDE = "right";
+
+/** Comparison operators a branch row may declare; absent means "==" (docs/proposals/loops.md). */
+const BRANCH_OPS = ["==", ">="] as const;
 
 /** What the shared graph rules need to know about a graph's controls. */
 export interface ControlAnalysis {
@@ -166,7 +170,7 @@ export function validateControls(
 		const owner = findAgent(agents, source);
 		if (owner !== undefined) {
 			validateOwner(id, source, owner, outgoing, errors);
-			warnUnreachable(id, source, owner, warnings);
+			warnUnreachable(id, source, owner, control.branches, warnings);
 		}
 		warnSideConflict(id, control.branches, warnings);
 	}
@@ -177,7 +181,8 @@ export function validateControls(
 /**
  * One control's branch rules: at least one branch; unique non-empty names;
  * every valued branch carries a non-empty `field`; at most one catch-all and
- * only as the last branch; a known side. Returns the declared branch names —
+ * only as the last branch; a known side; a known op (`==`/`>=` — a `>=` row's
+ * value must coerce to a finite number). Returns the declared branch names —
  * reported even on a branch that failed another rule, so a connection naming
  * it is not double-reported.
  */
@@ -213,6 +218,12 @@ function validateBranches(controlId: string, branches: unknown, errors: Validati
 		if (branch.side !== undefined && !(PORT_SIDES as readonly unknown[]).includes(branch.side)) {
 			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} has an unknown side "${argStr(branch.side)}" (expected "left", "right", "top" or "bottom")` });
 		}
+		if (branch.op !== undefined && !(BRANCH_OPS as readonly unknown[]).includes(branch.op)) {
+			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} has an unknown op "${argStr(branch.op)}" (expected "==" or ">=")` });
+		}
+		if (branch.op === ">=" && !Number.isFinite(Number(branch.value))) {
+			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} compares with ">=" but its value is not a finite number` });
+		}
 	});
 	return names;
 }
@@ -237,18 +248,38 @@ function validateOwner(controlId: string, sourceId: string, owner: Record<string
 
 /**
  * Non-fatal: the branches can never fire when the source lacks
- * `settings.outputSchema` (bindings evaluate only against a structured
- * result) or is breakpointed (a continuable child produces none).
+ * `settings.outputSchema` (content bindings evaluate only against a structured
+ * result) or is breakpointed (a continuable child produces none). The
+ * no-schema warning is SUPPRESSED when every valued branch is a `$count` row —
+ * counter rows test the firing's sequence, not the record, so they can fire
+ * without a schema (docs/proposals/loops.md). It still fires when the control
+ * has no valued branch at all: a bare catch-all needs a structured result, so
+ * the warning stays accurate there. The breakpointed warning always stays —
+ * accurate for content rows, stale only for `$count` rows (L4's docs reword it).
  */
-function warnUnreachable(controlId: string, sourceId: string, owner: Record<string, unknown>, warnings: ValidationError[]): void {
+function warnUnreachable(controlId: string, sourceId: string, owner: Record<string, unknown>, branches: unknown, warnings: ValidationError[]): void {
 	if (owner.breakpoint === true) {
 		warnings.push({ code: "if-source-breakpointed", message: `control "${controlId}" feeds from breakpointed agent "${sourceId}" — a continuable child cannot produce structured output, so its branches can never fire` });
 	}
 	const settings = owner.settings;
 	const schema = settings != null && typeof settings === "object" ? (settings as { outputSchema?: unknown }).outputSchema : undefined;
-	if (schema === undefined || schema === null) {
+	if ((schema === undefined || schema === null) && !countsOnly(branches)) {
 		warnings.push({ code: "if-source-no-schema", message: `control "${controlId}" feeds from agent "${sourceId}" which has no settings.outputSchema — its branches compare a structured result, so they can never fire` });
 	}
+}
+
+/** True when at least one branch is valued and every valued branch tests `$count`. */
+function countsOnly(branches: unknown): boolean {
+	if (!Array.isArray(branches)) return false;
+	let valued = 0;
+	for (const entry of branches) {
+		if (entry == null || typeof entry !== "object") continue;
+		const branch = entry as IfBranch;
+		if (!isValued(branch)) continue;
+		valued += 1;
+		if (branch.field !== COUNT_KEY) return false;
+	}
+	return valued > 0;
 }
 
 /**
@@ -297,6 +328,9 @@ type AgentLike = Record<string, unknown>;
  *   - a branch authored `value: ""` lowers to a binding with NO `value` key
  *     (the executor's catch-all test is `value === undefined`, so a literal
  *     empty string would compare against "" and never catch);
+ *   - a `>=` branch forwards its `op` into the binding (the key drops for
+ *     `==`/absent — the house convention for non-defaults; `$count` fields
+ *     pass through untouched);
  *   - non-default branch sides forward into `A`'s `outputPortSides`, the map
  *     omitted when it would be empty (the house convention);
  *   - the `controls` key is absent from the result (it is never persisted).
@@ -373,9 +407,13 @@ export function lowerControls(graph: PipelineGraph | null | undefined): Pipeline
 			const branchValue = spec.value;
 			const valued = branchValue !== undefined && branchValue !== "";
 			const field = typeof spec.field === "string" && spec.field.length > 0 ? spec.field : null;
+			// `op` forwards only when it means something (">=") — the same
+			// non-defaults discipline as `side`, so the lowered graph stays
+			// byte-identical to what a hand author would write.
+			const op = spec.op === ">=" ? { op: spec.op } : {};
 			const binding = field !== null
-				? (valued ? { field, port: name, value: branchValue } : { field, port: name })
-				: (valued ? { port: name, value: branchValue } : { port: name });
+				? (valued ? { field, port: name, value: branchValue, ...op } : { field, port: name, ...op })
+				: (valued ? { port: name, value: branchValue, ...op } : { port: name, ...op });
 			bindings.push(binding as OutputBinding);
 			if (spec.side !== undefined && (PORT_SIDES as readonly unknown[]).includes(spec.side) && spec.side !== DEFAULT_BRANCH_SIDE) {
 				sides[name] = spec.side;

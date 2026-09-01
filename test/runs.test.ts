@@ -54,7 +54,11 @@
 // the chosen branch fires with `emittedTo` naming it, the catch-all catches
 // the no-match case, a no-match without a catch-all starves downstream and
 // reports, and a breakpointed source (no structured result) leaves every
-// branch quiet.
+// branch quiet. The L1 loop cases (docs/proposals/loops.md) pin `$count`: the
+// hand-authored Coder→Reviewer twin escapes on approve or exhausts at 3, the
+// schema-less pure counter runs the body exactly three times, the if-authored
+// form lowers and runs identically, and a released breakpointed firing emits
+// on a valued `$count` row while a plain catch-all stays quiet.
 import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
 import { validateGraph } from "../lib/graph.js";
 import { projectNodes } from "../lib/projection.js";
@@ -2494,6 +2498,252 @@ await withTempDir(async (cwd) => {
 			done.state === "completed" && harness.starts.length === 1
 			&& done.firings.length === 1 && done.firings[0].emittedTo?.length === 0);
 		okCheck("if-bp: the starved branches are reported", harness.warnings.some((w) => w.includes("waiting nodes: g, m")));
+	});
+}
+
+// --- L1 (docs/proposals/loops.md): `$count` loops. The hand-authored twin of
+// the Coder→Reviewer loop — verdict == approve → result, `$count >= 3` →
+// exhausted, catch-all → feedback, any-of entry: the reviewer's per-node
+// firing sequence IS the iteration number, so the loop escapes on approve or
+// exhausts at 3 with a clean completed run. Then: the schema-less pure counter
+// (only `$count` rows can match without a structured result), the same loop
+// authored as an if control (lowered at run()), and the release path — a
+// released breakpointed firing carries no structured result, yet a valued
+// `$count` row fires on it once the rerun ladder reaches the threshold.
+{
+	const connP = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+	const loopGraph = (bindings: unknown[]): PipelineGraph => ({
+		agents: [
+			agent("k", "Task", "Task."),
+			{ ...agent("c", "Coder", "Code."), inputPorts: [{ name: "in", policy: "any-of" }] },
+			{
+				...agent("r", "Review", "Review."),
+				outputPorts: ["result", "exhausted", "feedback"],
+				bindings: bindings as never,
+				settings: { outputSchema: { type: "object" } },
+			},
+			agent("t", "Terminal", "T."),
+		],
+		connections: [
+			connP("c0", "k", "k:out", "c", "c:in"),
+			connP("c1", "c", "c:out", "r", "r:in"),
+			connP("c2", "r", "r:result", "t", "t:in"),
+			connP("c3", "r", "r:feedback", "c", "c:in"), // the back edge
+		],
+	} as unknown as PipelineGraph);
+	const loopBindings = [
+		{ field: "verdict", value: "approve", port: "result" },
+		{ field: "$count", value: "3", op: ">=", port: "exhausted" },
+		// The catch-all loops; a hand-authored binding carries a field (the
+		// executor's catch-all test is the absent value, not the field).
+		{ field: "verdict", port: "feedback" },
+	];
+
+	// approve on iteration 2: the catch-all loops once, the content row exits.
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph: loopGraph(loopBindings), input: "build" });
+		if (!started.ok) { okCheck("iloop: start ok", false); return; }
+		await waitFor("task started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<task:1>");
+		await waitFor("coder round 1", () => harness.starts.length === 2);
+		harness.resolveOneshot(harness.starts[1].childId, "<code:1>");
+		await waitFor("review round 1", () => harness.starts.length === 3);
+		harness.resolveOneshot(harness.starts[2].childId, "<review:1>", "completed", { verdict: "fix" });
+		await waitFor("coder round 2 (the catch-all re-fed the coder)", () => harness.starts.length === 4);
+		okCheck("iloop: iteration 1 fell to the catch-all feedback port", harness.starts[3].label === "Coder");
+		harness.resolveOneshot(harness.starts[3].childId, "<code:2>");
+		await waitFor("review round 2", () => harness.starts.length === 5);
+		harness.resolveOneshot(harness.starts[4].childId, "<review:2>", "completed", { verdict: "approve" });
+		await waitFor("the terminal started on the approve", () => harness.starts.length === 6);
+		okCheck("iloop: the approve exited through the result port", harness.starts[5].label === "Terminal");
+		harness.resolveOneshot(harness.starts[5].childId, "<final>");
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("iloop: completed with coder×2, review×2, terminal×1",
+			done.state === "completed" && done.firings.length === 6
+			&& done.firings.filter((f) => f.nodeId === "c").map((f) => f.seq).join() === "1,2"
+			&& done.firings.filter((f) => f.nodeId === "r").map((f) => f.seq).join() === "1,2");
+		okCheck("iloop: iteration 1 recorded the catch-all choice",
+			done.firings.find((f) => f.nodeId === "r" && f.seq === 1)?.emittedTo?.join() === "feedback");
+		okCheck("iloop: the approve won over the count row on iteration 2",
+			done.firings.find((f) => f.nodeId === "r" && f.seq === 2)?.emittedTo?.join() === "result");
+	});
+
+	// a never-approving reviewer exhausts at 3 — the $count row is the budget.
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph: loopGraph(loopBindings), input: "build" });
+		if (!started.ok) { okCheck("iexhaust: start ok", false); return; }
+		await waitFor("task started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<task:1>");
+		for (let round = 1; round <= 3; round++) {
+			await waitFor("coder round " + round, () => harness.starts.length === 2 + (round - 1) * 2);
+			harness.resolveOneshot(harness.starts[1 + (round - 1) * 2].childId, "<code:" + round + ">");
+			await waitFor("review round " + round, () => harness.starts.length === 3 + (round - 1) * 2);
+			harness.resolveOneshot(harness.starts[2 + (round - 1) * 2].childId, "<review:" + round + ">", "completed", { verdict: "fix" });
+		}
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("iexhaust: the never-approving loop exhausts cleanly at 3",
+			done.state === "completed" && done.firings.length === 7
+			&& done.firings.filter((f) => f.nodeId === "c").map((f) => f.seq).join() === "1,2,3"
+			&& done.firings.filter((f) => f.nodeId === "r").map((f) => f.seq).join() === "1,2,3");
+		okCheck("iexhaust: iteration 3 emitted on the $count row",
+			done.firings.find((f) => f.nodeId === "r" && f.seq === 3)?.emittedTo?.join() === "exhausted");
+		okCheck("iexhaust: the terminal never started (exhausted has no edge)",
+			done.firings.every((f) => f.nodeId !== "t") && harness.starts.length === 7);
+	});
+
+	// the schema-less pure counter: only $count rows can match without a
+	// structured result, so the loop runs the body exactly 3 times.
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const counterGraph = {
+			agents: [
+				agent("k", "Task", "Task."),
+				{ ...agent("c", "Body", "Work."), inputPorts: [{ name: "in", policy: "any-of" }] },
+				{
+					...agent("r", "Counter", "Count."),
+					outputPorts: ["done", "retry"],
+					// NO outputSchema: the counter rows must match without a
+					// structured result — the whole point of $count.
+					bindings: [
+						{ field: "$count", value: "3", op: ">=", port: "done" },
+						{ field: "$count", value: "1", op: ">=", port: "retry" },
+					] as never,
+				},
+				agent("t", "Terminal", "T."),
+			],
+			connections: [
+				connP("c0", "k", "k:out", "c", "c:in"),
+				connP("c1", "c", "c:out", "r", "r:in"),
+				connP("c2", "r", "r:retry", "c", "c:in"), // the back edge
+				connP("c3", "r", "r:done", "t", "t:in"),
+			],
+		} as unknown as PipelineGraph;
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph: counterGraph, input: "build" });
+		if (!started.ok) { okCheck("counter: start ok", false); return; }
+		await waitFor("task started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<task:1>");
+		for (let round = 1; round <= 3; round++) {
+			await waitFor("body round " + round, () => harness.starts.length === 2 + (round - 1) * 2);
+			harness.resolveOneshot(harness.starts[1 + (round - 1) * 2].childId, "<work:" + round + ">");
+			await waitFor("counter round " + round, () => harness.starts.length === 3 + (round - 1) * 2);
+			harness.resolveOneshot(harness.starts[2 + (round - 1) * 2].childId, "<count:" + round + ">");
+		}
+		await waitFor("the terminal started when the counter hit 3", () => harness.starts.length === 8);
+		okCheck("counter: the terminal fired off the done port", harness.starts[7].label === "Terminal");
+		harness.resolveOneshot(harness.starts[7].childId, "<final>");
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("counter: the schema-less loop ran the body exactly 3 times",
+			done.state === "completed"
+			&& done.firings.filter((f) => f.nodeId === "c").map((f) => f.seq).join() === "1,2,3"
+			&& done.firings.filter((f) => f.nodeId === "r").map((f) => f.seq).join() === "1,2,3"
+			&& done.firings.filter((f) => f.nodeId === "t").length === 1);
+		okCheck("counter: retry on 1 and 2, done on 3 — each choice recorded",
+			done.firings.filter((f) => f.nodeId === "r").map((f) => f.emittedTo?.join()).join() === "retry,retry,done");
+	});
+
+	// the same loop authored as an if control: the HONEST graph lowers at
+	// run() and behaves identically — branch names are ports, $count rides op.
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const graph = {
+			agents: [
+				agent("k", "Task", "Task."),
+				{ ...agent("c", "Coder", "Code."), inputPorts: [{ name: "in", policy: "any-of" }] },
+				{ ...agent("r", "Review", "Review."), settings: { outputSchema: { type: "object" } } },
+				agent("t", "Terminal", "T."),
+			],
+			connections: [
+				connP("c0", "k", "k:out", "c", "c:in"),
+				connP("c1", "c", "c:out", "r", "r:in"),
+				{ id: "c2", source: "r", target: "if-1", sourcePort: "r:out" }, // the control's unnamed input
+				{ id: "c3", source: "if-1", target: "t", sourcePort: "if-1:approve", targetPort: "t:in" },
+				{ id: "c4", source: "if-1", target: "c", sourcePort: "if-1:retry", targetPort: "c:in" }, // the back edge
+			],
+			controls: [{
+				id: "if-1", kind: "if", x: 50, y: 60,
+				branches: [
+					{ name: "approve", field: "verdict", value: "approve", side: "top" },
+					{ name: "exhausted", field: "$count", value: "3", op: ">=", side: "bottom" },
+					{ name: "retry" }, // the catch-all loops
+				],
+			}],
+		} as unknown as PipelineGraph;
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph, input: "build" });
+		if (!started.ok) { okCheck("ifloop: start ok", false); return; }
+		await waitFor("task started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<task:1>");
+		await waitFor("coder round 1", () => harness.starts.length === 2);
+		harness.resolveOneshot(harness.starts[1].childId, "<code:1>");
+		await waitFor("review round 1", () => harness.starts.length === 3);
+		harness.resolveOneshot(harness.starts[2].childId, "<review:1>", "completed", { verdict: "fix" });
+		await waitFor("coder round 2 (the catch-all branch re-fed the coder)", () => harness.starts.length === 4);
+		harness.resolveOneshot(harness.starts[3].childId, "<code:2>");
+		await waitFor("review round 2", () => harness.starts.length === 5);
+		harness.resolveOneshot(harness.starts[4].childId, "<review:2>", "completed", { verdict: "approve" });
+		await waitFor("the terminal started on the approve branch", () => harness.starts.length === 6);
+		okCheck("ifloop: the approve branch fed the terminal", harness.starts[5].label === "Terminal");
+		const mid = await registry.getRun(started.runId, cwd) as RunRecord;
+		okCheck("ifloop: the record's snapshot carries the honest controls", mid.graph.controls?.length === 1);
+		harness.resolveOneshot(harness.starts[5].childId, "<final>");
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("ifloop: completed with the branch choices recorded",
+			done.state === "completed" && done.firings.length === 6
+			&& done.firings.find((f) => f.nodeId === "r" && f.seq === 1)?.emittedTo?.join() === "retry"
+			&& done.firings.find((f) => f.nodeId === "r" && f.seq === 2)?.emittedTo?.join() === "approve");
+	});
+
+	// the release path: a released breakpointed firing has no structured
+	// result — a plain catch-all emits nowhere (the honest quiet), but a
+	// valued $count row fires once the rerun ladder reaches its threshold.
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const bpGraph = {
+			agents: [
+				{
+					...agent("n", "Loop", "Loop."),
+					breakpoint: true,
+					outputPorts: ["late", "now"],
+					bindings: [
+						{ field: "$count", value: "3", op: ">=", port: "late" },
+						{ field: "$count", port: "now" }, // the catch-all — needs a structured result
+					] as never,
+				},
+				agent("m", "Next", "Next."),
+			],
+			connections: [connP("c1", "n", "n:late", "m", "m:in")],
+		} as unknown as PipelineGraph;
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph: bpGraph, input: "x" });
+		if (!started.ok) { okCheck("bprel: start ok", false); return; }
+		await waitFor("n started as continuable", () => harness.starts.length === 1 && harness.starts[0].kind === "continuable");
+		harness.settle(harness.starts[0].childId, "<out:1>");
+		await waitPausedAt(registry, started.runId, cwd, "n");
+		// Rerun up to iteration 3: each rerun parks a fresh firing; only the
+		// third release crosses the $count threshold.
+		for (let seq = 2; seq <= 3; seq++) {
+			await registry.control(started.runId, { action: "rerun" }, cwd);
+			await waitFor("the rerun's fresh child started", () => harness.starts.length === seq);
+			harness.settle(harness.starts[seq - 1].childId, "<out:" + seq + ">");
+			await waitPausedAt(registry, started.runId, cwd, "n");
+		}
+		await registry.control(started.runId, { action: "resume" }, cwd);
+		await waitFor("m started once the count row fired on release", () => harness.starts.length === 4);
+		okCheck("bprel: the count row selected the late port on the released firing", harness.starts[3].label === "Next");
+		harness.resolveOneshot(harness.starts[3].childId, "<out:next>");
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("bprel: completes with m done and the third firing's emittedTo [late]",
+			done.state === "completed" && done.firings.length === 4
+			&& done.firings.find((f) => f.nodeId === "n" && f.seq === 3)?.emittedTo?.join() === "late"
+			&& done.firings.find((f) => f.nodeId === "m")?.status === "done");
+		okCheck("bprel: the superseded firings never emitted (below threshold, catch-all quiet)",
+			done.firings.find((f) => f.nodeId === "n" && f.seq === 1)?.emittedTo === undefined
+			&& done.firings.find((f) => f.nodeId === "n" && f.seq === 2)?.emittedTo === undefined);
 	});
 }
 

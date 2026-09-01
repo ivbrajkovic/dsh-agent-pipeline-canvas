@@ -86,13 +86,16 @@ export declare class Kernel {
      * Emit one firing's output from `nodeId` — SELECTIVE emission (conditional-
      * dispatch §2). Without bindings the message is copied to every edge of
      * every output port (the default-graph behavior, unchanged). With bindings,
-     * the first binding matching the firing's STRUCTURED result selects its
-     * port; no match — or no structured result at all — selects NO port (the
-     * honest quiet: starved downstream nodes surface in the run report, and the
-     * empty selection is what the firing's `emittedTo` records). Returns the
-     * selected port names plus the bound overflows to record.
+     * the first binding matching the firing selects its port — content rows
+     * against the firing's STRUCTURED result, `$count` rows against `seq` (the
+     * firing's per-node sequence; the executor assigns it, the kernel only
+     * receives it); no match — or no structured result at all — selects NO port
+     * (the honest quiet: starved downstream nodes surface in the run report,
+     * and the empty selection is what the firing's `emittedTo` records; a valued
+     * `$count` row is the one match that survives a missing structured result).
+     * Returns the selected port names plus the bound overflows to record.
      */
-    emit(nodeId: string, output: string, structured?: unknown): {
+    emit(nodeId: string, output: string, structured?: unknown, seq?: number): {
         ports: string[];
         drops: KernelDrop[];
     };

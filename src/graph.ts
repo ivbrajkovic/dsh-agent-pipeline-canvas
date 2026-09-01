@@ -67,6 +67,9 @@ import { validateControls, type ControlAnalysis } from "./controls.ts";
 /** Input-port delivery policies a spec may declare. */
 const PORT_POLICIES = ["all-of", "any-of"] as const;
 
+/** Comparison ops a binding may declare; absent means "==" (same vocabulary as controls.ts). */
+const BINDING_OPS = ["==", ">="] as const;
+
 /** Node edges a port may render on (edge-routing iteration 2; geometry only). */
 const PORT_SIDES = ["left", "right", "top", "bottom"] as const;
 const DEFAULT_INPUT_SIDE = "left";
@@ -151,12 +154,14 @@ export function validateGraph(graph: unknown): ValidationResult {
 	const ports = portGraph(graph);
 
 	// ---- Output bindings (selective emission — conditional-dispatch §2) ----
-	// A binding is data on the node: an array of { field, port, value? } rules
-	// the executor evaluates against the firing's structured result. The
-	// declaration must be well-shaped and each binding's port must name one of
-	// the agent's DECLARED (or default) output ports — the same membership a
-	// connection's source port must satisfy. Whether a binding will actually
-	// match a run's result is data, not shape: never validated here.
+	// A binding is data on the node: an array of { field, port, value?, op? }
+	// rules the executor evaluates against the firing (content fields against
+	// the structured result; the reserved `$count` against the firing's own
+	// sequence). The declaration must be well-shaped and each binding's port
+	// must name one of the agent's DECLARED (or default) output ports — the
+	// same membership a connection's source port must satisfy. Whether a
+	// binding will actually match a run's result is data, not shape: never
+	// validated here.
 	for (const agent of agents) {
 		if (agent == null || typeof agent !== "object") continue;
 		const rec = agent as { id?: unknown; bindings?: unknown };
@@ -168,7 +173,7 @@ export function validateGraph(graph: unknown): ValidationResult {
 			continue;
 		}
 		(rec.bindings as unknown[]).forEach((entry, index) => {
-			const binding = entry as { field?: unknown; port?: unknown; value?: unknown } | null | undefined;
+			const binding = entry as { field?: unknown; port?: unknown; value?: unknown; op?: unknown } | null | undefined;
 			const field = binding != null && typeof binding === "object" && typeof binding.field === "string" ? binding.field : "";
 			if (field.length === 0) {
 				errors.push({ code: "agent-binding-invalid", message: `agent "${id}" has an output binding without a field (binding #${index + 1})` });
@@ -177,6 +182,18 @@ export function validateGraph(graph: unknown): ValidationResult {
 			const port = binding != null && typeof binding === "object" && typeof binding.port === "string" ? binding.port : "";
 			if (port.length === 0) {
 				errors.push({ code: "agent-binding-invalid", message: `agent "${id}" binding "${field}" names no output port` });
+				return;
+			}
+			// The op rules mirror the if control's branch rules (docs/proposals/loops.md):
+			// "==" (or absent) is the default; ">=" must carry a value that
+			// coerces to a finite number, since the comparison is numeric.
+			const op = binding != null && typeof binding === "object" ? binding.op : undefined;
+			if (op !== undefined && !(BINDING_OPS as readonly unknown[]).includes(op)) {
+				errors.push({ code: "agent-binding-invalid", message: `agent "${id}" binding "${field}" has an unknown op "${argStr(op)}" (expected "==" or ">=")` });
+				return;
+			}
+			if (op === ">=" && !Number.isFinite(Number(binding?.value))) {
+				errors.push({ code: "agent-binding-invalid", message: `agent "${id}" binding "${field}" compares with ">=" but its value is not a finite number` });
 				return;
 			}
 			if (!declared.includes(port)) {
