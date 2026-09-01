@@ -317,9 +317,11 @@
 .pipeline-node.control .node-sub { position: relative; }
 /* One labeled tick per branch: the WRAPPER is dot-sized and centered on the
    vertex, so the dot sits exactly on it (straddling the corner, like an
-   agent's tick on its node edge); the label hangs outside the diamond with a
-   gap, on a small base-colored chip so it reads over edges and dots. The
-   wrapper never catches the pointer — only its tick does. */
+   agent's tick on its node edge); the label hangs on a small base-colored
+   chip DIAGONALLY off the vertex — outward AND lateral — because the branch
+   wire always leaves along the outward axis, and a label placed straight out
+   sits inside its own wire. The wrapper never catches the pointer — only its
+   tick does. */
 .control-branch {
 	position: absolute;
 	width: 18px;
@@ -338,10 +340,10 @@
 	padding: 2px 5px;
 	border-radius: 4px;
 }
-.control-branch.side-right .branch-label { left: calc(100% + 4px); top: 50%; transform: translateY(-50%); }
-.control-branch.side-left .branch-label { right: calc(100% + 4px); top: 50%; transform: translateY(-50%); }
-.control-branch.side-top .branch-label { bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); }
-.control-branch.side-bottom .branch-label { top: calc(100% + 4px); left: 50%; transform: translateX(-50%); }
+.control-branch.side-right .branch-label { left: calc(100% + 5px); bottom: calc(50% + 5px); }
+.control-branch.side-left .branch-label { right: calc(100% + 5px); bottom: calc(50% + 5px); }
+.control-branch.side-top .branch-label { bottom: calc(100% + 5px); right: calc(50% + 5px); }
+.control-branch.side-bottom .branch-label { top: calc(100% + 5px); right: calc(50% + 5px); }
 /* The control's warning chip (never-fire sources, side stacking) rides the
    same bottom slot an agent's status chip uses — a control has none. */
 .pipeline-node .node-warn {
