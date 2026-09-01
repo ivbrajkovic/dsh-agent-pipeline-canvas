@@ -1,6 +1,8 @@
 // The Pipelines canvas view: the whole node workspace — a palette with a
-// draggable Agent, a canvas, node move/select, the node edit button, the
-// breakpoint toggle, output→input connections with directed edges, the toolbar
+// draggable Agent and an If control, a canvas, node move/select, the node edit
+// button, the breakpoint toggle, output→input connections with directed edges
+// (an If's branch ticks are the labeled sources; the if takes one unnamed
+// input and owns its feeding agent's whole emission surface), the toolbar
 // (add/delete/JSON/clear/run/abort), load/save through the Host routes, the
 // run/result modals, and the paused-run inspection modal. Renders inside the
 // per-session view tab AND the frame-wide shell panel (see ./shell-panel.tsx);
@@ -31,11 +33,13 @@
 import * as React from "react";
 import type { MenuEntry } from "@deepseek-ai/dsh-client-ui-primitives";
 import { validateGraph } from "../graph.ts";
+import { lowerControls } from "../controls.ts";
 import { classifyGraph, topoOrder } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
-import type { PortSide, ValidationResult } from "../types.ts";
+import type { IfBranch, PortSide, ValidationError, ValidationResult } from "../types.ts";
 import { AgentConfigPanel } from "./agent-config.tsx";
+import { ControlConfigPanel } from "./control-config.tsx";
 import { RunModal } from "./run-modal.tsx";
 import { ResultModal } from "./result-modal.tsx";
 import { InspectModal } from "./inspect-modal.tsx";
@@ -47,9 +51,11 @@ import {
 	SAVE_DEBOUNCE_MS,
 	buildGraph,
 	loadAgent,
+	loadControls,
 	numericSuffix,
 	type CanvasAgent,
 	type CanvasConnection,
+	type CanvasControl,
 	type FileRefCandidate,
 	type PipelineServices,
 	type RunRecordLike,
@@ -95,12 +101,16 @@ function PipelineView({
 	const NODE_H = 58;
 	const [agents, setAgents] = React.useState<CanvasAgent[]>([]);
 	const [connections, setConnections] = React.useState<CanvasConnection[]>([]);
+	// The if controls: first-class canvas nodes (the honest graph — what the
+	// canvas shows is what the file carries; the run path lowers them).
+	const [controls, setControls] = React.useState<CanvasControl[]>([]);
 	const [seq, setSeq] = React.useState(1);
 	const [selectedId, setSelectedId] = React.useState<string | null>(null);
 	const [connectCursor, setConnectCursor] = React.useState<{ x: number; y: number } | null>(null);
 	const [hoverTarget, setHoverTarget] = React.useState<string | null>(null);
 	const [showJson, setShowJson] = React.useState(false);
 	const [configAgentId, setConfigAgentId] = React.useState<string | null>(null);
+	const [configControlId, setConfigControlId] = React.useState<string | null>(null);
 	const [showRunModal, setShowRunModal] = React.useState(false);
 	// The durable run being followed (running or paused); null when idle/terminal.
 	const [activeRun, setActiveRun] = React.useState<RunRecordLike | null>(null);
@@ -120,8 +130,13 @@ function PipelineView({
 	// A connection drafted between two multi-port endpoints: the edge needs
 	// its port names before it is added (the picker overlay completes it).
 	const [edgeDraft, setEdgeDraft] = React.useState<{ id: string; source: string; target: string; sourcePort: string; targetPort: string } | null>(null);
-	// The node context menu: which agent it opened on and the viewport point
-	// (clientX/clientY) it opened at; null when closed.
+	// The owner handoff: an agent wired into an if while it still carries its
+	// own emission config (output ports / bindings) — the if owns that surface,
+	// so the dialog offers to move it into the branches or clear it. The edge
+	// is added either way; cancelling leaves the conflict to validateGraph.
+	const [ownerHandoff, setOwnerHandoff] = React.useState<{ conn: { id: string; source: string; target: string }; control: CanvasControl } | null>(null);
+	// The node context menu: which canvas node (agent or control) it opened on
+	// and the viewport point (clientX/clientY) it opened at; null when closed.
 	const [nodeMenu, setNodeMenu] = React.useState<NodeMenuTarget | null>(null);
 	const runTextRef = React.useRef("");
 	const runFilesRef = React.useRef<string[]>([]);
@@ -129,7 +144,7 @@ function PipelineView({
 	const sseRef = React.useRef<EventSource | null>(null);
 	const canvasRef = React.useRef<HTMLDivElement | null>(null);
 	const idRef = React.useRef(0);
-	const dragRef = React.useRef<{ id: string; startClientX: number; startClientY: number; startX: number; startY: number } | null>(null);
+	const dragRef = React.useRef<{ id: string; kind: "agent" | "control"; startClientX: number; startClientY: number; startX: number; startY: number } | null>(null);
 	const connectRef = React.useRef<{ from: string; cursor: { x: number; y: number }; hoverTarget: string | null; startPort?: string } | null>(null);
 	// Persistence plumbing.
 	const cwdRef = React.useRef<string | undefined>(undefined);
@@ -140,7 +155,7 @@ function PipelineView({
 	const loadedRef = React.useRef(false);
 	const skipNextPersistRef = React.useRef(false);
 	const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-	const stateRef = React.useRef<{ agents: CanvasAgent[]; connections: CanvasConnection[] }>({ agents: [], connections: [] });
+	const stateRef = React.useRef<{ agents: CanvasAgent[]; connections: CanvasConnection[]; controls: CanvasControl[] }>({ agents: [], connections: [], controls: [] });
 
 	// Consume a pending chat-navigation request (see pendingChatView): when this
 	// canvas is the view the TARGET session remembered, hand the tab to Chat —
@@ -177,11 +192,13 @@ function PipelineView({
 		if (sseRef.current !== null) { sseRef.current.close(); sseRef.current = null; }
 	}, []);
 
-	// A menu whose agent vanished (Delete key, toolbar Delete, Clear) has
-	// nothing left to act on — close it.
+	// A menu whose node vanished (Delete key, toolbar Delete, the menu's own
+	// delete row, Clear) has nothing left to act on — close it. Controls are
+	// watched beside agents: a menu opened on a control must not survive that
+	// control's deletion.
 	React.useEffect(() => {
-		if (nodeMenu !== null && !agents.some((a) => a.id === nodeMenu.agentId)) setNodeMenu(null);
-	}, [agents, nodeMenu]);
+		if (nodeMenu !== null && !agents.some((a) => a.id === nodeMenu.nodeId) && !controls.some((k) => k.id === nodeMenu.nodeId)) setNodeMenu(null);
+	}, [agents, controls, nodeMenu]);
 
 	function newId(prefix: string): string {
 		idRef.current += 1;
@@ -197,6 +214,15 @@ function PipelineView({
 		setSeq((s) => s + 1);
 		setSelectedId(agent.id);
 		return agent;
+	}
+	// A fresh if starts with a single catch-all branch ("else") — a valid,
+	// silent control the branch editor fills in: valued branches added above
+	// the catch-all become the decision, wired one tick each.
+	function addControl(x: number, y: number): CanvasControl {
+		const control: CanvasControl = { id: newId("if"), kind: "if", branches: [{ name: "else", field: "" }], x, y };
+		setControls((prev) => prev.concat([control]));
+		setSelectedId(control.id);
+		return control;
 	}
 	// Per-port anchor points (edge-routing iteration 2): each port renders on
 	// its declared node edge — inputs default left, outputs default right, and
@@ -230,22 +256,45 @@ function PipelineView({
 		return { x: a.x + NODE_W * frac, y: a.y + NODE_H, side };
 	}
 
+	// The control's port-anchor model: one unnamed input tick on the left edge,
+	// one labeled tick per branch positioned by the branch `side` (default
+	// right), same stacking fraction as agent ports when branches share a side.
+	function controlInputAnchor(k: CanvasControl): { x: number; y: number; side: Side } {
+		return { x: k.x, y: k.y + NODE_H / 2, side: "left" };
+	}
+	function branchSideOf(k: CanvasControl, branch: string): Side {
+		const spec = k.branches.find((b) => String(b.name ?? "") === branch);
+		return asSide(spec?.side) ?? "right";
+	}
+	function branchAnchor(k: CanvasControl, branch: string): { x: number; y: number; side: Side } {
+		const side = branchSideOf(k, branch);
+		const names = branchNamesOf(k);
+		const sameSide = names.filter((n) => branchSideOf(k, n) === side);
+		const frac = (Math.max(0, sameSide.indexOf(branch)) + 1) / (sameSide.length + 1);
+		if (side === "left") return { x: k.x, y: k.y + NODE_H * frac, side };
+		if (side === "right") return { x: k.x + NODE_W, y: k.y + NODE_H * frac, side };
+		if (side === "top") return { x: k.x + NODE_W * frac, y: k.y, side };
+		return { x: k.x + NODE_W * frac, y: k.y + NODE_H, side };
+	}
+
 	// node drag (pointer capture on the node). Primary button only: a
 	// right-button press must not drag the node — it opens the context menu.
-	function onNodePointerDown(e: React.PointerEvent, agent: CanvasAgent) {
+	// Covers agents and controls alike.
+	function onNodePointerDown(e: React.PointerEvent, id: string, x: number, y: number, kind: "agent" | "control") {
 		if (e.button !== 0) return;
 		e.preventDefault(); e.stopPropagation();
 		if (canvasRef.current) canvasRef.current.focus();
 		e.currentTarget.setPointerCapture(e.pointerId);
-		setSelectedId(agent.id);
-		dragRef.current = { id: agent.id, startClientX: e.clientX, startClientY: e.clientY, startX: agent.x, startY: agent.y };
+		setSelectedId(id);
+		dragRef.current = { id, kind, startClientX: e.clientX, startClientY: e.clientY, startX: x, startY: y };
 	}
 	function onNodePointerMove(e: React.PointerEvent) {
 		const d = dragRef.current;
 		if (!d) return;
 		const nx = d.startX + (e.clientX - d.startClientX);
 		const ny = d.startY + (e.clientY - d.startClientY);
-		setAgents((prev) => prev.map((a) => (a.id === d.id ? { ...a, x: nx, y: ny } : a)));
+		if (d.kind === "control") setControls((prev) => prev.map((k) => (k.id === d.id ? { ...k, x: nx, y: ny } : k)));
+		else setAgents((prev) => prev.map((a) => (a.id === d.id ? { ...a, x: nx, y: ny } : a)));
 	}
 	function onNodePointerUp() {
 		dragRef.current = null;
@@ -254,24 +303,25 @@ function PipelineView({
 	// connect output -> input (primary button only — a right-button press must
 	// not draft a connection; the event bubbles to the node's context menu).
 	// The grab remembers which output tick it started from so the picker can
-	// default to it (edge-routing proposal 1).
-	function onOutputPointerDown(e: React.PointerEvent, agent: CanvasAgent, port: string) {
+	// default to it (edge-routing proposal 1). A control's branch ticks start
+	// drafts the same way, the startPort being the branch name.
+	function onOutputPointerDown(e: React.PointerEvent, nodeId: string, port: string) {
 		if (e.button !== 0) return;
 		e.preventDefault(); e.stopPropagation();
 		if (canvasRef.current) canvasRef.current.focus();
 		const p = canvasPoint(e.clientX, e.clientY);
-		connectRef.current = { from: agent.id, cursor: { x: p.x, y: p.y }, hoverTarget: null, startPort: port };
+		connectRef.current = { from: nodeId, cursor: { x: p.x, y: p.y }, hoverTarget: null, startPort: port };
 		setConnectCursor({ x: p.x, y: p.y });
-		setSelectedId(agent.id);
+		setSelectedId(nodeId);
 	}
-	function onInputPointerEnter(e: React.PointerEvent, agent: CanvasAgent) {
+	function onInputPointerEnter(e: React.PointerEvent, nodeId: string) {
 		e.stopPropagation();
 		if (!connectRef.current) return;
-		connectRef.current.hoverTarget = agent.id;
-		setHoverTarget(agent.id);
+		connectRef.current.hoverTarget = nodeId;
+		setHoverTarget(nodeId);
 	}
-	function onInputPointerLeave(e: React.PointerEvent, agent: CanvasAgent) {
-		if (connectRef.current && connectRef.current.hoverTarget === agent.id) {
+	function onInputPointerLeave(e: React.PointerEvent, nodeId: string) {
+		if (connectRef.current && connectRef.current.hoverTarget === nodeId) {
 			connectRef.current.hoverTarget = null;
 			setHoverTarget(null);
 		}
@@ -291,21 +341,49 @@ function PipelineView({
 			const exists = connections.some((conn) => conn.source === c.from && conn.target === target);
 			if (!exists) {
 				const conn = { id: newId("conn"), source: c.from, target };
-				// Named ports (P7): when either endpoint declares several, the
-				// edge must say which ones — the picker completes it. A node
-				// with a single (or default) port wires without ceremony. The
-				// grabbed output tick defaults the source side.
-				const srcPorts = outputPortNamesOf(c.from);
-				const sourcePort = c.startPort && srcPorts.includes(c.startPort) ? c.startPort : srcPorts[0];
-				const tgtPorts = inputPortNamesOf(target);
-				if (srcPorts.length > 1 || tgtPorts.length > 1) {
-					setEdgeDraft({ ...conn, sourcePort, targetPort: tgtPorts[0] });
-				} else {
-					setConnections((prev) => prev.concat([{
+				const fromControl = controls.find((k) => k.id === c.from);
+				const targetControl = controls.find((k) => k.id === target);
+				if (fromControl !== undefined) {
+					// Control → agent: the picker opens for EVERY control-sourced
+					// draft, single-branch or not — the branch list is the source
+					// side and must be confirmed explicitly (the port-name
+					// resolvers are agent-keyed and would otherwise fall back to
+					// "out"). The grabbed branch tick defaults the select.
+					const branches = branchNamesOf(fromControl);
+					setEdgeDraft({
 						...conn,
-						...(sourcePort !== "out" ? { sourcePort } : {}),
-						...(tgtPorts[0] !== "in" ? { targetPort: tgtPorts[0] } : {}),
-					}]));
+						sourcePort: c.startPort !== undefined && branches.includes(c.startPort) ? c.startPort : (branches[0] ?? ""),
+						targetPort: inputPortNamesOf(target)[0],
+					});
+				} else if (targetControl !== undefined) {
+					// Agent → control: the if owns the source's whole emission
+					// surface. An agent carrying its own output ports or bindings
+					// gets the owner handoff (move them into the branches or clear
+					// them); a clean agent wires straight in on its default output.
+					const source = agents.find((a) => a.id === c.from);
+					if (source !== undefined && (source.outputPorts !== undefined || source.bindings !== undefined)) {
+						setOwnerHandoff({ conn, control: targetControl });
+					} else {
+						setConnections((prev) => prev.concat([conn]));
+					}
+				} else {
+					// Agent → agent. Named ports (P7): when either endpoint
+					// declares several, the edge must say which ones — the picker
+					// completes it. A node with a single (or default) port wires
+					// without ceremony. The grabbed output tick defaults the
+					// source side.
+					const srcPorts = outputPortNamesOf(c.from);
+					const sourcePort = c.startPort && srcPorts.includes(c.startPort) ? c.startPort : srcPorts[0];
+					const tgtPorts = inputPortNamesOf(target);
+					if (srcPorts.length > 1 || tgtPorts.length > 1) {
+						setEdgeDraft({ ...conn, sourcePort, targetPort: tgtPorts[0] });
+					} else {
+						setConnections((prev) => prev.concat([{
+							...conn,
+							...(sourcePort !== "out" ? { sourcePort } : {}),
+							...(tgtPorts[0] !== "in" ? { targetPort: tgtPorts[0] } : {}),
+						}]));
+					}
 				}
 			}
 		}
@@ -334,14 +412,32 @@ function PipelineView({
 		const n = agents.length;
 		addAgent(60 + (n % 4) * 40, 40 + (n % 6) * 34);
 	}
+	// Remove one canvas node — agent or control — by id. The control cascade:
+	// deleting an AGENT also deletes any control it feeds (a control never
+	// outlives its source) together with that control's edges; deleting a
+	// control removes just its own edges. Shared by the toolbar Delete, the
+	// Delete/Backspace key, and the context menu's delete row.
+	function deleteNode(nodeId: string) {
+		if (controls.some((k) => k.id === nodeId)) {
+			setControls((prev) => prev.filter((k) => k.id !== nodeId));
+			setConnections((prev) => prev.filter((c) => c.source !== nodeId && c.target !== nodeId));
+		} else {
+			const dying = new Set(
+				controls.filter((k) => connections.some((c) => c.source === nodeId && c.target === k.id)).map((k) => k.id),
+			);
+			setAgents((prev) => prev.filter((a) => a.id !== nodeId));
+			setControls((prev) => prev.filter((k) => !dying.has(k.id)));
+			setConnections((prev) => prev.filter((c) =>
+				c.source !== nodeId && c.target !== nodeId && !dying.has(c.source) && !dying.has(c.target)));
+		}
+		if (selectedId === nodeId) setSelectedId(null);
+	}
 	function deleteSelected() {
 		if (!selectedId) return;
-		setAgents((prev) => prev.filter((a) => a.id !== selectedId));
-		setConnections((prev) => prev.filter((c) => c.source !== selectedId && c.target !== selectedId));
-		setSelectedId(null);
+		deleteNode(selectedId);
 	}
 	function clearAll() {
-		setAgents([]); setConnections([]); setSelectedId(null); setHoverTarget(null); setConnectCursor(null);
+		setAgents([]); setConnections([]); setControls([]); setSelectedId(null); setHoverTarget(null); setConnectCursor(null);
 		dragRef.current = null; connectRef.current = null;
 		setSeq(1); idRef.current = 0;
 		setRunResult(null); setResultOpen(false); setShowRunModal(false); setDoneRun(null);
@@ -350,48 +446,60 @@ function PipelineView({
 	}
 
 	// ---- Node context menu ----------------------------------------------------
-	// Right-click a node: select it and open the harness Menu at the pointer
-	// (native menu suppressed on nodes only — the canvas background keeps it).
-	// Entries are the pinned shape, headed by Go to transcript — enabled once
-	// the projection holds a child session for the node (live, paused, and
-	// restored-last-run records all project one; a never-fired node shows the
-	// row disabled, and disabled rows never dispatch).
-	function onNodeContextMenu(e: React.MouseEvent, agent: CanvasAgent) {
+	// Right-click a node (agent or control): select it and open the harness
+	// Menu at the pointer (native menu suppressed on nodes only — the canvas
+	// background keeps it). Agent entries are the pinned shape, headed by Go to
+	// transcript — enabled once the projection holds a child session for the
+	// node (live, paused, and restored-last-run records all project one; a
+	// never-fired node shows the row disabled, and disabled rows never
+	// dispatch). A control never fires a child session, so its menu carries
+	// only Edit branches and Delete control.
+	function onNodeContextMenu(e: React.MouseEvent, nodeId: string) {
 		e.preventDefault(); e.stopPropagation();
-		setSelectedId(agent.id);
+		setSelectedId(nodeId);
 		// A connection gesture owns the pointer; it keeps its cancel path
 		// (Escape) and the right-click opens nothing.
 		if (connectRef.current) return;
-		setNodeMenu({ agentId: agent.id, x: e.clientX, y: e.clientY });
+		setNodeMenu({ nodeId, x: e.clientX, y: e.clientY });
 	}
-	function nodeMenuEntries(agent: CanvasAgent): MenuEntry[] {
-		const childSessionId = runProjection?.nodes[agent.id]?.childSessionId;
+	function nodeMenuEntries(node: CanvasAgent | CanvasControl): MenuEntry[] {
+		if ("branches" in node) {
+			return [
+				{ id: "edit", label: "Edit branches" },
+				{ type: "separator", id: "menu-sep-delete" },
+				{ id: "delete", label: "Delete control", danger: true },
+			];
+		}
+		const childSessionId = runProjection?.nodes[node.id]?.childSessionId;
 		return [
 			{ id: "transcript", label: "Go to transcript", disabled: typeof childSessionId !== "string" || childSessionId.length === 0 },
 			{ type: "separator", id: "menu-sep-edit" },
 			{ id: "edit", label: "Edit agent" },
-			{ id: "breakpoint", label: agent.breakpoint ? "Disarm breakpoint" : "Arm breakpoint" },
+			{ id: "breakpoint", label: node.breakpoint ? "Disarm breakpoint" : "Arm breakpoint" },
 			{ type: "separator", id: "menu-sep-delete" },
 			{ id: "delete", label: "Delete agent", danger: true },
 		];
 	}
 	function runNodeMenuAction(id: string) {
 		if (nodeMenu === null) return;
-		const agentId = nodeMenu.agentId;
+		const nodeId = nodeMenu.nodeId;
+		const menuIsControl = controls.some((k) => k.id === nodeId);
 		if (id === "edit") {
-			setConfigAgentId(agentId);
+			// Route by node kind: an agent opens its config panel, a control
+			// its branch editor.
+			if (menuIsControl) setConfigControlId(nodeId);
+			else setConfigAgentId(nodeId);
 		} else if (id === "breakpoint") {
 			// Same toggle the node's breakpoint button performs.
-			setAgents((prev) => prev.map((a) => (a.id === agentId ? { ...a, breakpoint: !a.breakpoint } : a)));
+			setAgents((prev) => prev.map((a) => (a.id === nodeId ? { ...a, breakpoint: !a.breakpoint } : a)));
 		} else if (id === "delete") {
-			// Same removal as deleteSelected: the node plus its connections.
-			setAgents((prev) => prev.filter((a) => a.id !== agentId));
-			setConnections((prev) => prev.filter((c) => c.source !== agentId && c.target !== agentId));
-			if (selectedId === agentId) setSelectedId(null);
+			// Same removal as deleteSelected — node, edges, and (for an agent)
+			// the source cascade to any control it feeds.
+			deleteNode(nodeId);
 		} else if (id === "transcript") {
 			// Re-read at dispatch — the projection may have moved since open.
 			// The wrapper closes the menu before this runs.
-			const childSessionId = runProjection?.nodes[agentId]?.childSessionId;
+			const childSessionId = runProjection?.nodes[nodeId]?.childSessionId;
 			if (typeof childSessionId === "string" && childSessionId.length > 0) openTranscript(childSessionId);
 		}
 	}
@@ -472,16 +580,20 @@ function PipelineView({
 	// terminal id (only agents that produced an output) plus per-agent statuses,
 	// all through the projection (the record itself is a firing log). The rows
 	// walk the snapshot's topological order so never-started agents still list
-	// as "pending" — the projection only knows nodes that fired. `list`
-	// overrides the current canvas agents for the label lookup — the load path
-	// calls this before the parsed agents have landed in state.
+	// as "pending" — the projection only knows nodes that fired. The snapshot
+	// is the HONEST graph (its control edges are not agent adjacency), so the
+	// classification runs on the lowered form — the same rewrite the run path
+	// applied — or every control source would misclassify as a terminal.
+	// `list` overrides the current canvas agents for the label lookup — the
+	// load path calls this before the parsed agents have landed in state.
 	function recordToResult(rec: RunRecordLike, list?: CanvasAgent[]): RunResultLike {
 		const nameIn = (id: string): string => {
 			for (const a of list ?? agents) if (a.id === id) return a.name;
 			return id;
 		};
 		const projection = projectNodes(rec);
-		const runs = topoOrder(rec.graph).map((id) => {
+		const lowered = lowerControls(rec.graph);
+		const runs = topoOrder(lowered).map((id) => {
 			const node = projection.nodes[id];
 			return {
 				id,
@@ -494,7 +606,7 @@ function PipelineView({
 		if (rec.state === "error") {
 			return { ok: false, error: "The run failed — see the per-agent statuses below.", runs };
 		}
-		const terminals = classifyGraph(rec.graph).terminals;
+		const terminals = classifyGraph(lowered).terminals;
 		const outputs: Record<string, unknown> = {};
 		for (const id of terminals) {
 			const output = projection.nodes[id]?.output;
@@ -518,7 +630,7 @@ function PipelineView({
 			setResultOpen(true);
 			return;
 		}
-		const g = buildGraph(agents, connections);
+		const g = buildGraph(agents, connections, controls);
 		setStartPending(true);
 		setRunResult(null);
 		setDoneRun(null);
@@ -632,14 +744,22 @@ function PipelineView({
 	// ---- Named ports (P7) ----------------------------------------------------
 	// Edges carry PORT NAMES ("mail → data"); default graphs keep the implicit
 	// "out"/"in". The name lists come from the declared port lists, falling
-	// back to the single default port when undeclared.
+	// back to the single default port when undeclared. A control's output side
+	// is its BRANCH list (never "out") — the resolvers answer for controls too,
+	// so the edge picker and the geometry can treat every endpoint uniformly.
 
-	/** The node's output port names (declared, else the single "out"). */
+	/** The node's output port names — an agent's declared outputs, a control's branch names. */
 	function outputPortNamesOf(id: string): string[] {
+		const control = controls.find((k) => k.id === id);
+		if (control !== undefined) return branchNamesOf(control);
 		const a = agents.find((x) => x.id === id);
 		return a && Array.isArray(a.outputPorts) && a.outputPorts.length > 0 ? a.outputPorts : ["out"];
 	}
-	/** The node's input port names (declared, else the single "in"). */
+	/** The control's declared branch names, in evaluation order. */
+	function branchNamesOf(control: CanvasControl): string[] {
+		return control.branches.map((b) => String(b.name ?? "")).filter((n) => n.length > 0);
+	}
+	/** The node's input port names (declared, else the single "in"; a control takes one unnamed input). */
 	function inputPortNamesOf(id: string): string[] {
 		const a = agents.find((x) => x.id === id);
 		return a && Array.isArray(a.inputPorts) && a.inputPorts.length > 0 ? a.inputPorts.map((p) => p.name) : ["in"];
@@ -662,6 +782,71 @@ function PipelineView({
 			...(d.sourcePort !== "out" ? { sourcePort: d.sourcePort } : {}),
 			...(d.targetPort !== "in" ? { targetPort: d.targetPort } : {}),
 		}]));
+	}
+
+	// The owner handoff's Move: the agent's emission config folds into branch
+	// rules — the bindings first (they carry the decision, in evaluation
+	// order), then any declared output port no binding covered. A ""/absent
+	// binding value stays a catch-all; sides follow the port.
+	function moveEmissionInto(source: CanvasAgent): IfBranch[] {
+		const branches: IfBranch[] = [];
+		const seen = new Set<string>();
+		const sideFor = (port: string): PortSide | undefined => source.outputPortSides?.[port];
+		for (const b of Array.isArray(source.bindings) ? source.bindings : []) {
+			const port = typeof b?.port === "string" ? b.port : "";
+			if (port.length === 0 || seen.has(port)) continue;
+			seen.add(port);
+			const side = sideFor(port);
+			branches.push({
+				name: port,
+				field: typeof b?.field === "string" ? b.field : "",
+				...(b?.value !== undefined && b.value !== "" ? { value: String(b.value) } : {}),
+				...(side !== undefined && side !== "right" ? { side } : {}),
+			});
+		}
+		for (const port of Array.isArray(source.outputPorts) ? source.outputPorts : []) {
+			if (typeof port !== "string" || port.length === 0 || seen.has(port)) continue;
+			seen.add(port);
+			const side = sideFor(port);
+			branches.push({
+				name: port,
+				field: "",
+				...(side !== undefined && side !== "right" ? { side } : {}),
+			});
+		}
+		return branches;
+	}
+	// Moved branches join the control ahead of its trailing catch-all (which
+	// stays last), skipping names the control already declares.
+	function appendBranches(control: CanvasControl, moved: IfBranch[]): IfBranch[] {
+		const names = new Set(control.branches.map((b) => String(b.name ?? "")));
+		const fresh = moved.filter((b) => !names.has(b.name));
+		if (fresh.length === 0) return control.branches;
+		const last = control.branches[control.branches.length - 1];
+		const cut = control.branches.length - (last !== undefined && (last.value === undefined || last.value === "") ? 1 : 0);
+		return control.branches.slice(0, cut).concat(fresh, control.branches.slice(cut));
+	}
+	// Resolve the handoff: Move or Clear both land the drawn edge (the agent
+	// ends clean, so the graph stays valid); dismissing leaves the agent's
+	// config in place and lets validateGraph's if-owner-conflict surface it.
+	function resolveOwnerHandoff(mode: "move" | "clear" | "dismiss") {
+		const handoff = ownerHandoff;
+		if (handoff === null) return;
+		setOwnerHandoff(null);
+		if (mode !== "dismiss") {
+			const strip = (a: CanvasAgent) => (
+				a.id === handoff.conn.source ? { ...a, outputPorts: undefined, outputPortSides: undefined, bindings: undefined } : a
+			);
+			if (mode === "move") {
+				const source = agents.find((a) => a.id === handoff.conn.source);
+				if (source !== undefined) {
+					const moved = moveEmissionInto(source);
+					setControls((prev) => prev.map((k) => (k.id === handoff.control.id ? { ...k, branches: appendBranches(k, moved) } : k)));
+				}
+			}
+			setAgents((prev) => prev.map(strip));
+		}
+		setConnections((prev) => prev.concat([handoff.conn]));
 	}
 	const continueText = runResult && runResult.ok ? finalOutputText(runResult.outputs || {}, nameOf) : "";
 
@@ -766,6 +951,9 @@ function PipelineView({
 		if (e.dataTransfer.getData("application/x-pipeline-agent") === "agent") {
 			const p = canvasPoint(e.clientX, e.clientY);
 			addAgent(p.x - NODE_W / 2, p.y - NODE_H / 2);
+		} else if (e.dataTransfer.getData("application/x-pipeline-control") === "if") {
+			const p = canvasPoint(e.clientX, e.clientY);
+			addControl(p.x - NODE_W / 2, p.y - NODE_H / 2);
 		}
 	}
 
@@ -802,6 +990,7 @@ function PipelineView({
 				const p = data && data.ok === true ? data.pipeline : null;
 				const as = p && Array.isArray(p.agents) ? p.agents : [];
 				const cs = p && Array.isArray(p.connections) ? p.connections : [];
+				const ks = loadControls(p == null ? undefined : (p as { controls?: unknown }).controls);
 				skipNextPersistRef.current = true;
 				loadedRef.current = true;
 				const loaded = as.map((a: unknown) => {
@@ -821,6 +1010,7 @@ function PipelineView({
 					};
 				});
 				setAgents(loaded);
+				setControls(ks);
 				setConnections(cs.map((c: { id: unknown; source: unknown; target: unknown; sourcePort?: unknown; targetPort?: unknown }) => {
 					const source = String(c.source);
 					const target = String(c.target);
@@ -836,6 +1026,9 @@ function PipelineView({
 				let maxId = 0;
 				as.forEach((a: { id: unknown }) => { const n = numericSuffix(a.id); if (n > maxId) maxId = n; });
 				cs.forEach((c: { id: unknown }) => { const n = numericSuffix(c.id); if (n > maxId) maxId = n; });
+				// The shared counter also numbers the "if-N" id space — the load
+				// re-seeds it from the controls, exactly mirroring the Clear reset.
+				ks.forEach((k) => { const n = numericSuffix(k.id); if (n > maxId) maxId = n; });
 				idRef.current = maxId;
 				let maxSeq = 0;
 				as.forEach((a: { name: unknown }) => {
@@ -875,14 +1068,14 @@ function PipelineView({
 	// workspace graph untouched; without one it keeps the legacy cwd-only
 	// write. Both scopes read off the refs at save time.
 	React.useEffect(() => {
-		stateRef.current = { agents, connections };
+		stateRef.current = { agents, connections, controls };
 		if (!loadedRef.current) return;
 		if (skipNextPersistRef.current) { skipNextPersistRef.current = false; return; }
 		if (!(typeof cwdRef.current === "string" && cwdRef.current.length > 0)) return;
 		if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
 		saveTimerRef.current = setTimeout(() => {
 			saveTimerRef.current = null;
-			const g = buildGraph(stateRef.current.agents, stateRef.current.connections);
+			const g = buildGraph(stateRef.current.agents, stateRef.current.connections, stateRef.current.controls);
 			fetch(ENDPOINT, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
@@ -893,7 +1086,7 @@ function PipelineView({
 				}),
 			}).catch(() => {});
 		}, SAVE_DEBOUNCE_MS);
-	}, [agents, connections]);
+	}, [agents, connections, controls]);
 
 	const gesture = connectRef.current;
 	// Edge geometry (edge-routing iteration 2): the path leaves perpendicular
@@ -972,21 +1165,35 @@ function PipelineView({
 		const my = (s.y + 3 * c1.y + 3 * c2.y + t.y) / 8 - 6;
 		return { d, mx, my };
 	}
+	// Endpoint resolution spans both node kinds: an agent anchors through its
+	// port model, a control through the branch ticks (source) and the single
+	// unnamed input (target).
+	function findNode(id: string): CanvasAgent | CanvasControl | null {
+		for (const a of agents) if (a.id === id) return a;
+		for (const k of controls) if (k.id === id) return k;
+		return null;
+	}
+	function outputAnchorOf(node: CanvasAgent | CanvasControl, port: string): { x: number; y: number; side: Side } {
+		return "branches" in node ? branchAnchor(node, port) : portAnchor(node, "out", port);
+	}
+	function inputAnchorOf(node: CanvasAgent | CanvasControl, port: string): { x: number; y: number; side: Side } {
+		return "branches" in node ? controlInputAnchor(node) : portAnchor(node, "in", port);
+	}
 	const edges = connections.map((c) => {
-		let src: CanvasAgent | null = null, tgt: CanvasAgent | null = null;
-		for (let i = 0; i < agents.length; i++) {
-			if (agents[i].id === c.source) src = agents[i];
-			if (agents[i].id === c.target) tgt = agents[i];
-		}
+		const src = findNode(c.source);
+		const tgt = findNode(c.target);
 		if (!src || !tgt) return null;
 		const sourceName = c.sourcePort ?? "out";
 		const targetName = c.targetPort ?? "in";
-		const s = portAnchor(src, "out", sourceName);
-		const t = portAnchor(tgt, "in", targetName);
+		const srcIsControl = "branches" in src;
+		const s = outputAnchorOf(src, sourceName);
+		const t = inputAnchorOf(tgt, targetName);
 		// A non-default port name is labeled at the edge midpoint — the canvas
 		// shows the real dataflow (design principle 2). A quiet port (its
 		// binding simply never matched) needs no extra rendering: an edge is
-		// only labeled wiring, never a promise the message arrived.
+		// only labeled wiring, never a promise the message arrived. A
+		// control-sourced edge labels just the branch — the decision's name is
+		// the whole story of that wire.
 		const labeled = sourceName !== "out" || targetName !== "in";
 		const geo = edgeGeometry(s, t);
 		return (
@@ -994,7 +1201,7 @@ function PipelineView({
 				<path d={geo.d} className="pipeline-edge" markerEnd="url(#pipeline-arrow)" />
 				{labeled ? (
 					<text x={geo.mx} y={geo.my} className="pipeline-edge-label" textAnchor="middle">
-						{sourceName + " → " + targetName}
+						{srcIsControl ? sourceName : sourceName + " → " + targetName}
 					</text>
 				) : null}
 			</g>
@@ -1002,10 +1209,9 @@ function PipelineView({
 	});
 	let tempEdge: React.ReactNode = null;
 	if (gesture) {
-		let src0: CanvasAgent | null = null;
-		for (let j = 0; j < agents.length; j++) if (agents[j].id === gesture.from) src0 = agents[j];
+		const src0 = findNode(gesture.from);
 		if (src0) {
-			const s0 = portAnchor(src0, "out", gesture.startPort ?? "out");
+			const s0 = outputAnchorOf(src0, gesture.startPort ?? ("branches" in src0 ? branchNamesOf(src0)[0] ?? "" : "out"));
 			const cx = gesture.cursor ? gesture.cursor.x : s0.x;
 			const cy = gesture.cursor ? gesture.cursor.y : s0.y;
 			tempEdge = <path d={edgeGeometry(s0, { x: cx, y: cy, side: "left" }).d} className="pipeline-edge-temp" />;
@@ -1025,10 +1231,10 @@ function PipelineView({
 				style={{ left: agent.x + "px", top: agent.y + "px" }}
 				data-agent-id={agent.id}
 				data-node-status={status ?? ""}
-				onPointerDown={(e) => { onNodePointerDown(e, agent); }}
+				onPointerDown={(e) => { onNodePointerDown(e, agent.id, agent.x, agent.y, "agent"); }}
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
-				onContextMenu={(e) => { onNodeContextMenu(e, agent); }}
+				onContextMenu={(e) => { onNodeContextMenu(e, agent.id); }}
 			>
 				<button
 					className={"node-breakpoint" + (agent.breakpoint ? " armed" : "")}
@@ -1072,8 +1278,8 @@ function PipelineView({
 							key={portName}
 							className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
 							style={{ left: (anchor.x - agent.x) + "px", top: (anchor.y - agent.y) + "px" }}
-							onPointerEnter={(e) => { onInputPointerEnter(e, agent); }}
-							onPointerLeave={(e) => { onInputPointerLeave(e, agent); }}
+							onPointerEnter={(e) => { onInputPointerEnter(e, agent.id); }}
+							onPointerLeave={(e) => { onInputPointerLeave(e, agent.id); }}
 							// The port only swallows the primary press (nothing to do —
 							// connections start at the output); a right-button press goes
 							// unhandled so it bubbles to the node and opens the menu.
@@ -1090,7 +1296,7 @@ function PipelineView({
 							key={portName}
 							className="pipeline-port out"
 							style={{ left: (anchor.x - agent.x) + "px", top: (anchor.y - agent.y) + "px" }}
-							onPointerDown={(e) => { onOutputPointerDown(e, agent, portName); }}
+							onPointerDown={(e) => { onOutputPointerDown(e, agent.id, portName); }}
 							title={multiple ? portName : "Output"}
 						/>
 					);
@@ -1099,22 +1305,102 @@ function PipelineView({
 		);
 	});
 
-	const graphData = buildGraph(agents, connections);
+	const graphData = buildGraph(agents, connections, controls);
 	const validation: ValidationResult = validateGraph(graphData);
 	const warnCount = validation.warnings?.length ?? 0;
 	const jsonText = JSON.stringify(graphData, null, 2);
 
+	// validateGraph's warnings that name this control (a never-fire source, a
+	// side stack) — surfaced on the node's warning chip and in the branch
+	// editor; the rule messages name the control in quotes.
+	function controlWarnings(control: CanvasControl): ValidationError[] {
+		return (validation.warnings ?? []).filter((w) => w.message.indexOf('"' + control.id + '"') !== -1);
+	}
+
+	// The control nodes: kind-styled, one unnamed input tick on the left edge,
+	// one labeled tick per branch on its declared edge (stacking when branches
+	// share a side) — the fork is visible without opening any panel. No run
+	// statuses and no breakpoint button: a control never fires a child session
+	// (the projection knows agents only).
+	const controlNodes = controls.map((control) => {
+		const selected = control.id === selectedId;
+		const hoveredIn = hoverTarget === control.id && gesture;
+		const isIf = control.kind === "if";
+		const warnings = controlWarnings(control);
+		return (
+			<div
+				key={control.id}
+				className={"pipeline-node control" + (selected ? " selected" : "")}
+				style={{ left: control.x + "px", top: control.y + "px" }}
+				data-control-id={control.id}
+				onPointerDown={(e) => { onNodePointerDown(e, control.id, control.x, control.y, "control"); }}
+				onPointerMove={onNodePointerMove}
+				onPointerUp={onNodePointerUp}
+				onContextMenu={(e) => { onNodeContextMenu(e, control.id); }}
+			>
+				<button
+					className="node-edit"
+					title="Edit branches"
+					aria-label={"Edit branches of " + control.id}
+					// Keep the button's pointer events off the node's drag handler.
+					onPointerDown={(e) => { e.stopPropagation(); }}
+					onClick={(e) => { e.stopPropagation(); setConfigControlId(control.id); }}
+				>
+					<svg width={10} height={10} viewBox="0 0 24 24" aria-hidden="true">
+						<path
+							d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"
+							fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"
+						/>
+					</svg>
+				</button>
+				<div className="node-name">{isIf ? "if" : control.kind}</div>
+				<div className="node-sub">{control.id}</div>
+				{warnings.length > 0 ? (
+					<div className="node-warn" title={warnings.map((w) => w.message).join("\n")}>
+						{"⚠ " + warnings.length}
+					</div>
+				) : null}
+				<div
+					className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
+					style={{ left: "0px", top: (NODE_H / 2) + "px" }}
+					onPointerEnter={(e) => { onInputPointerEnter(e, control.id); }}
+					onPointerLeave={(e) => { onInputPointerLeave(e, control.id); }}
+					// The input tick only swallows the primary press — a
+					// right-button press bubbles to the node and opens the menu.
+					onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); }}
+					title="Input"
+				/>
+				{isIf ? branchNamesOf(control).map((branchName, index) => {
+					const anchor = branchAnchor(control, branchName);
+					return (
+						<div
+							key={branchName + ":" + index}
+							className={"control-branch side-" + anchor.side}
+							style={{ left: (anchor.x - control.x) + "px", top: (anchor.y - control.y) + "px" }}
+						>
+							<div
+								className="pipeline-port out"
+								onPointerDown={(e) => { onOutputPointerDown(e, control.id, branchName); }}
+								title={"Branch " + branchName + " — drag to the agent that handles it"}
+							/>
+							<span className="branch-label">{branchName}</span>
+						</div>
+					);
+				}) : null}
+			</div>
+		);
+	});
+
 	let configAgent: CanvasAgent | null = null;
 	for (let k = 0; k < agents.length; k++) if (agents[k].id === configAgentId) configAgent = agents[k];
+	let configControl: CanvasControl | null = null;
+	for (let k = 0; k < controls.length; k++) if (controls[k].id === configControlId) configControl = controls[k];
 
-	// The context menu's entries re-compute per its agent, so the breakpoint
-	// label always reflects the live state; while the agent is mid-vanish
+	// The context menu's entries re-compute per its node, so the breakpoint
+	// label always reflects the live state; while the node is mid-vanish
 	// (before the close effect lands) the list simply renders empty.
-	let menuAgent: CanvasAgent | null = null;
-	if (nodeMenu !== null) {
-		for (let m = 0; m < agents.length; m++) if (agents[m].id === nodeMenu.agentId) menuAgent = agents[m];
-	}
-	const menuEntries: readonly MenuEntry[] = menuAgent !== null ? nodeMenuEntries(menuAgent) : [];
+	const menuNode: CanvasAgent | CanvasControl | null = nodeMenu !== null ? findNode(nodeMenu.nodeId) : null;
+	const menuEntries: readonly MenuEntry[] = menuNode !== null ? nodeMenuEntries(menuNode) : [];
 
 	const inspectNode: ProjectedNode | undefined = pausedNodeId !== null && runProjection ? runProjection.nodes[pausedNodeId] : undefined;
 
@@ -1128,7 +1414,7 @@ function PipelineView({
 			<div className="pipeline-toolbar">
 				<h3>Agent Pipeline</h3>
 				<div className="spacer" />
-				<span className="stat">{agents.length + " agents · " + connections.length + " connections"}</span>
+				<span className="stat">{agents.length + " agents" + (controls.length > 0 ? " · " + controls.length + (controls.length === 1 ? " control" : " controls") : "") + " · " + connections.length + " connections"}</span>
 				<span
 					className={"pipeline-validation" + (validation.ok ? (warnCount > 0 ? " warn" : " ok") : " err")}
 					title={validation.ok
@@ -1204,6 +1490,17 @@ function PipelineView({
 						<div className="palette-icon" />
 						Agent
 					</div>
+					<div
+						className="palette-item"
+						draggable
+						onDragStart={(e) => {
+							e.dataTransfer.setData("application/x-pipeline-control", "if");
+							e.dataTransfer.effectAllowed = "copy";
+						}}
+					>
+						<div className="palette-icon if" />
+						If
+					</div>
 				</div>
 				<div
 					className="pipeline-canvas"
@@ -1224,7 +1521,8 @@ function PipelineView({
 						{tempEdge}
 					</svg>
 					{nodes}
-					{agents.length === 0 ? <div className="pipeline-hint">Drag an Agent from the palette onto the canvas</div> : null}
+					{controlNodes}
+					{agents.length === 0 && controls.length === 0 ? <div className="pipeline-hint">Drag an Agent or an If from the palette onto the canvas</div> : null}
 				</div>
 			</div>
 			{showJson ? <div className="pipeline-json"><pre>{jsonText}</pre></div> : null}
@@ -1258,6 +1556,18 @@ function PipelineView({
 					onClose={() => { setConfigAgentId(null); }}
 				/>
 			) : null}
+			{configControl ? (
+				<ControlConfigPanel
+					key={configControl.id}
+					control={configControl}
+					warnings={controlWarnings(configControl)}
+					onSave={(branches) => {
+						setControls((prev) => prev.map((k) => (k.id === configControl.id ? { ...k, branches } : k)));
+						setConfigControlId(null);
+					}}
+					onClose={() => { setConfigControlId(null); }}
+				/>
+			) : null}
 			{edgeDraft ? (
 				<div
 					className="pipeline-config-overlay"
@@ -1266,7 +1576,7 @@ function PipelineView({
 					<div className="pipeline-edge-picker">
 						<h3>Connect ports</h3>
 						<div className="picker-row">
-							<label>{"From " + nameOf(edgeDraft.source) + " (output port)"}</label>
+							<label>{"From " + nameOf(edgeDraft.source) + (controls.some((k) => k.id === edgeDraft.source) ? " (branch)" : " (output port)")}</label>
 							<select
 								value={edgeDraft.sourcePort}
 								onChange={(e) => { setEdgeDraft((d) => (d ? { ...d, sourcePort: e.target.value } : d)); }}
@@ -1290,6 +1600,36 @@ function PipelineView({
 						<div className="picker-actions">
 							<button className="pipeline-btn" onClick={() => { setEdgeDraft(null); }}>Cancel</button>
 							<button className="pipeline-btn" onClick={confirmEdgeDraft}>Connect</button>
+						</div>
+					</div>
+				</div>
+			) : null}
+			{ownerHandoff !== null ? (
+				<div
+					className="pipeline-config-overlay"
+					onPointerDown={(e) => { e.stopPropagation(); }}
+				>
+					<div className="pipeline-edge-picker">
+						<h3>Hand off emission to the if</h3>
+						<div className="handoff-text">
+							{nameOf(ownerHandoff.conn.source) + " declares its own output ports or bindings, but it now feeds " + ownerHandoff.control.id + " — an if owns its source's whole emission surface. Move the configuration into the branches, or clear it on the agent."}
+						</div>
+						<div className="picker-actions">
+							<button
+								className="pipeline-btn"
+								title="Leave the agent's config in place — the validation strip reports the conflict"
+								onClick={() => { resolveOwnerHandoff("dismiss"); }}
+							>Not now</button>
+							<button
+								className="pipeline-btn"
+								title="Drop the agent's output ports and bindings — it emits only through the if"
+								onClick={() => { resolveOwnerHandoff("clear"); }}
+							>Clear on the agent</button>
+							<button
+								className="pipeline-btn"
+								title="Turn the agent's ports and bindings into this if's branches"
+								onClick={() => { resolveOwnerHandoff("move"); }}
+							>Move into the if</button>
 						</div>
 					</div>
 				</div>

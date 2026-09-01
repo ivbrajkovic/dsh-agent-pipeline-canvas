@@ -91,6 +91,8 @@
 }
 .palette-item:active { cursor: grabbing; }
 .palette-icon { width: 12px; height: 12px; border-radius: 3px; background: var(--dsw-alias-brand-primary); }
+/* The If brick: a dashed ring — the same mark the control node wears. */
+.palette-icon.if { background: transparent; border: 2px dashed var(--dsw-alias-brand-primary); border-radius: 50%; }
 .pipeline-canvas {
 	position: relative;
 	flex: 1;
@@ -266,6 +268,49 @@
 }
 .pipeline-port.out { border-color: var(--dsw-alias-state-success-primary); }
 .pipeline-port.hover { box-shadow: 0 0 0 4px var(--dsw-alias-brand-primary); }
+/* The if control node: same footprint as an agent, kind-styled — a dashed
+   brand-tinted border marks the fork as a decision, not a model call. */
+.pipeline-node.control { border-style: dashed; border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, var(--dsw-alias-border-l2)); }
+.pipeline-node.control.selected { border-style: dashed; }
+.pipeline-node.control .node-name { font-style: italic; }
+/* One labeled tick per branch: a wrapper centered on the anchor carrying the
+   dot plus the visible branch name, oriented away from the node edge. The
+   wrapper never catches the pointer — only its tick does. */
+.control-branch {
+	position: absolute;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	transform: translate(-50%, -50%);
+	pointer-events: none;
+}
+.control-branch.side-left { flex-direction: row-reverse; }
+.control-branch.side-top { flex-direction: column-reverse; }
+.control-branch.side-bottom { flex-direction: column; }
+.control-branch .pipeline-port { position: static; transform: none; pointer-events: auto; flex: 0 0 auto; }
+.control-branch .branch-label {
+	font-size: 9px;
+	line-height: 1;
+	color: var(--dsw-alias-label-secondary);
+	white-space: nowrap;
+}
+/* The control's warning chip (never-fire sources, side stacking) rides the
+   same bottom slot an agent's status chip uses — a control has none. */
+.pipeline-node .node-warn {
+	position: absolute;
+	bottom: -8px;
+	left: 50%;
+	transform: translateX(-50%);
+	font-size: 9px;
+	line-height: 1;
+	padding: 2px 7px;
+	border-radius: 999px;
+	background: var(--dsw-alias-bg-overlay);
+	border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warning-primary) 50%, transparent);
+	color: var(--dsw-alias-state-warning-primary);
+}
+/* The owner-handoff dialog's body text. */
+.pipeline-edge-picker .handoff-text { font-size: 12px; color: var(--dsw-alias-label-primary); line-height: 1.5; }
 .pipeline-json { border-top: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); }
 .pipeline-json pre {
 	margin: 0;
