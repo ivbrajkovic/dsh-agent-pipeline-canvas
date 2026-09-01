@@ -12,7 +12,7 @@
 // without a `controls` key, and the canvas-authored Billing/General sample
 // validating and serializing to exactly its hand-authored ports+bindings twin.
 import { buildGraph, loadControls, type CanvasAgent, type CanvasConnection, type CanvasControl } from "../src/ui/shared.ts";
-import { cycleClosingFlip, cycleNodeIds, loopControlIds, validateGraph } from "../lib/graph.js";
+import { cycleClosingFlip, cycleNodeIds, inputPortOnSide, loopControlIds, resolveWireDrop, retractOrphanPorts, validateGraph } from "../lib/graph.js";
 import { lowerControls } from "../lib/controls.js";
 import { deepStrictEqual, ok } from "node:assert";
 
@@ -425,6 +425,258 @@ attempt("loopControlIds is total over malformed input", () => {
 	deepStrictEqual([...loopControlIds({ agents: [node("a")], connections: [] })], []);
 	deepStrictEqual([...loopControlIds({ agents: [node("a")], connections: [], controls: "nope" })], []);
 	deepStrictEqual([...loopControlIds({ agents: [node("a")], connections: [], controls: [null, { kind: "if" }, ifNode("if-1", [])] })], []);
+});
+
+// ---- the four-point model: ports materialize from wiring --------------------
+// resolveWireDrop is the drop's whole brain: which port each endpoint uses,
+// which declarations to mint when the node has none there, and the folded
+// cycle-entry flip. The verdicts below are exactly what the canvas applies in
+// the same update as the edge.
+
+attempt("a default drop right→left resolves the implicit ports and authors nothing", () => {
+	const graph = { agents: [node("a"), node("b")], connections: [] };
+	deepStrictEqual(resolveWireDrop(graph, { source: "a", target: "b", sourceSide: "right", targetSide: "left" }), {
+		sourcePort: "out",
+		targetPort: "in",
+		agentUpdates: {},
+	});
+});
+
+attempt("a drop on an open edge mints the target's input port and declares the default beside it", () => {
+	const graph = { agents: [node("a"), node("b")], connections: [] };
+	const verdict = resolveWireDrop(graph, { source: "a", target: "b", sourceSide: "right", targetSide: "bottom" });
+	deepStrictEqual(verdict.sourcePort, "out");
+	deepStrictEqual(verdict.targetPort, "bottom");
+	deepStrictEqual(verdict.agentUpdates, {
+		b: { inputPorts: [{ name: "in" }, { name: "bottom", side: "bottom" }] },
+	});
+	// The authored state validates and the wire resolves (no port mismatch).
+	const result = validateGraph({
+		agents: graph.agents.map((a) => (a.id === "b" ? { ...a, inputPorts: verdict.agentUpdates.b.inputPorts } : a)),
+		connections: [wire("c1", "a", "b", "a:out", "b:bottom")],
+	});
+	deepStrictEqual(result.ok, true);
+});
+
+attempt("a grab from an open edge mints the source's output port (side map on non-default edges)", () => {
+	const graph = { agents: [node("a"), node("b")], connections: [] };
+	const verdict = resolveWireDrop(graph, { source: "a", target: "b", sourceSide: "top", targetSide: "left" });
+	deepStrictEqual(verdict, {
+		sourcePort: "top",
+		targetPort: "in",
+		agentUpdates: { a: { outputPorts: ["out", "top"], outputPortSides: { top: "top" } } },
+	});
+});
+
+attempt("a port already living on the edge is reused, not minted", () => {
+	const graph = {
+		agents: [node("a"), node("b", { inputPorts: [{ name: "in" }, { name: "rhs", side: "right" }] })],
+		connections: [],
+	};
+	deepStrictEqual(resolveWireDrop(graph, { source: "a", target: "b", sourceSide: "right", targetSide: "right" }), {
+		sourcePort: "out",
+		targetPort: "rhs",
+		agentUpdates: {},
+	});
+});
+
+attempt("a grabbed tick pins its port regardless of the grabbed edge", () => {
+	const graph = {
+		agents: [node("a", { outputPorts: ["mail", "top"], outputPortSides: { top: "top" } }), node("b")],
+		connections: [],
+	};
+	deepStrictEqual(resolveWireDrop(graph, { source: "a", target: "b", sourceSide: "top", targetSide: "left", grabbedSourcePort: "mail" }), {
+		sourcePort: "mail",
+		targetPort: "in",
+		agentUpdates: {},
+	});
+});
+
+attempt("a minted name yields to a taken base (numbered)", () => {
+	const graph = {
+		agents: [node("a", { outputPorts: ["top"], outputPortSides: { top: "left" } }), node("b")],
+		connections: [],
+	};
+	const verdict = resolveWireDrop(graph, { source: "a", target: "b", sourceSide: "top", targetSide: "left" });
+	deepStrictEqual(verdict.sourcePort, "top-2");
+	deepStrictEqual(verdict.agentUpdates.a, { outputPorts: ["top", "top-2"], outputPortSides: { top: "left", "top-2": "top" } });
+});
+
+attempt("a cycle-closing drop that mints its own entry flips THAT port to any-of (side preserved)", () => {
+	const graph = { agents: [node("k"), node("r")], connections: [wire("c1", "k", "r", "k:out", "r:in")] };
+	const verdict = resolveWireDrop(graph, { source: "r", target: "k", sourceSide: "right", targetSide: "bottom" });
+	deepStrictEqual(verdict, {
+		sourcePort: "out",
+		targetPort: "bottom",
+		agentUpdates: {
+			k: { inputPorts: [{ name: "in" }, { name: "bottom", policy: "any-of", side: "bottom" }] },
+		},
+	});
+	// Composite: the entry warning is absent because the minted entry is any-of
+	// (single-sourced), and the loop is legal wiring (cycle-present). The guard
+	// walk's budget rules are the loops suites' territory; here the flip shape
+	// is the point.
+	const flipped = {
+		agents: graph.agents.map((a) => (a.id === "k" ? { ...a, inputPorts: (verdict.agentUpdates.k as { inputPorts: unknown }).inputPorts } : a)),
+		connections: [...graph.connections, wire("c2", "r", "k", "r:out", "k:bottom")],
+	};
+	const result = validateGraph(flipped);
+	ok((result.warnings ?? []).some((w) => w.code === "cycle-present"));
+	ok(!(result.warnings ?? []).some((w) => w.code === "cycle-entry-all-of"));
+});
+
+attempt("a control target resolves no input port and patches nothing", () => {
+	const graph = {
+		agents: [node("a")],
+		connections: [],
+		controls: [{ id: "if-1", kind: "if", x: 0, y: 0, branches: [{ name: "go" }] }],
+	};
+	deepStrictEqual(resolveWireDrop(graph, { source: "a", target: "if-1", sourceSide: "right", targetSide: "top" }), {
+		sourcePort: "out",
+		agentUpdates: {},
+	});
+});
+
+attempt("a control source echoes the picked branch (first branch on an unknown pick) and patches nothing", () => {
+	const graph = {
+		agents: [node("t")],
+		connections: [],
+		controls: [{ id: "if-1", kind: "if", x: 0, y: 0, branches: [{ name: "done" }, { name: "retry" }] }],
+	};
+	deepStrictEqual(resolveWireDrop(graph, { source: "if-1", target: "t", sourceSide: "left", targetSide: "left", grabbedSourcePort: "retry" }), {
+		sourcePort: "retry",
+		targetPort: "in",
+		agentUpdates: {},
+	});
+	deepStrictEqual(resolveWireDrop(graph, { source: "if-1", target: "t", grabbedSourcePort: "nope" }).sourcePort, "done");
+});
+
+attempt("inputPortOnSide answers the shared snap reading (implicit default included)", () => {
+	deepStrictEqual(inputPortOnSide({ id: "a" }, "left"), "in");
+	deepStrictEqual(inputPortOnSide({ id: "a" }, "bottom"), null);
+	deepStrictEqual(inputPortOnSide({ inputPorts: [{ name: "in" }, { name: "rhs", side: "right" }] }, "right"), "rhs");
+	deepStrictEqual(inputPortOnSide({ inputPorts: [{ name: "in" }, { name: "rhs", side: "right" }] }, "top"), null);
+});
+
+attempt("the drop resolver is total over malformed input", () => {
+	deepStrictEqual(resolveWireDrop(null, { source: "a", target: "b" }), { agentUpdates: {} });
+	deepStrictEqual(resolveWireDrop({ agents: [node("a")] }, null), { agentUpdates: {} });
+	deepStrictEqual(resolveWireDrop({ agents: [node("a")] }, { source: "a", target: "ghost" }), { agentUpdates: {} });
+	deepStrictEqual(resolveWireDrop({ agents: [node("a")] }, { source: "", target: "a" }), { agentUpdates: {} });
+});
+
+// ---- the unwire retraction: retractOrphanPorts ------------------------------
+// The mint's other half: a port a deleted wire leaves wireless — and that
+// carries no authored behavior — retracts, canonicalizing back to the
+// historical undeclared shape when only a plain default remains.
+
+attempt("deleting a default-shape wire retracts nothing", () => {
+	const graphAfter = { agents: [node("a"), node("b")], connections: [] };
+	deepStrictEqual(retractOrphanPorts(graphAfter, [wire("c1", "a", "b", "a:out", "b:in")]), { agentUpdates: {} });
+});
+
+attempt("deleting the minted wire retracts the port and canonicalizes to the undeclared default", () => {
+	const graphAfter = {
+		agents: [node("a"), node("b", { inputPorts: [{ name: "in" }, { name: "bottom", side: "bottom" }] })],
+		connections: [wire("c1", "a", "b", "a:out", "b:in")],
+	};
+	deepStrictEqual(retractOrphanPorts(graphAfter, [wire("c2", "a", "b", "a:out", "b:bottom")]), {
+		agentUpdates: { b: { inputPorts: undefined } },
+	});
+});
+
+attempt("siblings keep a retracted port's neighbors declared (no over-canonicalization)", () => {
+	const graphAfter = {
+		agents: [node("a"), node("b", { inputPorts: [{ name: "in" }, { name: "bottom", side: "bottom" }, { name: "top", side: "top" }] })],
+		connections: [wire("c1", "a", "b", "a:out", "b:in")],
+	};
+	deepStrictEqual(retractOrphanPorts(graphAfter, [wire("c2", "a", "b", "a:out", "b:bottom")]), {
+		agentUpdates: { b: { inputPorts: [{ name: "in" }, { name: "top", side: "top" }] } },
+	});
+});
+
+attempt("a bound port survives unwiring (the loop budget is deliberate authoring)", () => {
+	const graphAfter = {
+		agents: [node("a"), node("b", { inputPorts: [{ name: "in", policy: "any-of", bound: 3 }] })],
+		connections: [],
+	};
+	deepStrictEqual(retractOrphanPorts(graphAfter, [wire("c1", "a", "b", "a:out", "b:in")]), { agentUpdates: {} });
+});
+
+attempt("an assist-flipped any-of port without a bound reverts (redrawing the loop re-flips)", () => {
+	const graphAfter = {
+		agents: [node("a"), node("b", { inputPorts: [{ name: "in", policy: "any-of" }] })],
+		connections: [],
+	};
+	deepStrictEqual(retractOrphanPorts(graphAfter, [wire("c1", "a", "b", "a:out", "b:in")]), {
+		agentUpdates: { b: { inputPorts: undefined } },
+	});
+});
+
+attempt("a binding-referenced output survives; an unreferenced one retracts with its side entry", () => {
+	const withBinding = {
+		agents: [node("a", { outputPorts: ["out", "billing"], outputPortSides: { billing: "top" }, bindings: [{ field: "action", value: "billing", port: "billing" }] }), node("b")],
+		connections: [wire("c1", "a", "b", "a:out", "b:in")],
+	};
+	deepStrictEqual(retractOrphanPorts(withBinding, [wire("c2", "a", "b", "a:billing", "b:in")]), { agentUpdates: {} });
+	const bare = {
+		agents: [node("a", { outputPorts: ["out", "billing"], outputPortSides: { billing: "top" } }), node("b")],
+		connections: [wire("c1", "a", "b", "a:out", "b:in")],
+	};
+	deepStrictEqual(retractOrphanPorts(bare, [wire("c2", "a", "b", "a:billing", "b:in")]), {
+		agentUpdates: { a: { outputPorts: undefined, outputPortSides: undefined } },
+	});
+});
+
+attempt("a moved default out (side left) is not canonicalized away", () => {
+	// ["out"] with a non-default side is NOT the historical shape — retracting
+	// a sibling must leave it declared.
+	const graphAfter = {
+		agents: [node("a", { outputPorts: ["out", "spare"], outputPortSides: { out: "left" } }), node("b")],
+		connections: [wire("c1", "a", "b", "a:out", "b:in")],
+	};
+	deepStrictEqual(retractOrphanPorts(graphAfter, [wire("c2", "a", "b", "a:spare", "b:in")]), {
+		agentUpdates: { a: { outputPorts: ["out"], outputPortSides: { out: "left" } } },
+	});
+});
+
+attempt("a control endpoint retracts nothing; a still-wired port is left alone", () => {
+	const graphAfter = {
+		agents: [node("r")],
+		connections: [wire("c1", "k", "r", "k:out", "r:in")],
+		controls: [{ id: "if-1", kind: "if", x: 0, y: 0, branches: [{ name: "retry" }] }],
+	};
+	deepStrictEqual(retractOrphanPorts(graphAfter, [wire("c2", "r", "if-1", "r:out")]), { agentUpdates: {} });
+});
+
+attempt("several removed wires retract one agent's ports cumulatively", () => {
+	const graphAfter = {
+		agents: [node("a"), node("b", { inputPorts: [{ name: "in" }, { name: "top", side: "top" }, { name: "bottom", side: "bottom" }] })],
+		connections: [wire("c1", "a", "b", "a:out", "b:in")],
+	};
+	deepStrictEqual(retractOrphanPorts(graphAfter, [
+		wire("c2", "m", "b", "m:out", "b:top"),
+		wire("c3", "m", "b", "m:out", "b:bottom"),
+	]), {
+		agentUpdates: { b: { inputPorts: undefined } },
+	});
+});
+
+attempt("the retraction reads canvas-shaped connections too (bare port names)", () => {
+	const graphAfter = {
+		agents: [node("a"), node("b", { inputPorts: [{ name: "in" }, { name: "bottom", side: "bottom" }] })],
+		connections: [],
+	};
+	deepStrictEqual(retractOrphanPorts(graphAfter, [{ id: "c2", source: "a", target: "b", sourcePort: "out", targetPort: "bottom" }]), {
+		agentUpdates: { b: { inputPorts: undefined } },
+	});
+});
+
+attempt("the retraction is total over malformed input", () => {
+	deepStrictEqual(retractOrphanPorts(null, [wire("c1", "a", "b")]), { agentUpdates: {} });
+	deepStrictEqual(retractOrphanPorts({ agents: [node("a")] }, []), { agentUpdates: {} });
+	deepStrictEqual(retractOrphanPorts({ agents: [node("a")] }, [null, {}]), { agentUpdates: {} });
+	deepStrictEqual(retractOrphanPorts({ agents: [node("a")] }, [wire("c1", "ghost", "a", "ghost:out", "a:in")]), { agentUpdates: {} });
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

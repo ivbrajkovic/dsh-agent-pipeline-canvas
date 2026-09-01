@@ -195,6 +195,18 @@
 	width: 100%;
 }
 .pipeline-edge-picker select:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+/* The picker's read-only "to" line: the drop already resolved the target side
+   (or the mint it will make), so it is shown as text, not a choice. */
+.pipeline-edge-picker .picker-static {
+	font-size: 12px;
+	color: var(--dsw-alias-label-primary);
+	background: var(--dsw-alias-bg-base);
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: 6px;
+	padding: 6px 10px;
+	box-sizing: border-box;
+	width: 100%;
+}
 .pipeline-edge-picker .picker-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .pipeline-node {
 	position: absolute;
@@ -299,8 +311,9 @@
 }
 /* Ports hide at rest — a node's border stays uninterrupted and wires land
    flush on it. A node reveals its ticks (`.reveal-full`: hover or selection,
-   or it is the wire drag's source) or just its input ticks (`.reveal-in`: a
-   wire-drag drop target); hidden ticks never catch the pointer. */
+   or it is the wire drag's source) or its input ticks and open points
+   (`.reveal-in`: a wire-drag drop target); hidden points never catch the
+   pointer. */
 .pipeline-port {
 	position: absolute;
 	width: 14px;
@@ -316,12 +329,22 @@
 	transition: opacity 0.12s ease;
 }
 .pipeline-node.reveal-full .pipeline-port,
-.pipeline-node.reveal-in > .pipeline-port.in { opacity: 1; pointer-events: auto; }
+.pipeline-node.reveal-in > .pipeline-port.in,
+.pipeline-node.reveal-in > .pipeline-port.ghost { opacity: 1; pointer-events: auto; }
 @media (prefers-reduced-motion: reduce) {
 	.pipeline-port { transition: none; }
 }
 .pipeline-port.out { border-color: var(--dsw-alias-state-success-primary); }
 .pipeline-port.hover { box-shadow: 0 0 0 4px var(--dsw-alias-brand-primary); }
+/* Open points (the four-point model): one per node edge hosting no port of
+   either direction. Direction-neutral by design — a wire dragged FROM one
+   makes it an output, a wire DROPPED on one makes it an input, and the drop
+   authors the missing declaration — so the affordance reads as neither the
+   input (brand) nor the output (success) tick: a dashed, muted ring. */
+.pipeline-port.ghost {
+	border-style: dashed;
+	border-color: color-mix(in srgb, var(--dsw-alias-label-secondary, #9aa4b2) 75%, transparent);
+}
 /* The if control node: the flowchart DECISION shape — a diamond, taller than
    an agent (150×84) — so the fork reads as a decision, not a model call. The
    node box itself is a transparent hit area; the shape is an SVG layer whose

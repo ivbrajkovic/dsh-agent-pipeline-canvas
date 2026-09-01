@@ -116,7 +116,8 @@ check("outputPorts entry not a string", { agents: [portsAgent("a", undefined, [7
 	console.log("ok    one port per side (all four edges) validates without warnings");
 }
 check("two default-left input ports stack with a warning", { agents: [portsAgent("a", [{ name: "x" }, { name: "y" }])], connections: [] }, true, [], ["agent-port-side-conflict"]);
-check("input left vs output pulled to left warns", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "x" }], outputPorts: ["y"], outputPortSides: { y: "left" } }], connections: [] }, true, [], ["agent-port-side-conflict"]);
+check("an input and an output sharing the left edge is the four-point shape (no warning)", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "x" }], outputPorts: ["y"], outputPortSides: { y: "left" } }], connections: [] }, true, []);
+check("two inputs on the left still stack with a warning (the cap is per direction)", { agents: [portsAgent("a", [{ name: "x" }, { name: "y" }, { name: "z", side: "top" }])], connections: [] }, true, [], ["agent-port-side-conflict"]);
 check("two outputs on the default right warn but stay valid", { agents: [portsAgent("a", undefined, ["mail", "slack"])], connections: [] }, true, [], ["agent-port-side-conflict"]);
 check("sided loop cycle stays legal wiring (the bound caps the loop hop)", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "resp", bound: 3 }], outputPorts: ["request"], outputPortSides: { request: "bottom" } }, { id: "b", name: "b", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "req", policy: "any-of" }, { name: "fix", policy: "any-of", bound: 3, side: "bottom" }], outputPorts: ["out"] }], connections: [portConn("c1", "a", "a:request", "b", "b:req"), portConn("c2", "b", "b:out", "a", "a:resp")] }, true, [], ["cycle-present"]);
 check("unknown input side value", { agents: [portsAgent("a", [{ name: "x", side: "north" }])], connections: [] }, false, ["agent-port-side-invalid"]);
@@ -160,6 +161,36 @@ check("a >= binding over the reserved $count validates", { agents: [{ id: "a", n
 check("an explicit == binding validates like the absent default", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "action", value: "mail", op: "==", port: "out" }] }], connections: [] }, true, []);
 check("binding with an unknown op", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "f", value: "1", op: "<", port: "out" }] }], connections: [] }, false, ["agent-binding-invalid"]);
 check("a >= binding whose value is not a finite number", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "f", value: "soon", op: ">=", port: "out" }] }], connections: [] }, false, ["agent-binding-invalid"]);
+
+// --- wired output ports no binding selects (the minted-wire shadow) ------
+// A bindings-carrying node emits only on the first matched binding's port, so
+// a WIRED port no row names can never carry a message — a warning, not an
+// error (the honest quiet is legal), but the author deserves to see it.
+check("a wired port no binding selects warns", {
+	agents: [
+		{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["billing", "top"], outputPortSides: { top: "top" }, bindings: [{ field: "action", value: "billing", port: "billing" }] },
+		agent("b"),
+	],
+	connections: [portConn("c1", "a", "a:billing", "b", "b:in"), portConn("c2", "a", "a:top", "b", "b:in")],
+}, true, [], ["agent-port-unselected"]);
+check("every wired port a row names stays quiet", {
+	agents: [
+		{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["billing", "top"], outputPortSides: { top: "top" }, bindings: [{ field: "action", value: "billing", port: "billing" }, { field: "action", port: "top" }] },
+		agent("b"),
+	],
+	connections: [portConn("c1", "a", "a:billing", "b", "b:in"), portConn("c2", "a", "a:top", "b", "b:in")],
+}, true, [], []);
+check("an unwired port needs no binding row", {
+	agents: [
+		{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["billing", "top"], outputPortSides: { top: "top" }, bindings: [{ field: "action", value: "billing", port: "billing" }] },
+		agent("b"),
+	],
+	connections: [portConn("c1", "a", "a:billing", "b", "b:in")],
+}, true, [], []);
+check("a node without bindings emits on every port (no warning, ever)", {
+	agents: [agent("a"), agent("b"), agent("c")],
+	connections: [conn("c1", "a", "b"), conn("c2", "a", "c")],
+}, true, [], []);
 
 // --- duplicate ids / connections -----------------------------------
 check("duplicate agent id", { agents: [agent("a"), agent("a")], connections: [] }, false, ["agent-duplicate-id"]);

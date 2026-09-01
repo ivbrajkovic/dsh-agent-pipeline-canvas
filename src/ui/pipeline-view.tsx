@@ -1,12 +1,17 @@
 // The Pipelines canvas view: the whole node workspace — a palette with a
 // draggable Agent and an If control, a canvas, node move/select, the
-// breakpoint toggle, output→input connections with directed edges
-// (an If's branch ticks are the labeled sources; the if takes one unnamed
-// input and owns its feeding agent's whole emission surface; during a run the
-// if's DERIVED idle/armed/fired/quiet state lights the diamond's border and
-// its branch edges — the chosen branch's edge and arrowhead light success
-// green, the unchosen branches dim dashed — and a hover tooltip names the
-// decision), the toolbar (add/delete/JSON/clear/run/abort), load/save
+// breakpoint toggle, connections drafted between the four connection points
+// every node presents (direction is read off the WIRE — the grabbed side
+// becomes an output, the dropped side an input, and missing port declarations
+// materialize at the commit via resolveWireDrop; retractOrphanPorts undoes
+// them when the wire goes away; an If's branch ticks are the labeled sources
+// and the branch — identity a drop cannot infer — is the one picker; the if
+// takes one unnamed input and owns its feeding agent's whole emission surface;
+// during a run the if's DERIVED idle/armed/fired/quiet state lights the
+// diamond's border and its branch edges — the chosen branch's edge and
+// arrowhead light success green, the unchosen branches dim dashed — and a
+// hover tooltip names the decision), the toolbar
+// (add/delete/JSON/clear/run/abort), load/save
 // through the Host routes, the run/result modals, and the paused-run
 // inspection modal. Renders inside the per-session view tab AND the
 // frame-wide shell panel (see ./shell-panel.tsx); the two hosts differ only
@@ -36,7 +41,7 @@
 // closed (the user closed it before leaving).
 import * as React from "react";
 import type { MenuEntry } from "@deepseek-ai/dsh-client-ui-primitives";
-import { validateGraph, cycleClosingFlip, cycleNodeIds, loopControlIds } from "../graph.ts";
+import { validateGraph, cycleNodeIds, loopControlIds, inputPortOnSide, outputPortOnSide, resolveWireDrop, retractOrphanPorts, type PortPatch, type WireDropVerdict } from "../graph.ts";
 import { countThreshold, firedBranches, lowerControls } from "../controls.ts";
 import { classifyGraph, topoOrder, COUNT_KEY } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
@@ -235,14 +240,18 @@ function PipelineView({
 	const [inspectDismissedFor, setInspectDismissedFor] = React.useState<string | null>(null);
 	const [controlBusy, setControlBusy] = React.useState<string | null>(null);
 	const [controlStatus, setControlStatus] = React.useState<string | null>(null);
-	// A connection drafted between two multi-port endpoints: the edge needs
-	// its port names before it is added (the picker overlay completes it).
-	const [edgeDraft, setEdgeDraft] = React.useState<{ id: string; source: string; target: string; sourcePort: string; targetPort: string } | null>(null);
+	// A connection drafted from a CONTROL source: the branch is the one thing a
+	// drop cannot infer (branch identity is behavior, not direction), so the
+	// picker overlay confirms it. Both endpoints' sides ride along — the target
+	// port resolves/mints at confirm, exactly like a direct drop.
+	const [edgeDraft, setEdgeDraft] = React.useState<{ id: string; source: string; target: string; sourceSide: PortSide; targetSide: PortSide; picked: string } | null>(null);
 	// The owner handoff: an agent wired into an if while it still carries its
 	// own emission config (output ports / bindings) — the if owns that surface,
 	// so the dialog offers to move it into the branches or clear it. The edge
 	// is added either way; cancelling leaves the conflict to validateGraph.
-	const [ownerHandoff, setOwnerHandoff] = React.useState<{ conn: { id: string; source: string; target: string }; control: CanvasControl } | null>(null);
+	// The grab rides along so "Not now" can land the edge on the tick the drag
+	// actually took.
+	const [ownerHandoff, setOwnerHandoff] = React.useState<{ conn: { id: string; source: string; target: string }; control: CanvasControl; grabbedSourcePort?: string } | null>(null);
 	// The node context menu: which canvas node (agent or control) it opened on
 	// and the viewport point (clientX/clientY) it opened at; null when closed.
 	const [nodeMenu, setNodeMenu] = React.useState<NodeMenuTarget | null>(null);
@@ -253,7 +262,7 @@ function PipelineView({
 	const canvasRef = React.useRef<HTMLDivElement | null>(null);
 	const idRef = React.useRef(0);
 	const dragRef = React.useRef<{ id: string; kind: "agent" | "control"; startClientX: number; startClientY: number; startX: number; startY: number } | null>(null);
-	const connectRef = React.useRef<{ from: string; cursor: { x: number; y: number }; hoverTarget: string | null; startPort?: string } | null>(null);
+	const connectRef = React.useRef<{ from: string; cursor: { x: number; y: number }; hoverTarget: string | null; startPort?: string; startSide?: PortSide } | null>(null);
 	// Persistence plumbing.
 	const cwdRef = React.useRef<string | undefined>(undefined);
 	// The session key rides beside cwdRef for the same reason: the save
@@ -363,10 +372,60 @@ function PipelineView({
 		const side = sideOf(port);
 		const sameSide = (kind === "in" ? inputPortNamesOf(a.id) : outputPortNamesOf(a.id)).filter((n) => sideOf(n) === side);
 		const frac = (Math.max(0, sameSide.indexOf(port)) + 1) / (sameSide.length + 1);
-		if (side === "left") return { x: a.x, y: a.y + NODE_H * frac, side };
-		if (side === "right") return { x: a.x + NODE_W, y: a.y + NODE_H * frac, side };
-		if (side === "top") return { x: a.x + NODE_W * frac, y: a.y, side };
-		return { x: a.x + NODE_W * frac, y: a.y + NODE_H, side };
+		// A side hosting BOTH directions splits its axis: inputs take the first
+		// half, outputs the second — the four-point shape (one tick per
+		// direction per edge) never draws the two ticks on top of each other.
+		const otherOnSide = (kind === "in" ? outputPortNamesOf(a.id) : inputPortNamesOf(a.id))
+			.filter((n) => (kind === "in" ? outputPortSide(a, n) : inputPortSide(a, n)) === side)
+			.length;
+		const t = otherOnSide > 0 ? (kind === "in" ? frac * 0.5 : 0.5 + frac * 0.5) : frac;
+		if (side === "left") return { x: a.x, y: a.y + NODE_H * t, side };
+		if (side === "right") return { x: a.x + NODE_W, y: a.y + NODE_H * t, side };
+		if (side === "top") return { x: a.x + NODE_W * t, y: a.y, side };
+		return { x: a.x + NODE_W * t, y: a.y + NODE_H, side };
+	}
+	// The midpoint anchor of a node edge — where an open point sits (the
+	// direction-neutral affordance). Works for both node kinds.
+	function sideMidAnchor(node: CanvasAgent | CanvasControl, side: Side): { x: number; y: number; side: Side } {
+		const w = "branches" in node ? CONTROL_W : NODE_W;
+		const h = "branches" in node ? CONTROL_H : NODE_H;
+		if (side === "left") return { x: node.x, y: node.y + h / 2, side };
+		if (side === "right") return { x: node.x + w, y: node.y + h / 2, side };
+		if (side === "top") return { x: node.x + w / 2, y: node.y, side };
+		return { x: node.x + w / 2, y: node.y + h, side };
+	}
+	// Where a MINTED tick will land, matching portAnchor's split-axis rule: the
+	// edge midpoint on an empty edge, or the direction's half when the opposite
+	// direction already occupies the edge — so the temp wire aims exactly where
+	// the authored tick will appear. Agents only (a control's single input
+	// always exists and it never mints outputs).
+	function mintAnchorOf(node: CanvasAgent | CanvasControl, side: Side, kind: "in" | "out"): { x: number; y: number; side: Side } {
+		const shared = "branches" in node
+			? false
+			: kind === "in" ? outputPortOnSide(node, side) !== null : inputPortOnSide(node, side) !== null;
+		const frac = shared ? (kind === "in" ? 0.25 : 0.75) : 0.5;
+		const w = "branches" in node ? CONTROL_W : NODE_W;
+		const h = "branches" in node ? CONTROL_H : NODE_H;
+		if (side === "left") return { x: node.x, y: node.y + h * frac, side };
+		if (side === "right") return { x: node.x + w, y: node.y + h * frac, side };
+		if (side === "top") return { x: node.x + w * frac, y: node.y, side };
+		return { x: node.x + w * frac, y: node.y + h, side };
+	}
+	// Per-side port occupancy for the open points: an edge hosting no port of
+	// either direction renders one direction-neutral open point. A control's
+	// left vertex is structural (the single unnamed input); an agent's edges
+	// are occupied only by the ports that resolve onto them.
+	function openSidesOf(node: CanvasAgent | CanvasControl): Side[] {
+		const used = new Set<Side>();
+		if ("branches" in node) {
+			used.add("left");
+			for (const name of branchNamesOf(node)) used.add(branchSideOf(node, name));
+		} else {
+			for (const n of inputPortNamesOf(node.id)) used.add(inputPortSide(node, n));
+			for (const n of outputPortNamesOf(node.id)) used.add(outputPortSide(node, n));
+		}
+		const all: Side[] = ["left", "right", "top", "bottom"];
+		return all.filter((s) => !used.has(s));
 	}
 
 	// The control's port-anchor model over its diamond: one unnamed input tick
@@ -414,17 +473,26 @@ function PipelineView({
 		dragRef.current = null;
 	}
 
-	// connect output -> input (primary button only — a right-button press must
-	// not draft a connection; the event bubbles to the node's context menu).
-	// The grab remembers which output tick it started from so the picker can
-	// default to it (edge-routing proposal 1). A control's branch ticks start
-	// drafts the same way, the startPort being the branch name.
-	function onOutputPointerDown(e: React.PointerEvent, nodeId: string, port: string) {
+	// connect (primary button only — a right-button press must not draft a
+	// connection; the event bubbles to the node's context menu). ANY revealed
+	// tick or open point starts a draft: the grab only remembers WHERE the wire
+	// leaves — a pinned output tick, or just the node edge — never a direction.
+	// The drop decides in vs out: the source side becomes an output, the target
+	// side an input, and resolveWireDrop authors whatever declaration the node
+	// was missing (ports materialize from wiring). A control's branch ticks and
+	// its open points draft the same way, the branch confirmed in the picker.
+	function onPortPointerDown(e: React.PointerEvent, nodeId: string, grab: { port: string } | { side: Side }) {
 		if (e.button !== 0) return;
+		if (connectRef.current !== null) return; // a drag owns the pointer
 		e.preventDefault(); e.stopPropagation();
 		if (canvasRef.current) canvasRef.current.focus();
 		const p = canvasPoint(e.clientX, e.clientY);
-		connectRef.current = { from: nodeId, cursor: { x: p.x, y: p.y }, hoverTarget: null, startPort: port };
+		connectRef.current = {
+			from: nodeId,
+			cursor: { x: p.x, y: p.y },
+			hoverTarget: null,
+			...("port" in grab ? { startPort: grab.port } : { startSide: grab.side }),
+		};
 		setConnectCursor({ x: p.x, y: p.y });
 		selectNode(nodeId);
 	}
@@ -457,28 +525,27 @@ function PipelineView({
 		c.cursor = p;
 		setConnectCursor({ x: p.x, y: p.y });
 	}
-	// The one connection commit, shared by every path that lands an edge (the
-	// direct single-port drop, the picker's confirm, the owner handoff): adds
-	// the edge and — the backward-edge assist (docs/proposals/loops.md L3) —
-	// when the drop closes a cycle, rewrites the target's entry-port
-	// declaration to any-of in the SAME update (one commit, one debounced
-	// persist). The verdict is computed on the honest graph in its persisted
-	// shape (wire-id ports), so a control-sourced drop answers through its
-	// owner exactly as the kernel will run it. A control target owns no input
-	// port; the helper answers and the flip simply never fires there.
-	function commitConnection(conn: CanvasConnection) {
-		const targetIsControl = controls.some((k) => k.id === conn.target);
-		const verdict = cycleClosingFlip(buildGraph(agents, connections, controls), {
-			id: conn.id,
-			source: conn.source,
-			target: conn.target,
-			sourcePort: conn.source + ":" + (conn.sourcePort ?? "out"),
-			...(targetIsControl ? {} : { targetPort: conn.target + ":" + (conn.targetPort ?? "in") }),
-		});
-		if (verdict.inputPorts !== undefined) {
-			setAgents((prev) => prev.map((a) => (a.id === conn.target ? { ...a, inputPorts: verdict.inputPorts } : a)));
+	// The one connection landing, shared by every path that adds an edge (the
+	// direct drop, the branch picker's confirm, the owner handoff): applies the
+	// port-declaration patches resolveWireDrop authored — minted ports and the
+	// backward-edge assist's entry flip (docs/proposals/loops.md L3), which the
+	// resolver folds in — in the SAME update as the edge (one commit, one
+	// debounced persist). The patches are real visible graph edits (the agent
+	// panel's ports editor, View JSON).
+	function landConnection(conn: CanvasConnection, agentUpdates: Record<string, PortPatch>) {
+		if (Object.keys(agentUpdates).length > 0) {
+			setAgents((prev) => prev.map((a) => (agentUpdates[a.id] !== undefined ? { ...a, ...agentUpdates[a.id] } : a)));
 		}
 		setConnections((prev) => prev.concat([conn]));
+	}
+	// The landed edge's persisted ports from a verdict: default names stay
+	// unwritten — buildGraph composes the same wire ids (the historical shape).
+	function connFromVerdict(base: { id: string; source: string; target: string }, verdict: WireDropVerdict): CanvasConnection {
+		return {
+			...base,
+			...(verdict.sourcePort !== undefined && verdict.sourcePort !== "out" ? { sourcePort: verdict.sourcePort } : {}),
+			...(verdict.targetPort !== undefined && verdict.targetPort !== "in" ? { targetPort: verdict.targetPort } : {}),
+		};
 	}
 	function onContainerPointerUp() {
 		const c = connectRef.current;
@@ -488,54 +555,41 @@ function PipelineView({
 			const exists = connections.some((conn) => conn.source === c.from && conn.target === target);
 			if (!exists) {
 				const conn = { id: newId("conn"), source: c.from, target };
-				// The snap: the drop aims at the target's input port nearest
-				// the cursor (the temp wire landed on it); the picker — when
-				// it opens — and the wire preselect it.
-				const tgtPorts = inputPortNamesOf(target);
-				const snap = nearestInputPort(target, c.cursor);
-				const targetPort = snap !== null && tgtPorts.includes(snap) ? snap : tgtPorts[0];
-				const fromControl = controls.find((k) => k.id === c.from);
+				// The drop POINT is the intended entry: the node edge nearest the
+				// cursor takes the wire, and its living input port — or a minted
+				// one — receives it.
+				const drop = dropSnapFor(target, c.cursor);
+				const graph = buildGraph(agents, connections, controls);
+				const draft = {
+					source: conn.source,
+					target,
+					sourceSide: c.startSide ?? "right",
+					targetSide: drop?.side ?? "left",
+					grabbedSourcePort: c.startPort,
+				};
 				const targetControl = controls.find((k) => k.id === target);
-				if (fromControl !== undefined) {
-					// Control → agent: the picker opens for EVERY control-sourced
-					// draft, single-branch or not — the branch list is the source
-					// side and must be confirmed explicitly (the port-name
-					// resolvers are agent-keyed and would otherwise fall back to
-					// "out"). The grabbed branch tick defaults the select.
-					const branches = branchNamesOf(fromControl);
-					setEdgeDraft({
-						...conn,
-						sourcePort: c.startPort !== undefined && branches.includes(c.startPort) ? c.startPort : (branches[0] ?? ""),
-						targetPort,
-					});
-				} else if (targetControl !== undefined) {
+				if (controls.some((k) => k.id === c.from)) {
+					// Control → agent: the branch is the one decision a drop cannot
+					// infer (branch identity is behavior, not direction) — the picker
+					// confirms it. The target side resolves/mints exactly like a
+					// direct drop, at confirm.
+					const fromControl = controls.find((k) => k.id === c.from);
+					const branches = branchNamesOf(fromControl as CanvasControl);
+					const picked = c.startPort !== undefined && branches.includes(c.startPort) ? c.startPort : (branches[0] ?? "");
+					setEdgeDraft({ id: conn.id, source: conn.source, target, sourceSide: draft.sourceSide, targetSide: draft.targetSide, picked });
+				} else if (
+					targetControl !== undefined
+					&& agents.some((a) => a.id === c.from && (a.outputPorts !== undefined || a.bindings !== undefined))
+				) {
 					// Agent → control: the if owns the source's whole emission
 					// surface. An agent carrying its own output ports or bindings
 					// gets the owner handoff (move them into the branches or clear
-					// them); a clean agent wires straight in on its default output.
-					const source = agents.find((a) => a.id === c.from);
-					if (source !== undefined && (source.outputPorts !== undefined || source.bindings !== undefined)) {
-						setOwnerHandoff({ conn, control: targetControl });
-					} else {
-						commitConnection(conn);
-					}
+					// them); a clean agent wires straight in — its grabbed side
+					// mints/uses an output like any other drop.
+					setOwnerHandoff({ conn, control: targetControl, ...(c.startPort !== undefined ? { grabbedSourcePort: c.startPort } : {}) });
 				} else {
-					// Agent → agent. Named ports (P7): when either endpoint
-					// declares several, the edge must say which ones — the picker
-					// completes it. A node with a single (or default) port wires
-					// without ceremony. The grabbed output tick defaults the
-					// source side.
-					const srcPorts = outputPortNamesOf(c.from);
-					const sourcePort = c.startPort && srcPorts.includes(c.startPort) ? c.startPort : srcPorts[0];
-					if (srcPorts.length > 1 || tgtPorts.length > 1) {
-						setEdgeDraft({ ...conn, sourcePort, targetPort });
-					} else {
-						commitConnection({
-							...conn,
-							...(sourcePort !== "out" ? { sourcePort } : {}),
-							...(targetPort !== "in" ? { targetPort } : {}),
-						});
-					}
+					const verdict = resolveWireDrop(graph, draft);
+					landConnection(connFromVerdict(conn, verdict), verdict.agentUpdates);
 				}
 			}
 		}
@@ -569,35 +623,58 @@ function PipelineView({
 	// deleting an AGENT also deletes any control it feeds (a control never
 	// outlives its source) together with that control's edges; deleting a
 	// control removes just its own edges. Shared by the toolbar Delete, the
-	// Delete/Backspace key, and the context menu's delete row.
+	// Delete/Backspace key, and the context menu's delete row. Surviving
+	// endpoints of the removed wires get the same unwire retraction as
+	// deleteEdge — including the agent side of a deleted control's branch
+	// edges: the control owns no ports, but the agent it fed may carry a port
+	// that edge minted.
 	function deleteNode(nodeId: string) {
-		// The edge selection dies with the node when the selected connection
-		// is one the removal takes with it.
 		const selectedConn = selectedEdgeId !== null ? connections.find((c) => c.id === selectedEdgeId) : undefined;
 		if (controls.some((k) => k.id === nodeId)) {
+			const kept = connections.filter((c) => c.source !== nodeId && c.target !== nodeId);
+			const removed = connections.filter((c) => c.source === nodeId || c.target === nodeId);
+			const retract = retractOrphanPorts(buildGraph(agents, kept, controls), removed);
+			const updates = retract.agentUpdates;
 			setControls((prev) => prev.filter((k) => k.id !== nodeId));
-			setConnections((prev) => prev.filter((c) => c.source !== nodeId && c.target !== nodeId));
-			if (selectedConn !== undefined && (selectedConn.source === nodeId || selectedConn.target === nodeId)) setSelectedEdgeId(null);
+			if (Object.keys(updates).length > 0) {
+				setAgents((prev) => prev.map((a) => (updates[a.id] !== undefined ? { ...a, ...updates[a.id] } : a)));
+			}
+			setConnections(kept);
+			if (selectedConn !== undefined && removed.includes(selectedConn)) setSelectedEdgeId(null);
 		} else {
 			const dying = new Set(
 				controls.filter((k) => connections.some((c) => c.source === nodeId && c.target === k.id)).map((k) => k.id),
 			);
-			setAgents((prev) => prev.filter((a) => a.id !== nodeId));
+			const keptAgents = agents.filter((a) => a.id !== nodeId);
+			const keptControls = controls.filter((k) => !dying.has(k.id));
+			const removed = connections.filter((c) => c.source === nodeId || c.target === nodeId || dying.has(c.source) || dying.has(c.target));
+			const kept = connections.filter((c) => !removed.includes(c));
+			const retract = retractOrphanPorts(buildGraph(keptAgents, kept, keptControls), removed);
+			const updates = retract.agentUpdates;
+			setAgents(keptAgents.map((a) => (updates[a.id] !== undefined ? { ...a, ...updates[a.id] } : a)));
 			setControls((prev) => prev.filter((k) => !dying.has(k.id)));
-			setConnections((prev) => prev.filter((c) =>
-				c.source !== nodeId && c.target !== nodeId && !dying.has(c.source) && !dying.has(c.target)));
-			if (selectedConn !== undefined
-				&& (selectedConn.source === nodeId || selectedConn.target === nodeId || dying.has(selectedConn.source) || dying.has(selectedConn.target))) {
-				setSelectedEdgeId(null);
-			}
+			setConnections(kept);
+			if (selectedConn !== undefined && removed.includes(selectedConn)) setSelectedEdgeId(null);
 		}
 		if (selectedId === nodeId) setSelectedId(null);
 	}
 	// Remove one connection by id — the direct answer to "undo a wire"
 	// (previously only deleting an agent removed its connections). Shared by
 	// the toolbar Delete, the Delete/Backspace key, and the edge context menu.
+	// The unwire retraction rides along: endpoint ports the wire leaves
+	// wireless — and that carry no authored behavior — retract in the same
+	// update (retractOrphanPorts), so the canvas never shows a declared port
+	// the wiring has abandoned.
 	function deleteEdge(connId: string) {
-		setConnections((prev) => prev.filter((c) => c.id !== connId));
+		const conn = connections.find((c) => c.id === connId);
+		const kept = conn !== undefined ? connections.filter((c) => c.id !== connId) : connections;
+		setConnections(kept);
+		if (conn !== undefined) {
+			const retract = retractOrphanPorts(buildGraph(agents, kept, controls), [conn]);
+			if (Object.keys(retract.agentUpdates).length > 0) {
+				setAgents((prev) => prev.map((a) => (retract.agentUpdates[a.id] !== undefined ? { ...a, ...retract.agentUpdates[a.id] } : a)));
+			}
+		}
 		if (selectedEdgeId === connId) setSelectedEdgeId(null);
 	}
 	function deleteSelected() {
@@ -991,19 +1068,30 @@ function PipelineView({
 		const s = String(wire ?? "");
 		return s.startsWith(agentId + ":") ? s.slice(agentId.length + 1) : fallback;
 	}
-	/** Complete a drafted connection with the picked port names. */
+	/** Complete a control-sourced draft: the picked branch pins the source; the
+	 * target side resolves/mints exactly like a direct drop (one resolver, one
+	 * commit — the same patches any other landing applies). */
 	function confirmEdgeDraft() {
 		const d = edgeDraft;
 		if (!d) return;
 		setEdgeDraft(null);
-		commitConnection({
-			id: d.id,
+		const verdict = resolveWireDrop(buildGraph(agents, connections, controls), {
 			source: d.source,
 			target: d.target,
-			// Default names stay unwritten — buildGraph composes the same wire id.
-			...(d.sourcePort !== "out" ? { sourcePort: d.sourcePort } : {}),
-			...(d.targetPort !== "in" ? { targetPort: d.targetPort } : {}),
+			sourceSide: d.sourceSide,
+			targetSide: d.targetSide,
+			grabbedSourcePort: d.picked,
 		});
+		landConnection(connFromVerdict({ id: d.id, source: d.source, target: d.target }, verdict), verdict.agentUpdates);
+	}
+	/** The picker's "to" line: what the landed side will receive. */
+	function edgeDraftTargetText(): string {
+		const d = edgeDraft;
+		if (!d) return "";
+		if (controls.some((k) => k.id === d.target)) return "the control's single unnamed input";
+		const agent = agents.find((a) => a.id === d.target);
+		const port = agent !== undefined ? inputPortOnSide(agent, d.targetSide) : null;
+		return port !== null ? "input port " + port : "a new input port on the " + d.targetSide + " edge";
 	}
 
 	// The owner handoff's Move: the agent's emission config folds into branch
@@ -1051,9 +1139,11 @@ function PipelineView({
 		const cut = control.branches.length - (last !== undefined && (last.value === undefined || last.value === "") ? 1 : 0);
 		return control.branches.slice(0, cut).concat(fresh, control.branches.slice(cut));
 	}
-	// Resolve the handoff: Move or Clear both land the drawn edge (the agent
-	// ends clean, so the graph stays valid); dismissing leaves the agent's
-	// config in place and lets validateGraph's if-owner-conflict surface it.
+	// Resolve the handoff: Move or Clear both strip the agent's emission
+	// surface, so the edge lands on the default out — the only port left.
+	// "Not now" keeps the agent's ports, so a grabbed output tick stays the
+	// truthful anchor: the edge lands on it when it names a declared output
+	// (never minting — the ownership conflict is already the strip's business).
 	function resolveOwnerHandoff(mode: "move" | "clear" | "dismiss") {
 		const handoff = ownerHandoff;
 		if (handoff === null) return;
@@ -1070,8 +1160,16 @@ function PipelineView({
 				}
 			}
 			setAgents((prev) => prev.map(strip));
+			landConnection(handoff.conn, {});
+			return;
 		}
-		commitConnection(handoff.conn);
+		const source = agents.find((a) => a.id === handoff.conn.source);
+		const declared = source !== undefined && Array.isArray(source.outputPorts)
+			? source.outputPorts.filter((n): n is string => typeof n === "string" && n.length > 0)
+			: [];
+		const grabbed = handoff.grabbedSourcePort;
+		const sourcePort = grabbed !== undefined && declared.includes(grabbed) ? grabbed : "out";
+		landConnection({ ...handoff.conn, ...(sourcePort !== "out" ? { sourcePort } : {}) }, {});
 	}
 	const continueText = runResult && runResult.ok ? finalOutputText(runResult.outputs || {}, nameOf) : "";
 
@@ -1318,9 +1416,14 @@ function PipelineView({
 	}, [agents, connections, controls]);
 
 	const gesture = connectRef.current;
-	// The port the in-flight draft is aimed at: set while the pointer hovers a
-	// valid target, driving the temp wire's landing point and the tick ring.
-	const snapPort = gesture !== null && hoverTarget !== null ? nearestInputPort(hoverTarget, gesture.cursor) : null;
+	// What the in-flight draft is aimed at while the pointer hovers a valid
+	// target: the node edge nearest the cursor (the drop POINT is the intended
+	// entry) and the input port living on that edge — null when the landing
+	// mints one. Drives the temp wire's landing point and the tick/open-point
+	// ring, and it is the exact reading resolveWireDrop commits, so the preview
+	// and the landed graph can never disagree.
+	type DropAim = { side: Side; port: string | null };
+	const aim: DropAim | null = gesture !== null && hoverTarget !== null ? dropSnapFor(hoverTarget, gesture.cursor) : null;
 	// Edge geometry (edge-routing iteration 2): the path leaves perpendicular
 	// to the source port's edge and arrives perpendicular to the target port's
 	// edge (60px control offset), so top/bottom ports arc over/under the band
@@ -1412,20 +1515,18 @@ function PipelineView({
 	function inputAnchorOf(node: CanvasAgent | CanvasControl, port: string): { x: number; y: number; side: Side } {
 		return "branches" in node ? controlInputAnchor(node) : portAnchor(node, "in", port);
 	}
-	// The snap: the input port of `nodeId` nearest to `pt` (a control answers
-	// through the uniform resolvers — one unnamed input). The temp wire lands
-	// on it and the drop defaults to it; null with no node or no point.
-	function nearestInputPort(nodeId: string, pt: { x: number; y: number } | null): string | null {
+	// The snap: the node edge nearest `pt` (relative to the box center) and the
+	// input port already living on it — null when the edge is open and the drop
+	// will mint one. A control answers its single unnamed input on the left
+	// vertex. Pure geometry plus the shared inputPortOnSide reading.
+	function dropSnapFor(nodeId: string, pt: { x: number; y: number } | null): DropAim | null {
 		const node = findNode(nodeId);
 		if (node === null || pt === null) return null;
-		let best: string | null = null;
-		let bestD = Infinity;
-		for (const p of inputPortNamesOf(nodeId)) {
-			const a = inputAnchorOf(node, p);
-			const d = (a.x - pt.x) * (a.x - pt.x) + (a.y - pt.y) * (a.y - pt.y);
-			if (d < bestD) { bestD = d; best = p; }
-		}
-		return best;
+		if ("branches" in node) return { side: "left", port: "in" };
+		const dx = pt.x - (node.x + NODE_W / 2);
+		const dy = pt.y - (node.y + NODE_H / 2);
+		const side: Side = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "bottom" : "top");
+		return { side, port: inputPortOnSide(node, side) };
 	}
 	const edges = connections.map((c) => {
 		const src = findNode(c.source);
@@ -1492,13 +1593,20 @@ function PipelineView({
 	if (gesture) {
 		const src0 = findNode(gesture.from);
 		if (src0) {
-			const s0 = outputAnchorOf(src0, gesture.startPort ?? ("branches" in src0 ? branchNamesOf(src0)[0] ?? "" : "out"));
-			// Snap: over a target the wire lands on the aimed input port's
-			// anchor; free space keeps it on the cursor.
+			// The draft's tail: the pinned output tick when the grab took one,
+			// else the anchor the minted tick will occupy on the grabbed edge.
+			const s0 = gesture.startPort !== undefined
+				? outputAnchorOf(src0, gesture.startPort)
+				: "branches" in src0
+					? sideMidAnchor(src0, gesture.startSide ?? "right")
+					: mintAnchorOf(src0, gesture.startSide ?? "right", "out");
+			// Snap: over a target the wire lands on the aimed edge — its living
+			// input port's anchor, or the minted tick's predicted anchor. Free
+			// space keeps it on the cursor.
 			let end0: { x: number; y: number; side: Side } = { x: gesture.cursor.x, y: gesture.cursor.y, side: "left" };
-			if (snapPort !== null && hoverTarget !== null) {
+			if (aim !== null && hoverTarget !== null) {
 				const tgt0 = findNode(hoverTarget);
-				if (tgt0 !== null) end0 = inputAnchorOf(tgt0, snapPort);
+				if (tgt0 !== null) end0 = aim.port !== null ? inputAnchorOf(tgt0, aim.port) : mintAnchorOf(tgt0, aim.side, "in");
 			}
 			tempEdge = <path d={edgeGeometry(s0, end0).d} className="pipeline-edge-temp" />;
 		}
@@ -1512,11 +1620,12 @@ function PipelineView({
 		// Everything but pending renders: the node-state class (border + tint)
 		// and the corner badge.
 		const liveStatus = status !== undefined && status !== "pending" ? status : null;
-		// Port reveal: at rest a node shows its ticks on hover or selection;
-		// during a wire drag the source keeps everything and EVERY other node
-		// shows its input ticks — you can see where you can land (the snap
-		// ring and the aim stay on the node under the pointer). Otherwise
-		// none — the border stays uninterrupted and wires land flush on it.
+		// Port reveal: at rest a node shows its ticks and open points on hover
+		// or selection; during a wire drag the source keeps everything and EVERY
+		// other node shows its input ticks and open points — you can see where
+		// you can land (the snap ring and the aim stay on the node under the
+		// pointer). Otherwise none — the border stays uninterrupted and wires
+		// land flush on it.
 		const reveal = gesture !== null
 			? (gesture.from === agent.id ? " reveal-full" : " reveal-in")
 			: (hoverNodeId === agent.id || selected ? " reveal-full" : "");
@@ -1563,15 +1672,15 @@ function PipelineView({
 					return (
 						<div
 							key={portName}
-							className={"pipeline-port in" + (hoveredIn && snapPort === portName ? " hover" : "")}
+							className={"pipeline-port in" + (hoveredIn && aim !== null && aim.port === portName ? " hover" : "")}
 							style={{ left: (anchor.x - agent.x) + "px", top: (anchor.y - agent.y) + "px" }}
-							// The tick swallows the primary press so pressing a
-							// revealed input doesn't drag the node (connections
-							// start at the output); hover/drop targeting lives on
-							// the node itself, and a right-button press bubbles
-							// to the node and opens the menu.
-							onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); }}
-							title={multiple ? portName : "Input"}
+							// The tick starts a wire draft like any other point —
+							// direction is the WIRE's, never the tick's: dragging
+							// away from an input edge makes that edge an output.
+							// Hover/drop targeting lives on the node itself, and a
+							// right-button press bubbles to the node's menu.
+							onPointerDown={(e) => { onPortPointerDown(e, agent.id, { side: anchor.side }); }}
+							title={multiple ? portName + " — drag from this edge to make it an output" : "Input — drag from this edge to make it an output"}
 						/>
 					);
 				})}
@@ -1583,8 +1692,20 @@ function PipelineView({
 							key={portName}
 							className="pipeline-port out"
 							style={{ left: (anchor.x - agent.x) + "px", top: (anchor.y - agent.y) + "px" }}
-							onPointerDown={(e) => { onOutputPointerDown(e, agent.id, portName); }}
+							onPointerDown={(e) => { onPortPointerDown(e, agent.id, { port: portName }); }}
 							title={multiple ? portName : "Output"}
+						/>
+					);
+				})}
+				{openSidesOf(agent).map((side) => {
+					const anchor = sideMidAnchor(agent, side);
+					return (
+						<div
+							key={"open-" + side}
+							className={"pipeline-port ghost" + (hoveredIn && aim !== null && aim.port === null && aim.side === side ? " hover" : "")}
+							style={{ left: (anchor.x - agent.x) + "px", top: (anchor.y - agent.y) + "px" }}
+							onPointerDown={(e) => { onPortPointerDown(e, agent.id, { side }); }}
+							title={"Open " + side + " point — drag from it to make it an output, drop a wire on it to make it an input"}
 						/>
 					);
 				})}
@@ -1649,11 +1770,11 @@ function PipelineView({
 		const warnings = controlWarnings(control);
 		const runState = controlRunState(control);
 		const lit = runState !== null && runState.state !== "idle" ? " control-" + runState.state : "";
-		// Port reveal, same rule as the agents: the input tick and the branch
-		// dots show on hover/selection, and during a wire drag every control
-		// but the source shows just its input tick. The branch NAME labels
-		// stay visible always — they carry the fork's semantics, not the
-		// affordance.
+		// Port reveal, same rule as the agents: the input tick, the branch
+		// dots, and the open points show on hover/selection, and during a wire
+		// drag every control but the source shows its input tick and open
+		// points. The branch NAME labels stay visible always — they carry the
+		// fork's semantics, not the affordance.
 		const reveal = gesture !== null
 			? (gesture.from === control.id ? " reveal-full" : " reveal-in")
 			: (hoverNodeId === control.id || selected ? " reveal-full" : "");
@@ -1691,13 +1812,13 @@ function PipelineView({
 					</div>
 				) : null}
 				<div
-					className={"pipeline-port in" + (hoveredIn && snapPort === "in" ? " hover" : "")}
+					className={"pipeline-port in" + (hoveredIn && aim !== null && aim.port === "in" ? " hover" : "")}
 					style={{ left: "0px", top: (CONTROL_H / 2) + "px" }}
-					// The input tick only swallows the primary press — hover/drop
-					// targeting lives on the node, and a right-button press
-					// bubbles to the node and opens the menu.
-					onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); }}
-					title="Input"
+					// The input tick starts a wire draft like any point (the
+					// branch picker resolves the control's output side); a
+					// right-button press bubbles to the node and opens the menu.
+					onPointerDown={(e) => { onPortPointerDown(e, control.id, { side: "left" }); }}
+					title="Input — drag from this control to branch from it"
 				/>
 				{isIf ? branchNamesOf(control).map((branchName, index) => {
 					const anchor = branchAnchor(control, branchName);
@@ -1709,13 +1830,25 @@ function PipelineView({
 						>
 							<div
 								className="pipeline-port out"
-								onPointerDown={(e) => { onOutputPointerDown(e, control.id, branchName); }}
+								onPointerDown={(e) => { onPortPointerDown(e, control.id, { port: branchName }); }}
 								title={"Branch " + branchName + " — drag to the agent that handles it"}
 							/>
 							<span className="branch-label">{branchName}</span>
 						</div>
 					);
 				}) : null}
+				{openSidesOf(control).map((side) => {
+					const anchor = sideMidAnchor(control, side);
+					return (
+						<div
+							key={"open-" + side}
+							className={"pipeline-port ghost" + (hoveredIn && aim !== null && aim.port === null && aim.side === side ? " hover" : "")}
+							style={{ left: (anchor.x - control.x) + "px", top: (anchor.y - control.y) + "px" }}
+							onPointerDown={(e) => { onPortPointerDown(e, control.id, { side }); }}
+							title={"Open " + side + " point — drag from it to branch from this control"}
+						/>
+					);
+				})}
 			</div>
 		);
 	});
@@ -1925,28 +2058,21 @@ function PipelineView({
 					onPointerDown={(e) => { e.stopPropagation(); }}
 				>
 					<div className="pipeline-edge-picker">
-						<h3>Connect ports</h3>
+						<h3>Connect branch</h3>
 						<div className="picker-row">
-							<label>{"From " + nameOf(edgeDraft.source) + (controls.some((k) => k.id === edgeDraft.source) ? " (branch)" : " (output port)")}</label>
+							<label>{"From " + nameOf(edgeDraft.source) + " (branch)"}</label>
 							<select
-								value={edgeDraft.sourcePort}
-								onChange={(e) => { setEdgeDraft((d) => (d ? { ...d, sourcePort: e.target.value } : d)); }}
+								value={edgeDraft.picked}
+								onChange={(e) => { setEdgeDraft((d) => (d ? { ...d, picked: e.target.value } : d)); }}
 							>
-								{outputPortNamesOf(edgeDraft.source).map((portName) => (
-									<option key={portName} value={portName}>{portName}</option>
+								{outputPortNamesOf(edgeDraft.source).map((branchName) => (
+									<option key={branchName} value={branchName}>{branchName}</option>
 								))}
 							</select>
 						</div>
 						<div className="picker-row">
-							<label>{"To " + nameOf(edgeDraft.target) + " (input port)"}</label>
-							<select
-								value={edgeDraft.targetPort}
-								onChange={(e) => { setEdgeDraft((d) => (d ? { ...d, targetPort: e.target.value } : d)); }}
-							>
-								{inputPortNamesOf(edgeDraft.target).map((portName) => (
-									<option key={portName} value={portName}>{portName}</option>
-								))}
-							</select>
+							<label>{"To " + nameOf(edgeDraft.target)}</label>
+							<span className="picker-static">{edgeDraftTargetText()}</span>
 						</div>
 						<div className="picker-actions">
 							<button className="pipeline-btn" onClick={() => { setEdgeDraft(null); }}>Cancel</button>
