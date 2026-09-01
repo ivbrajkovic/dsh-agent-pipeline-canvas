@@ -267,9 +267,13 @@ export interface ValidationResult {
     errors: ValidationError[];
     /**
      * Non-fatal findings, reported alongside `errors` without affecting `ok`.
-     * Today the only source is `cycle-present`: a cycle is legal wiring for the
-     * stream executor, but the sequential runner (and topoOrder) truncates at
-     * one — worth telling the author about.
+     * The cycle findings (docs/proposals/loops.md): `cycle-present` — a cycle
+     * is legal wiring for the stream executor, but the sequential runner (and
+     * topoOrder) truncates at one — and `cycle-entry-all-of`, the seed-once
+     * deadlock warning. The control and port-declaration warnings
+     * (`if-source-*`, `*-side-conflict`, `agent-port-side-conflict`) ride here
+     * too. A cycle without a GUARD is not a warning — `cycle-unguarded` is an
+     * error.
      */
     warnings?: ValidationError[];
 }

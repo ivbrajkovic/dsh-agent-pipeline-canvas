@@ -2039,7 +2039,9 @@ await withTempDir(async (cwd) => {
 // loop, emitting only the verdict ends it (quiescence); the loop composes for
 // free (conditional-dispatch §3). The cycle is seeded by the task root (the
 // source feeds edge-less nodes only), whose message enters the coder's any-of
-// port; the feedback re-feeds the same port — one firing per arrival. --------
+// port; the feedback re-feeds the same port — one firing per arrival. Loops
+// L2: the bound on the entry port is the cycle's guard (seed + rounds << 8,
+// so it never overflows here); without it the run would now refuse. --------
 await withTempDir(async (cwd) => {
 	const harness = makeHarness({ holdOneshots: true });
 	const registry = new RunRegistry(harness.services);
@@ -2050,7 +2052,7 @@ await withTempDir(async (cwd) => {
 		graph: {
 			agents: [
 				agent("k", "Task", "Task."),
-				{ ...agent("c", "Coder", "Code."), inputPorts: [{ name: "in", policy: "any-of" }] },
+				{ ...agent("c", "Coder", "Code."), inputPorts: [{ name: "in", policy: "any-of", bound: 8 }] },
 				{
 					...agent("r", "Review", "Review."),
 					outputPorts: ["feedback", "verdict"],

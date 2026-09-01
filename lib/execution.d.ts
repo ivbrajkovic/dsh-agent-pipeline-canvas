@@ -6,6 +6,16 @@ export declare const INPUT_KEY = "$input";
  * instead of the structured record (docs/proposals/loops.md).
  */
 export declare const COUNT_KEY = "$count";
+/**
+ * True for a row that tests a value — everything but the catch-all. A row
+ * authored with an empty-string value IS the catch-all (the executor treats
+ * it as absent; lowering normalizes it away on serialize). The one predicate
+ * behind the catch-all in both row languages: branch rows (controls.ts) and
+ * output bindings (evaluateBindings below, and the guard walk in graph.ts).
+ */
+export declare function isValuedRow(row: {
+    value?: unknown;
+}): boolean;
 /** Deterministic byte-order comparison (pure; identical across runtimes). */
 export declare function cmp(a: string, b: string): number;
 /**

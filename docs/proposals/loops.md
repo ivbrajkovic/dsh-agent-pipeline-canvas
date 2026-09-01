@@ -486,3 +486,32 @@ restatements of the diff.
   graph validates; the lowered graph is never validated). L2's guard walk
   runs over the LOWERED graph — do not assume every binding there carries
   a field. Nothing here yet.
+
+### L2
+
+- **A DEAD `$count` row is a guard.** The L1 marbles pin the `exhausted`
+  escape with no edge at all (`emittedTo: exhausted`, "the terminal never
+  started") — the loop terminates because first-match-wins means the matching
+  count row blocks the loop rows below it, not because the escape goes
+  anywhere. The guard test therefore requires only that the row's port wires
+  NOWHERE ON the cycle (a target off the cycle is the normal shape, no target
+  is the degenerate one); requiring a wired escape would have refused the
+  shipped marbles. L4's docs must state the guard in these terms.
+- **Lowered self-loops join the walk; honest self-connections do not.** A
+  branch wired back to its own feeder lowers to a one-node cycle (`r:retry →
+  r:in`) that the kernel really runs, so the walk includes lowered
+  source==target edges — matched against the HONEST graph's self-connection
+  ids (passed into `walkCycles`) so an honest `a→a` connection still reports
+  `connection-self` only, per the pinned rule. The one-node loop is guarded
+  (bound hop or count row) and walked exactly like a multi-node cycle.
+- **The entry-port warning is strictly the one-port shape.** The seed-once
+  deadlock across TWO all-of ports (seed on `in`, loop-back on `feedback`)
+  starves identically but is NOT covered — the pinned test is one port with
+  ≥2 distinct sources, at least one on the cycle. (The all-of firing rule is
+  per-SOURCE, which is what makes the one-port shape starve: the consumed
+  seed source can never hold an unconsumed message again.) L4's docs must not
+  claim the warning covers the two-port variant.
+- **`walkCycles` is exported** (src/graph.ts, with the `CycleWalk` finding
+  shape): L3's cycle-closing helper is pinned to reuse the lifted machinery,
+  and reuse means calling this over `lowerControls(honest + prospective
+  connection)` rather than re-deriving an adjacency.

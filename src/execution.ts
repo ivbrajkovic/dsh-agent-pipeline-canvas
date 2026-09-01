@@ -86,6 +86,17 @@ export const INPUT_KEY = "$input";
  */
 export const COUNT_KEY = "$count";
 
+/**
+ * True for a row that tests a value — everything but the catch-all. A row
+ * authored with an empty-string value IS the catch-all (the executor treats
+ * it as absent; lowering normalizes it away on serialize). The one predicate
+ * behind the catch-all in both row languages: branch rows (controls.ts) and
+ * output bindings (evaluateBindings below, and the guard walk in graph.ts).
+ */
+export function isValuedRow(row: { value?: unknown }): boolean {
+	return row.value !== undefined && row.value !== "";
+}
+
 function idOf(value: unknown): string {
 	return value == null ? "" : String(value);
 }
@@ -353,7 +364,7 @@ export function evaluateBindings(bindings: readonly OutputBinding[] | undefined 
 		// The counter row tests the firing's own sequence, not the record —
 		// the one row kind that can match without a structured result.
 		if (field === COUNT_KEY) {
-			if (binding.value === undefined || binding.value === "") {
+			if (!isValuedRow(binding)) {
 				if (hasStructured) return port; // the catch-all, unchanged
 				continue;
 			}

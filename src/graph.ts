@@ -39,9 +39,12 @@
 //   - Fan-in is allowed: an input port may receive from many sources (all edges
 //     into the same port queue there).
 //   - Cycles are LEGAL wiring — a loop ends when a port goes quiet (the stream
-//     executor's quiescence), so validateGraph reports a cycle as a non-fatal
-//     `cycle-present` WARNING, never an error. (The legacy sequential runner
-//     only runs an acyclic prefix; the warning tells the author that.)
+//     executor's quiescence) — but every cycle carries its guard
+//     (docs/proposals/loops.md): validateGraph keeps the non-fatal
+//     `cycle-present` warning (a loop exists; the legacy sequential runner
+//     only runs an acyclic prefix) and REFUSES an unguarded cycle with the
+//     `cycle-unguarded` error. The guard is a `bound` capping a hop of the
+//     cycle or a `$count` branch escaping it — data, never a node kind.
 //   - The graph must not contain a self-connection, duplicate edge, invalid
 //     port declaration, or a reference to a missing agent/port; see
 //     validateGraph.
@@ -58,11 +61,12 @@
 // lowers controls onto the feeding agent's ports + bindings before the kernel
 // sees the graph (lowerControls in ./controls.ts). The control-specific rules
 // delegate to ./controls.ts; this module applies the shared ones (endpoints,
-// duplicates, the cycle walk — where a control is an alias of its producer).
+// duplicates, the cycle walk — which runs over the LOWERED graph, where the
+// controls are already gone and every edge is what the kernel runs).
 
-import type { ValidationError, ValidationResult } from "./types.ts";
-import { portGraph } from "./execution.ts";
-import { validateControls, type ControlAnalysis } from "./controls.ts";
+import type { OutputBinding, PipelineGraph, PortGraph, ValidationError, ValidationResult } from "./types.ts";
+import { COUNT_KEY, isValuedRow, portGraph } from "./execution.ts";
+import { lowerControls, validateControls, type ControlAnalysis } from "./controls.ts";
 
 /** Input-port delivery policies a spec may declare. */
 const PORT_POLICIES = ["all-of", "any-of"] as const;
@@ -289,13 +293,36 @@ export function validateGraph(graph: unknown): ValidationResult {
 		}
 	}
 
-	// ---- Cycle warning (cycles are legal wiring) ---------------------------
-	// A control unions with its producer when walking (it adds no node beyond
-	// it), so a loop through a control warns exactly as the lowered graph's
-	// loop would — and names agents only, like the lowered path does.
-	const cycle = findCycle(agentIds, connections, analysis.sourceByControl);
-	if (cycle.length > 0) {
-		warnings.push({ code: "cycle-present", message: `pipeline contains a cycle: ${cycle.join(" -> ")} — legal wiring for the stream executor, but the sequential runner only runs its acyclic prefix` });
+	// ---- Cycles (legal wiring — every cycle carries its guard) -------------
+	// The walk runs over the LOWERED graph (lowerControls), because that is
+	// exactly what the kernel runs: every edge is agent -> agent — control
+	// branches included, which portGraph would drop on the honest graph — and
+	// portGraph answers the port-level guard questions directly. Lowering is
+	// total, so the walk is too: malformed declarations are reported by the
+	// passes above and simply never resolve here.
+	//
+	// `cycle-present` stays the awareness warning (a loop exists), reported
+	// once for the first cycle found. `cycle-unguarded` is the error: a
+	// directed cycle may run only when it carries a guard — a `bound` capping
+	// one of its hops, or a valued `$count` row escaping off the cycle ahead
+	// of every row that wires back into it. The walk repeats past each guarded
+	// cycle (its guard hop is excluded from the adjacency) until no cycle
+	// remains or an unguarded one is found — one guard does not cover a
+	// second, disjoint cycle. `cycle-entry-all-of` warns on the seed-once
+	// deadlock: an all-of entry port fed by the cycle plus an outside source
+	// can never satisfy again. Honest self-connections stay under
+	// `connection-self`; only the self-loops LOWERING introduces (a branch
+	// wired back to its own feeder) join the walk.
+	const lowered = lowerControls(asGraph as PipelineGraph);
+	const walk = walkCycles(agentIds, lowered, connections);
+	if (walk.firstCycle.length > 0) {
+		warnings.push({ code: "cycle-present", message: `pipeline contains a cycle: ${walk.firstCycle.join(" -> ")} — legal wiring for the stream executor, but the sequential runner only runs its acyclic prefix` });
+	}
+	if (walk.unguarded !== undefined) {
+		errors.push({ code: "cycle-unguarded", message: walk.unguarded });
+	}
+	for (const message of walk.entryWarnings) {
+		warnings.push({ code: "cycle-entry-all-of", message });
 	}
 
 	return { ok: errors.length === 0, errors, ...(warnings.length > 0 ? { warnings } : {}) };
@@ -419,39 +446,101 @@ function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outpu
 	}
 }
 
-/**
- * Detect a directed cycle among the given agents/edges and, when found, return
- * the cycle as a closed path `[a, b, c, a]` (last == first). Self-connections
- * are excluded here because they are reported as `connection-self` separately;
- * they are still cycles, but reporting them once with a targeted message is
- * clearer than folding them into a generic warning. The result feeds the
- * non-fatal `cycle-present` warning — a cycle is legal wiring (the stream
- * executor loops), it is only a hazard for the legacy sequential runner.
- *
- * @param agentIds - the set of known agent ids (the graph's node universe).
- * @param connections - the raw connections array.
- * @param sourceByControl - control id -> its feeding agent's id (a control-
- *   sourced edge walks from the producer; an edge INTO a control closes at it,
- *   a self-loop the walk excludes — exactly the lowered graph's shape, since
- *   lowering drops the control and its feeding edge).
- * @returns an empty array when the graph is acyclic, else the cycle path.
- */
-function findCycle(agentIds: ReadonlySet<string>, connections: readonly unknown[], sourceByControl: ReadonlyMap<string, string>): string[] {
-	const adj = new Map<string, string[]>();
-	for (const id of agentIds) adj.set(id, []);
+/** The cycle findings behind validateGraph's cycle block (see walkCycles). */
+export interface CycleWalk {
+	/** The first cycle found on the unmodified lowered graph — a closed path (last == first); [] when acyclic. */
+	firstCycle: string[];
+	/** The first unguarded cycle's `cycle-unguarded` message, when the walk found one. */
+	unguarded?: string;
+	/** One `cycle-entry-all-of` message per starved entry port, in discovery order. */
+	entryWarnings: string[];
+}
 
-	for (const conn of connections) {
-		if (conn == null || typeof conn !== "object") continue;
-		const rec = conn as { source?: unknown; target?: unknown };
-		let source = rec.source == null ? "" : String(rec.source);
-		const target = rec.target == null ? "" : String(rec.target);
-		if (source.length === 0 || target.length === 0) continue;
-		if (!agentIds.has(source)) source = sourceByControl.get(source) ?? "";
-		if (!agentIds.has(source) || !agentIds.has(target)) continue;
-		if (source === target) continue;
-		adj.get(source)?.push(target);
+/**
+ * The guard walk over a LOWERED graph (lowerControls output): find a cycle;
+ * if it carries a guard, exclude its guard hop and repeat until no cycle
+ * remains or an unguarded one is found — every directed cycle must carry its
+ * own guard, and one guard does not cover a second, disjoint cycle. All
+ * discovered cycles feed the `cycle-entry-all-of` scan. Total over malformed
+ * declarations: unresolvable edges and missing ports never resolve to a
+ * guard, and are otherwise invisible (the passes above report them).
+ *
+ * @param agentIds - the known agent ids (the walk's node universe).
+ * @param lowered - the lowered graph (agents and connections only; controls
+ *   are gone).
+ * @param honestConnections - the HONEST graph's raw connections array, used
+ *   to keep honest self-connections out of the walk (they are reported as
+ *   `connection-self` once); only the self-loops LOWERING introduces — a
+ *   branch wired back to its own feeder — join the walk, matched by
+ *   connection id.
+ * @returns the walk findings; never throws.
+ */
+export function walkCycles(agentIds: ReadonlySet<string>, lowered: PipelineGraph, honestConnections: readonly unknown[]): CycleWalk {
+	const ports = portGraph(lowered);
+	const bindingsByAgent = new Map<string, OutputBinding[]>();
+	for (const agent of Array.isArray(lowered.agents) ? lowered.agents : []) {
+		if (agent == null || typeof agent !== "object") continue;
+		const id = argStr((agent as { id?: unknown }).id);
+		const bindings = (agent as { bindings?: unknown }).bindings;
+		if (id.length > 0 && Array.isArray(bindings) && !bindingsByAgent.has(id)) {
+			bindingsByAgent.set(id, bindings as OutputBinding[]);
+		}
 	}
 
+	// An honest self-connection keeps its dedicated report; a lowered self-loop
+	// (source == target, introduced by a branch wired back to its own feeder)
+	// is a real one-node cycle the kernel runs, so it stays.
+	const honestSelfIds = new Set<string>();
+	for (const conn of honestConnections) {
+		if (conn == null || typeof conn !== "object") continue;
+		const rec = conn as { id?: unknown; source?: unknown; target?: unknown };
+		const source = argStr(rec.source);
+		if (source.length > 0 && source === argStr(rec.target)) honestSelfIds.add(argStr(rec.id));
+	}
+
+	const adjacency = new Map<string, string[]>();
+	for (const id of agentIds) adjacency.set(id, []);
+	for (const conn of Array.isArray(lowered.connections) ? lowered.connections : []) {
+		if (conn == null || typeof conn !== "object") continue;
+		const rec = conn as { id?: unknown; source?: unknown; target?: unknown };
+		const source = argStr(rec.source);
+		const target = argStr(rec.target);
+		if (!agentIds.has(source) || !agentIds.has(target)) continue;
+		if (source === target && honestSelfIds.has(argStr(rec.id))) continue;
+		adjacency.get(source)?.push(target);
+	}
+
+	const seenEntries = new Set<string>();
+	const entryWarnings: string[] = [];
+	let firstCycle: string[] = [];
+	let unguarded: string | undefined;
+
+	for (;;) {
+		const cycle = findCycleIn(agentIds, adjacency);
+		if (cycle.length === 0) break;
+		if (firstCycle.length === 0) firstCycle = cycle;
+		collectEntryWarnings(cycle, ports, seenEntries, entryWarnings);
+		const guard = cycleGuard(cycle, ports, bindingsByAgent);
+		if (!guard.guarded) {
+			unguarded = `pipeline contains an unguarded cycle: ${cycle.join(" -> ")} — every loop needs a budget: add a bound to the input port one of its hops enters, or put a valued $count row ahead of every row that wires back into the loop${guard.finding !== undefined ? ` — ${guard.finding}` : ""}`;
+			break;
+		}
+		const [u, v] = guard.hop;
+		adjacency.set(u, (adjacency.get(u) ?? []).filter((t) => t !== v));
+	}
+
+	return { firstCycle, ...(unguarded !== undefined ? { unguarded } : {}), entryWarnings };
+}
+
+/**
+ * Detect a directed cycle over a ready-built adjacency and return it as a
+ * closed path `[a, b, c, a]` (last == first), or [] when none remains. The
+ * DFS is the original findCycle's (WHITE/GRAY/BLACK stack walk); the
+ * adjacency construction was lifted out so the guard walk can repeat past
+ * guarded cycles and so the lowered graph's one-node cycles (a branch wired
+ * back to its own feeder — a self-edge on the lowered graph) are visible.
+ */
+function findCycleIn(agentIds: ReadonlySet<string>, adjacency: ReadonlyMap<string, readonly string[]>): string[] {
 	const WHITE = 0, GRAY = 1, BLACK = 2;
 	const color = new Map<string, number>();
 	for (const id of agentIds) color.set(id, WHITE);
@@ -460,7 +549,7 @@ function findCycle(agentIds: ReadonlySet<string>, connections: readonly unknown[
 	function visit(node: string): string[] {
 		color.set(node, GRAY);
 		stackPath.push(node);
-		for (const next of adj.get(node) ?? []) {
+		for (const next of adjacency.get(node) ?? []) {
 			if (color.get(next) === GRAY) {
 				// Back edge to an ancestor on the current DFS stack -> cycle.
 				const start = stackPath.indexOf(next);
@@ -483,4 +572,127 @@ function findCycle(agentIds: ReadonlySet<string>, connections: readonly unknown[
 		}
 	}
 	return [];
+}
+
+/** One cycle's guard verdict: guarded cycles carry the hop the walk excludes to move past them. */
+type GuardVerdict =
+	| { guarded: true; hop: [string, string] }
+	| { guarded: false; /** The row-specific diagnosis for the error message, when a misplaced `$count` row exists. */ finding?: string };
+
+/**
+ * The guard test for one cycle path `[a…k, a]`, per docs/proposals/loops.md:
+ * (a) some hop (u → v) of the path where every connection u → v lands on an
+ * input port of v declaring a `bound` — the delivery-cap mechanics, sound by
+ * construction; or (b) a valued `$count` row on a path node whose port wires
+ * nowhere on the cycle, positioned before every row that does. First guard
+ * wins; the message names rows only when (b) found misplaced candidates.
+ */
+function cycleGuard(cycle: readonly string[], ports: PortGraph, bindingsByAgent: ReadonlyMap<string, OutputBinding[]>): GuardVerdict {
+	for (let i = 0; i < cycle.length - 1; i++) {
+		const u = cycle[i];
+		const v = cycle[i + 1];
+		if (hopBound(u, v, ports)) return { guarded: true, hop: [u, v] };
+	}
+	return countEscapeGuard(cycle, ports, bindingsByAgent);
+}
+
+/**
+ * True when the hop u → v is bound-guarded: every connection u → v that
+ * resolves lands on an input port of v declaring a `bound`. "Every" is
+ * load-bearing — the kernel delivers over each connection independently, so a
+ * bound port sharing its hop with an unbounded parallel edge caps nothing.
+ * Connections whose ports do not resolve are invisible here (they never
+ * deliver; the connections pass reports them).
+ */
+function hopBound(u: string, v: string, ports: PortGraph): boolean {
+	const node = ports.byId[v];
+	if (node === undefined) return false;
+	let edges = 0;
+	for (const port of node.inputs) {
+		for (const edge of port.edges) {
+			if (edge.source !== u) continue;
+			edges += 1;
+			if (port.bound === undefined) return false;
+		}
+	}
+	return edges > 0;
+}
+
+/**
+ * The `$count` escape (guard test (b)): a VALUED `$count` row on a path node
+ * whose port wires nowhere on the cycle, positioned before every row that
+ * does. Both clauses are load-bearing: a count row shadowed by a row above it
+ * that wires back into the cycle never fires (`verdict == fix` above
+ * `$count >= 3`), and a count row aimed back INTO the cycle re-matches every
+ * firing from the threshold on — neither guards; the finding names the rows.
+ * A row whose port wires nowhere guards: from the threshold on the count row
+ * matches FIRST (first-match-wins), so the rows below it that loop go quiet —
+ * the escape needs to stop the loop-back rows, not to go anywhere. The walk
+ * excludes the producer's outgoing hop on the path (that edge is what goes
+ * quiet at the threshold).
+ */
+function countEscapeGuard(cycle: readonly string[], ports: PortGraph, bindingsByAgent: ReadonlyMap<string, OutputBinding[]>): GuardVerdict {
+	const pathNodes = new Set(cycle);
+	const wiresInto = (nodeId: string, portName: string): boolean => {
+		const port = ports.byId[nodeId]?.outputs.find((p) => p.name === portName);
+		return port !== undefined && port.edges.some((edge) => pathNodes.has(edge.target));
+	};
+	let finding: string | undefined;
+	for (const nodeId of cycle.slice(0, -1)) {
+		const rows = bindingsByAgent.get(nodeId) ?? [];
+		for (let i = 0; i < rows.length; i++) {
+			const row = rows[i];
+			if (row == null || typeof row !== "object" || row.field !== COUNT_KEY) continue;
+			// A valueless $count row is the catch-all — it needs a structured
+			// result (the honest quiet), so it is no budget.
+			if (!isValuedRow(row)) continue;
+			const label = `the $count row "${argStr(row.port)}" on "${nodeId}"`;
+			if (wiresInto(nodeId, argStr(row.port))) {
+				finding ??= `${label} wires back into the loop — it re-matches every iteration instead of escaping it`;
+				continue;
+			}
+			let shadower = -1;
+			for (let j = 0; j < i; j++) {
+				const above = rows[j];
+				if (above == null || typeof above !== "object") continue;
+				if (wiresInto(nodeId, argStr(above.port))) {
+					shadower = j;
+					break;
+				}
+			}
+			if (shadower >= 0) {
+				finding ??= `${label} sits below row "${argStr(rows[shadower].port)}", which wires back into the loop and shadows it`;
+				continue;
+			}
+			const at = cycle.indexOf(nodeId);
+			return { guarded: true, hop: [nodeId, cycle[at + 1]] };
+		}
+	}
+	return { guarded: false, ...(finding !== undefined ? { finding } : {}) };
+}
+
+/**
+ * The seed-once deadlock, one `cycle-entry-all-of` warning per starved entry
+ * port: a cycle node's input port under the default all-of policy that
+ * receives an edge from the cycle AND wires at least one more source. all-of
+ * is per-SOURCE (the P3 firing rule): the outside source delivers once and is
+ * consumed, so from then on the port can never hold a message from every
+ * source again — the loop body never fires. `any-of` is the fix, and the
+ * message says so. Deduplicated per port across the walk's cycles.
+ */
+function collectEntryWarnings(cycle: readonly string[], ports: PortGraph, seen: Set<string>, out: string[]): void {
+	const pathNodes = new Set(cycle);
+	for (const nodeId of new Set(cycle)) {
+		const node = ports.byId[nodeId];
+		if (node === undefined) continue;
+		for (const port of node.inputs) {
+			if (port.policy !== "all-of") continue;
+			if (port.sources.length < 2) continue;
+			if (!port.sources.some((source) => pathNodes.has(source))) continue;
+			const key = `${nodeId}\u0000${port.portId}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(`agent "${nodeId}" input port "${port.portId}" sits on a cycle (${cycle.join(" -> ")}) and receives from ${port.sources.length} sources (${port.sources.join(", ")}) under the default all-of policy — the outside source delivers once, so the loop body can never fire; set the port's policy to "any-of"`);
+		}
+	}
 }
