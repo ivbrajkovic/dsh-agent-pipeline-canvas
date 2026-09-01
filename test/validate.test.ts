@@ -41,6 +41,11 @@ const portsAgent = (id: string, inputPorts?: unknown[], outputPorts?: string[]) 
 	...(outputPorts !== undefined ? { outputPorts } : {}),
 });
 const portConn = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({ id, source, target, sourcePort, targetPort });
+/** A control-edge connection: ports only where the control contract carries them. */
+const controlConn = (id: string, source: string, target: string, sourcePort?: string) => ({
+	id, source, target,
+	...(sourcePort !== undefined ? { sourcePort } : {}),
+});
 
 // --- valid / degenerate ---------------------------------------------
 check("null pipeline", null, true, []);
@@ -170,6 +175,26 @@ check("graph not object", "nope", false, ["graph-invalid"]);
 	passed++;
 	console.log("ok    legal cycle warns exactly once");
 }
+
+// --- controls as connection endpoints (the if control — shared rules) ---
+// A control id resolves as an endpoint, but the agent-port rules exempt it:
+// a control-targeted edge carries no targetPort and a control-sourced edge
+// names a declared branch (validated in depth by test/controls.test.ts).
+check("control-targeted edge without a target port stays valid", {
+	agents: [agent("a")],
+	connections: [controlConn("c1", "a", "if-1", "a:out")],
+	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1" }, { name: "y" }] }],
+}, true, []);
+check("unknown control source id reports the missing source, not a control rule", {
+	agents: [agent("a")],
+	connections: [controlConn("c1", "zzz", "if-1", "zzz:out")],
+	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1" }, { name: "y" }] }],
+}, false, ["connection-source-missing"]);
+check("control-sourced unknown branch skips the agent-port rule", {
+	agents: [agent("a"), agent("b")],
+	connections: [controlConn("c1", "a", "if-1", "a:out"), controlConn("c2", "if-1", "b", "if-1:zzz")],
+	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1" }, { name: "y" }] }],
+}, false, ["if-edge-port-unknown"]);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

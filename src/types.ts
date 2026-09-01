@@ -203,10 +203,61 @@ export interface Connection {
 	targetPort: string;
 }
 
-/** The pipeline graph: the two arrays persisted to `.agent-pipeline/pipeline.json`. */
+/**
+ * One branch rule of an if control (`docs/proposals/if-control.md`): the
+ * decision `field == value → branch`, evaluated in declaration order, first
+ * match wins. A branch without `value` — or authored `value: ""`, which
+ * normalizes to absent on lowering — is the CATCH-ALL: it matches any
+ * structured result and belongs last. Decision semantics ARE the executor's
+ * binding semantics (see OutputBinding); the control only owns the authoring.
+ */
+export interface IfBranch {
+	/** The branch/output-port name ("billing"); unique non-empty within the control. */
+	name: string;
+	/** The structured-output field to compare ("action"); required on valued branches. */
+	field: string;
+	/** The value the field must equal; absent (or "") = the catch-all (else). */
+	value?: string;
+	/**
+	 * The control edge this branch tick renders on (see PortSide). Absent =
+	 * "right". Geometry only — the executor never reads it; on lowering the
+	 * non-default sides forward into the producing agent's `outputPortSides`.
+	 */
+	side?: PortSide;
+}
+
+/**
+ * A first-class control node on the canvas — the fork as a real, persisted
+ * graph node. Honest wiring (the file says what the canvas shows), LOWERED
+ * onto the feeding agent's output ports + bindings before the kernel runs
+ * (`lowerControls` in ./controls.ts): the kernel, the firing log, storage,
+ * and the HTTP/SSE routes never learn controls exist. The run record's
+ * immutable graph snapshot carries the HONEST controls — a resumed run
+ * re-enters run() and re-lowers from the snapshot — while the lowered graph
+ * itself is never persisted.
+ */
+export interface ControlNode {
+	/** "if-N" — a separate id space from agent-N (validation flags collisions). */
+	id: string;
+	/** Control kind; "if" is the only kind in v1 (future controls extend the shape). */
+	kind: "if";
+	/** Branch rules; evaluation order = declaration order, catch-all last. */
+	branches: IfBranch[];
+	x: number;
+	y: number;
+}
+
+/** The pipeline graph: the arrays persisted to `.agent-pipeline/pipeline.json`. */
 export interface PipelineGraph {
 	agents: Agent[];
 	connections: Connection[];
+	/**
+	 * First-class control nodes (see ControlNode). ADDITIVE schema: absent →
+	 * exactly today's graph, so old pipelines load and run unchanged, and a
+	 * hand-authored ports+bindings graph keeps working — the if control is an
+	 * authoring upgrade over the same mechanism, not a replacement.
+	 */
+	controls?: ControlNode[];
 }
 
 /** Stable discriminator + human-readable message for one validation problem. */

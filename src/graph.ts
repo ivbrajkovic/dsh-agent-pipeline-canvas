@@ -50,9 +50,19 @@
 // without them means one `in` port (all-of, unbounded) and one `out` port —
 // exactly the historical shape. This module only ADDS the validation a runner
 // will rely on; it does not alter the on-disk shape.
+//
+// Controls (docs/proposals/if-control.md) are additive too: `controls` names
+// first-class control nodes that are connection endpoints but never run —
+// validateGraph validates the HONEST graph (a control must be fed by exactly
+// one agent that carries no emission config of its own), and the run path
+// lowers controls onto the feeding agent's ports + bindings before the kernel
+// sees the graph (lowerControls in ./controls.ts). The control-specific rules
+// delegate to ./controls.ts; this module applies the shared ones (endpoints,
+// duplicates, the cycle walk — where a control is an alias of its producer).
 
 import type { ValidationError, ValidationResult } from "./types.ts";
 import { portGraph } from "./execution.ts";
+import { validateControls, type ControlAnalysis } from "./controls.ts";
 
 /** Input-port delivery policies a spec may declare. */
 const PORT_POLICIES = ["all-of", "any-of"] as const;
@@ -129,6 +139,12 @@ export function validateGraph(graph: unknown): ValidationResult {
 		validatePortDeclarations(id, rec, errors, warnings);
 	}
 
+	// ---- Controls (the if control) ------------------------------------------
+	// The control-specific rules delegate to ./controls.ts; the returned
+	// analysis lets the connection pass below treat controls as endpoints and
+	// the cycle walk alias a control onto its producer.
+	const analysis: ControlAnalysis = validateControls(asGraph as { agents?: unknown; connections?: unknown; controls?: unknown }, agentIds, errors, warnings);
+
 	// ---- Port resolution (declared lists, else the legacy defaults) --------
 	// One shared derivation with the run kernel: which ports exist, their wire
 	// ids, and which edges attach where.
@@ -187,13 +203,18 @@ export function validateGraph(graph: unknown): ValidationResult {
 		if (source.length === 0) errors.push({ code: "connection-missing-source", message: "a connection is missing a source agent" });
 		if (target.length === 0) errors.push({ code: "connection-missing-target", message: "a connection is missing a target agent" });
 
-		const hasSource = source.length > 0 && agentIds.has(source);
-		const hasTarget = target.length > 0 && agentIds.has(target);
+		// A control is a first-class endpoint: resolvable, but never a port
+		// surface of its own — a control-sourced edge names a declared BRANCH,
+		// a control-targeted edge is the control's single unnamed input.
+		const sourceIsControl = !agentIds.has(source) && analysis.ids.has(source);
+		const targetIsControl = !agentIds.has(target) && analysis.ids.has(target);
+		const hasSource = source.length > 0 && (agentIds.has(source) || sourceIsControl);
+		const hasTarget = target.length > 0 && (agentIds.has(target) || targetIsControl);
 
-		if (source.length > 0 && !agentIds.has(source)) {
+		if (source.length > 0 && !hasSource) {
 			errors.push({ code: "connection-source-missing", message: `connection references unknown source agent "${source}"` });
 		}
-		if (target.length > 0 && !agentIds.has(target)) {
+		if (target.length > 0 && !hasTarget) {
 			errors.push({ code: "connection-target-missing", message: `connection references unknown target agent "${target}"` });
 		}
 		if (source.length > 0 && target.length > 0 && source === target) {
@@ -203,12 +224,21 @@ export function validateGraph(graph: unknown): ValidationResult {
 		// Port wiring: a connection must leave one of the source's DECLARED (or
 		// default) output ports and enter one of the target's input ports — the
 		// exact membership the stream kernel will resolve against (see portGraph).
-		// Until that kernel lands, both executors still wire by source/target
-		// only and treat declared ports as the single default pair.
-		const srcNode = hasSource ? ports.byId[source] : undefined;
-		const tgtNode = hasTarget ? ports.byId[target] : undefined;
+		// Control endpoints are exempt from the agent-port rules and carry the
+		// control rules instead (`if-edge-port-unknown`). Lowering rewrites a
+		// valid control edge onto the feeding agent's ports, so these checks are
+		// what keeps the lowered graph wiring-clean.
+		const srcNode = hasSource && !sourceIsControl ? ports.byId[source] : undefined;
+		const tgtNode = hasTarget && !targetIsControl ? ports.byId[target] : undefined;
 
-		if (hasSource) {
+		if (sourceIsControl) {
+			const declared = analysis.branchNames.get(source) ?? [];
+			const prefix = source + ":";
+			const branch = sourcePort.startsWith(prefix) ? sourcePort.slice(prefix.length) : "";
+			if (!declared.includes(branch)) {
+				errors.push({ code: "if-edge-port-unknown", message: `connection from control "${source}" uses source port "${sourcePort}" but the control declares branches: ${declared.length > 0 ? declared.join(", ") : "none"}` });
+			}
+		} else if (hasSource) {
 			if (sourcePort.length === 0) {
 				errors.push({ code: "connection-missing-source-port", message: `connection from "${source}" is missing a source port` });
 			} else if (srcNode === undefined || srcNode.outputById[sourcePort] === undefined) {
@@ -216,7 +246,11 @@ export function validateGraph(graph: unknown): ValidationResult {
 				errors.push({ code: "connection-source-port-mismatch", message: `connection from "${source}" uses source port "${sourcePort}" but "${source}" declares output ports: ${declared.length > 0 ? declared : "none"}` });
 			}
 		}
-		if (hasTarget) {
+		if (targetIsControl) {
+			if (targetPort.length > 0) {
+				errors.push({ code: "if-edge-port-unknown", message: `connection to control "${target}" names a target port ("${targetPort}") — a control takes a single unnamed input; drop the target port` });
+			}
+		} else if (hasTarget) {
 			if (targetPort.length === 0) {
 				errors.push({ code: "connection-missing-target-port", message: `connection to "${target}" is missing a target port` });
 			} else if (tgtNode === undefined || tgtNode.inputById[targetPort] === undefined) {
@@ -239,7 +273,10 @@ export function validateGraph(graph: unknown): ValidationResult {
 	}
 
 	// ---- Cycle warning (cycles are legal wiring) ---------------------------
-	const cycle = findCycle(agentIds, connections);
+	// A control unions with its producer when walking (it adds no node beyond
+	// it), so a loop through a control warns exactly as the lowered graph's
+	// loop would — and names agents only, like the lowered path does.
+	const cycle = findCycle(agentIds, connections, analysis.sourceByControl);
 	if (cycle.length > 0) {
 		warnings.push({ code: "cycle-present", message: `pipeline contains a cycle: ${cycle.join(" -> ")} — legal wiring for the stream executor, but the sequential runner only runs its acyclic prefix` });
 	}
@@ -376,18 +413,23 @@ function validatePortDeclarations(id: string, rec: { inputPorts?: unknown; outpu
  *
  * @param agentIds - the set of known agent ids (the graph's node universe).
  * @param connections - the raw connections array.
+ * @param sourceByControl - control id -> its feeding agent's id (a control-
+ *   sourced edge walks from the producer; an edge INTO a control closes at it,
+ *   a self-loop the walk excludes — exactly the lowered graph's shape, since
+ *   lowering drops the control and its feeding edge).
  * @returns an empty array when the graph is acyclic, else the cycle path.
  */
-function findCycle(agentIds: ReadonlySet<string>, connections: readonly unknown[]): string[] {
+function findCycle(agentIds: ReadonlySet<string>, connections: readonly unknown[], sourceByControl: ReadonlyMap<string, string>): string[] {
 	const adj = new Map<string, string[]>();
 	for (const id of agentIds) adj.set(id, []);
 
 	for (const conn of connections) {
 		if (conn == null || typeof conn !== "object") continue;
 		const rec = conn as { source?: unknown; target?: unknown };
-		const source = rec.source == null ? "" : String(rec.source);
+		let source = rec.source == null ? "" : String(rec.source);
 		const target = rec.target == null ? "" : String(rec.target);
 		if (source.length === 0 || target.length === 0) continue;
+		if (!agentIds.has(source)) source = sourceByControl.get(source) ?? "";
 		if (!agentIds.has(source) || !agentIds.has(target)) continue;
 		if (source === target) continue;
 		adj.get(source)?.push(target);
