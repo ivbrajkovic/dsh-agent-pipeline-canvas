@@ -434,7 +434,9 @@ surface is never required.
   table rows `cycle-unguarded` and `cycle-entry-all-of`; the guard rule;
   the emit/evaluateBindings contract; the `if-source-breakpointed` row's
   `$count`-era reword — a released breakpointed feeder CAN fire a
-  `$count` row), `guide/canvas.md` (the loop inside
+  `$count` row; a VALUELESS `>=` row is malformed — validation errors on
+  it, and execution's catch-all reading of the valueless row never
+  applies), `guide/canvas.md` (the loop inside
   the if section: back-edge, assist, guard error, iteration display),
   `guide/running-pipelines.md` (guarded cycles, the refusal, `$count` at
   a loop tail), `guide/pipeline-samples.md` (Coder→Reviewer rewritten in
