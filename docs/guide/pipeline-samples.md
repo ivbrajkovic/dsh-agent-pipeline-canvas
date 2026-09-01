@@ -85,15 +85,67 @@ Both producers here are roots — each receives the run input, so both fire
 once. In a bigger graph you would wire them behind a router (next sample) so
 only one runs.
 
-## Conditional router (bindings, no extra model call)
+## Conditional router (the if control)
 
-`Router` has a structured output schema and **bindings** that map its
-`action` field to one of two output ports. Only the selected branch runs;
-the quiet branch never receives a message and its subtree stays idle. The
-comparison is executor-side — no extra model call. The two output ports
-spread over the **top** and **bottom** edges (`outputPortSides`), so the
-fan-out reads at a glance — and one port per edge keeps the canvas free of
-the stacked-ticks warning.
+`Router` feeds an **if control** that owns the decision: two branches
+(`billing`, `other`) test the router's structured `action` field — first
+match wins. Only the selected branch runs; the quiet branch never receives a
+message and its subtree stays idle. The comparison is executor-side — no
+extra model call. The router declares only its **output schema**; the
+branches spread over the control's **top** and **bottom** edges so the
+fan-out reads at a glance.
+
+```json
+{
+  "agents": [
+    { "id": "agent-1", "name": "Router", "description": "", "instructions": "Decide: does the input ask about billing or something else? Report {\"action\": \"billing\"} or {\"action\": \"other\"} via the structured_output tool.",
+      "settings": { "agentOptions": { "model": "deepseek-v4-flash" },
+                    "outputSchema": { "type": "object", "properties": { "action": { "type": "string", "enum": ["billing", "other"] } }, "required": ["action"] } },
+      "x": 60, "y": 88, "input": "agent-1:in", "output": "agent-1:out" },
+    { "id": "agent-2", "name": "Billing", "description": "", "instructions": "Answer the billing question in one sentence.", "x": 400, "y": 20,  "input": "agent-2:in", "output": "agent-2:out" },
+    { "id": "agent-3", "name": "General", "description": "", "instructions": "Answer the question in one sentence.",       "x": 400, "y": 160, "input": "agent-3:in", "output": "agent-3:out" }
+  ],
+  "connections": [
+    { "id": "c1", "source": "agent-1", "target": "if-1", "sourcePort": "agent-1:out" },
+    { "id": "c2", "source": "if-1", "target": "agent-2", "sourcePort": "if-1:billing", "targetPort": "agent-2:in" },
+    { "id": "c3", "source": "if-1", "target": "agent-3", "sourcePort": "if-1:other",   "targetPort": "agent-3:in" }
+  ],
+  "controls": [
+    { "id": "if-1", "kind": "if",
+      "branches": [
+        { "name": "billing", "field": "action", "value": "billing", "side": "top" },
+        { "name": "other",   "field": "action", "value": "other",   "side": "bottom" }
+      ],
+      "x": 220, "y": 76 }
+  ]
+}
+```
+
+Notes on the shape: the control-targeted connection carries **no
+`targetPort`** (an if takes a single unnamed input), each control-sourced
+connection names its **branch** as `sourcePort`, and the feeding agent
+declares no `outputPorts`/`bindings` of its own — the if owns its whole
+emission surface (`if-owner-conflict` otherwise). On the canvas you author
+this with the palette's **If** brick, the branch editor (right-click the
+control → **Edit branches**), and branch-tick drags — see
+[canvas.md](canvas.md#the-if-control--the-fork-as-a-node). At run time the
+control **lowers** onto the router's output ports + bindings before the
+kernel starts, so this graph executes exactly like the hand-authored form
+below — the run record names agents only.
+
+Run it: a billing question fires `Billing` only (the control's chip reads
+*fired* and the billing edge lights green); anything else flips the
+highlight to `other`; a value that matches no branch with no catch-all
+present starves the downstream nodes — the result modal lists them as
+pending, and the host log names the waiting nodes.
+
+### The hand-authored twin (bindings on the agent)
+
+The same graph without a control — the decision lives on the agent as output
+ports + bindings, edited in the agent panel's port surface. Both forms run
+identically: the if control is an authoring upgrade over the same mechanism,
+and one port per edge (`outputPortSides`) keeps the canvas free of the
+stacked-ticks warning.
 
 ```json
 {
@@ -118,11 +170,12 @@ the stacked-ticks warning.
 }
 ```
 
-Rules: bindings evaluate in declaration order, first match wins; a rule with
-an empty `value` is the catch-all (keep it last); no match — or no
-structured result — emits on no port. Bindings need `settings.outputSchema`,
-so a **breakpointed** agent (which cannot produce structured output) never
-matches — the edit panel warns about both.
+Rules (both forms): branches/bindings evaluate in declaration order, first
+match wins; an empty `value` is the catch-all (keep it last); no match — or
+no structured result — emits on no port. Both need
+`settings.outputSchema`, so a **breakpointed** agent (which cannot produce
+structured output) never matches — the edit panel and the control's ⚠ chip
+warn about both.
 
 ## Feedback loop with a bound (Coder → Review)
 

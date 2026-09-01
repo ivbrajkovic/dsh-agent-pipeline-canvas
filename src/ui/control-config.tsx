@@ -7,8 +7,9 @@
 // constraint live and blocks Save on a broken shape (the same discipline as
 // the agent panel's output-schema check), while run-time matchability stays
 // with validateGraph's warnings, rendered here as passed in by the view.
-// Opened from the control node's edit button or its context menu; local state
-// is seeded from the control on mount (keyed by control id upstream). Saving
+// Opened from the control node's context menu (nodes carry no edit buttons);
+// local state is seeded from the control on mount (keyed by control id
+// upstream). Saving
 // replaces the control's branches and lets the debounced persist write the
 // honest graph back.
 import * as React from 'react';

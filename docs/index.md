@@ -11,9 +11,9 @@ that match what you need — nothing requires reading everything.
 
 | Document | What it covers |
 |----------|----------------|
-| [guide/canvas.md](guide/canvas.md) | Building a pipeline on the canvas: the palette, nodes and ports, connecting and editing, live validation, the agent configuration panel (system prompt + settings + the port surface), and per-session persistence (a copy-on-write fork of the workspace's shared graph). |
+| [guide/canvas.md](guide/canvas.md) | Building a pipeline on the canvas: the palette, nodes and ports, connecting and editing, live validation, the agent configuration panel (system prompt + settings + the port surface), the if control (the fork as a visible node), and per-session persistence (a copy-on-write fork of the workspace's shared graph). |
 | [guide/running-pipelines.md](guide/running-pipelines.md) | The run dialog and input composition, the firing-kernel execution model (concurrent dispatch, fail-fast, quiescence), durable runs (the firing-log record, SSE, the per-session single-active-run rule), grouped pause and the pending-pause queue, breakpoints (pause / inspect / resume / rerun / steer / abort), restart durability and degradation, and the result modal's continue routes. |
-| [guide/pipeline-samples.md](guide/pipeline-samples.md) | Short sample graphs: sequential chains, concurrent fan-out/fan-in, any-of joins, conditional routers via output bindings, feedback loops with a bound, and steering at breakpoints. |
+| [guide/pipeline-samples.md](guide/pipeline-samples.md) | Short sample graphs: sequential chains, concurrent fan-out/fan-in, any-of joins, conditional routers via the if control (or hand-authored output bindings), feedback loops with a bound, and steering at breakpoints. |
 | [guide/deployment.md](guide/deployment.md) | Installing into the DSH Web profile, the one-command sync loop, client-vs-host change handling, route verification, and the development scripts and change discipline. |
 
 ## Reference — how the plugin works
@@ -21,22 +21,22 @@ that match what you need — nothing requires reading everything.
 | Document | What it covers |
 |----------|----------------|
 | [reference/architecture.md](reference/architecture.md) | The three-face architecture (Host half, browser half, pure core), a route-by-route HTTP reference, the browser slot registrations and bundling, and the full project layout. |
-| [reference/graph-and-execution.md](reference/graph-and-execution.md) | The pipeline graph schema (ports, policies, bounds, bindings), every `validateGraph` rule and error code, the kernel's firing rules, and the firing-log run record. |
+| [reference/graph-and-execution.md](reference/graph-and-execution.md) | The pipeline graph schema (ports, policies, bounds, bindings, controls), every `validateGraph` rule and error code, the if control's lowering contract, the kernel's firing rules, and the firing-log run record. |
 | [reference/system-prompt.md](reference/system-prompt.md) | How the harness assembles an agent's system prompt from named sections, and the one `deployment:persona` slot that a pipeline agent's system prompt field replaces. |
 | [reference/design-principles.md](reference/design-principles.md) | The stream model — nodes, ports, messages, firings, quiescence — and the durable rules: self-similar boxes, honest wiring, cost discipline, the firing-log record. |
 
 ## Proposals — design background
 
 The knowledge base behind the executor and the designs for what comes next.
-The stream executor and conditional dispatch described by the first two are
-**built** — the guides above describe them as shipped behavior; the
-documents remain the design record.
+The stream executor, conditional dispatch, and the if control described by
+the first three are **built** — the guides above describe them as shipped
+behavior; the documents remain the design record.
 
 | Document | What it covers |
 |----------|----------------|
 | [proposals/parallel-execution.md](proposals/parallel-execution.md) | **Built.** The stream-model executor: the firing kernel (ports, messages, firings, quiescence), fail-fast errors, grouped pause, per-node parent anchors, abort draining — plus the §8 verification matrix the implementation was held to. |
 | [proposals/conditional-dispatch.md](proposals/conditional-dispatch.md) | **Built.** Conditional dispatch as base mechanics: named output ports, selective emission via bindings, declared any-of/all-of joins. |
-| [proposals/if-control.md](proposals/if-control.md) | **Planned.** The if control — conditional routing as a first-class canvas node (branches owned by a visible control, schema on the producer), lowered onto the port/binding mechanics. Phased plan; each phase carries a read-before / append-after delta section. |
+| [proposals/if-control.md](proposals/if-control.md) | **Built.** The if control — conditional routing as a first-class canvas node (branches owned by a visible diamond control, schema on the producer), lowered onto the port/binding mechanics at run time. Phased plan; living phase-delta handoff alongside. |
 | [proposals/node-context-menu.md](proposals/node-context-menu.md) | **Built.** The node context menu — right-click on an agent node for **Go to transcript** (the projected child session) plus the node actions, on the harness `Menu` primitive. Phased plan; living phase-delta handoff alongside. |
 | [proposals/edge-routing.md](proposals/edge-routing.md) | **Built.** Readable connection lines, two iterations: per-port ticks with sides on any node edge (a loop's ports on one vertical edge arc over or under the band), tangent-aware edge paths, and the one-per-side cap as a non-fatal warning. |
 | [proposals/run-operations.md](proposals/run-operations.md) | Designed, not built: run reuse (rerun from node X), a run history browser, per-firing token accounting, and per-node timeouts — plus recorded known limits. The firing log is the foundation this builds on. |
