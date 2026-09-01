@@ -1,8 +1,10 @@
 # Pipeline samples
 
 Short, copy-pasteable graphs for the common patterns. Save each into
-`.agent-pipeline/pipeline.json` in the workspace (the canvas picks it up on
-the next mount — reload the tab if the view is already open). Agents here
+`.agent-pipeline/pipeline.json` in the workspace — the canvas picks it up on
+the next mount in any session that has not forked its own graph yet (reload
+the tab if the view is already open; a forked session reads only its
+`pipelines/<sessionId>.json` — see [canvas.md](canvas.md#persistence)). Agents here
 use minimal instructions so runs are cheap and predictable — swap in your
 own prompts. Firing rules and record shape:
 [../reference/graph-and-execution.md](../reference/graph-and-execution.md);

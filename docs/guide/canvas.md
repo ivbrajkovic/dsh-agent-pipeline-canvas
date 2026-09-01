@@ -203,8 +203,9 @@ owns a file only from its first edit:
 - The browser loads/saves through a same-origin Host route; the Host
   resolves the file under the project root and writes it **atomically**
   (temp file + rename). A relative or empty `cwd` is refused and the
-  session key is validated (alphanumerics, `_`, `-` — no separators), so
-  the file can only land under a real project directory.
+  session key is validated (leading alphanumeric, then alphanumerics,
+  `_`, `-` — no separators — capped at 128 characters), so the file can
+  only land under a real project directory.
 - Because the storage path is the session's workspace directory, different
   repositories get independent pipelines — and within one repository,
   different sessions do too.
