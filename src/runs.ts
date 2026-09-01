@@ -117,6 +117,7 @@ import { isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { isValidSessionKey, writeAtomic } from "./storage.ts";
 import { validateGraph } from "./graph.ts";
+import { lowerControls } from "./controls.ts";
 import { agentInput, agentPrompt, cmp, portGraph, renderValue } from "./execution.ts";
 import { projectNodes, unresolvedFirings, type NodeProjection } from "./projection.ts";
 import {
@@ -1392,13 +1393,22 @@ class RunExecutor {
 	private async run(resumeFromPause: boolean): Promise<void> {
 		try {
 			const record = this.record;
-			const graph = portGraph(record.graph);
+			// The if control lowers ONCE here (docs/proposals/if-control.md — the
+			// one run-path insertion): the kernel and everything after it consume
+			// the lowered ports+bindings graph and never learn controls exist,
+			// while the record's graph snapshot stays HONEST (controls included)
+			// — a resumed run re-enters run() and re-lowers from the snapshot.
+			// Covers fresh and resumed runs by construction: the resurrection
+			// path re-enters here without passing startRun's validateGraph.
+			const lowered = lowerControls(record.graph);
+			const graph = portGraph(lowered);
 			const agentById = new Map<string, Agent>();
 			// Selective emission (conditional-dispatch §2): each node's output
 			// bindings ride the kernel as data — nodes without any emit
-			// non-selectively (the default-graph behavior).
+			// non-selectively (the default-graph behavior). The scan reads the
+			// LOWERED agents: an if's branches become its bindings here.
 			const bindings: Record<string, OutputBinding[]> = {};
-			for (const candidate of record.graph?.agents ?? []) {
+			for (const candidate of lowered?.agents ?? []) {
 				const entry = candidate as Agent | null | undefined;
 				if (entry == null || typeof entry !== "object" || entry.id == null) continue;
 				const id = String(entry.id);
