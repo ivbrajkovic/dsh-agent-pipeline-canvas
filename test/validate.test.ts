@@ -2,7 +2,7 @@
 //   tsx test/validate.test.ts
 // Imports the canonical pure implementation from lib/graph.js (the built output
 // of src/graph.ts; the Host and the browser bundle use the same implementation).
-import { validateGraph } from "../lib/graph.js";
+import { validateGraph, cycleClosingFlip } from "../lib/graph.js";
 import { deepStrictEqual } from "node:assert";
 
 let passed = 0;
@@ -350,6 +350,24 @@ check("two disjoint cycles, one unguarded, are refused", {
 check("an all-of entry port fed by the loop and a seed warns (the seed-once deadlock)", ifLoop(countFirst, { seed: true }), true, [], ["cycle-present", "cycle-entry-all-of"]);
 check("an any-of entry port stays quiet under the same shape", ifLoop(countFirst, { seed: true, entryPolicy: "any-of" }), true, [], ["cycle-present"]);
 check("a single-source entry port stays quiet", ifLoop(countFirst), true, [], ["cycle-present"]);
+{
+	// The canvas assist (loops L3) end to end on the pinned loop: the cycle-
+	// closing verdict for the back edge names r's entry, applying the flip
+	// clears the seed-once warning, and the guard story is unchanged.
+	const seeded = ifLoop(countFirst, { seed: true });
+	const verdict = cycleClosingFlip(seeded, portConn("c3x", "if-1", "if-1:retry", "r", "r:in"));
+	deepStrictEqual(verdict.closesCycle, true, "the back edge closes the loop");
+	deepStrictEqual(verdict.inputPorts, [{ name: "in", policy: "any-of" }], "the verdict flips r's default entry");
+	const flipped = {
+		...seeded,
+		agents: seeded.agents.map((a) => ((a as { id: unknown }).id === "r" ? { ...a, inputPorts: verdict.inputPorts } : a)),
+	};
+	const result = validateGraph(flipped);
+	deepStrictEqual(result.ok, true, "the flipped loop validates");
+	deepStrictEqual(result.warnings?.map((w) => w.code), ["cycle-present"], "the flip clears cycle-entry-all-of, keeps the awareness warning");
+	passed++;
+	console.log("ok    the assist verdict flips the seeded loop's entry and clears the seed-once warning");
+}
 {
 	// The shipped Coder→Reviewer sample (docs/guide/pipeline-samples.md): the
 	// bound on the coder's feedback port is the loop budget — regression anchor.

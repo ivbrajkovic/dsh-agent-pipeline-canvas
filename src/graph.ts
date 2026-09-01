@@ -64,7 +64,7 @@
 // duplicates, the cycle walk — which runs over the LOWERED graph, where the
 // controls are already gone and every edge is what the kernel runs).
 
-import type { OutputBinding, PipelineGraph, PortGraph, ValidationError, ValidationResult } from "./types.ts";
+import type { InputPortSpec, OutputBinding, PipelineGraph, PortGraph, ValidationError, ValidationResult } from "./types.ts";
 import { COUNT_KEY, isValuedRow, portGraph } from "./execution.ts";
 import { lowerControls, validateControls, type ControlAnalysis } from "./controls.ts";
 
@@ -697,4 +697,200 @@ function collectEntryWarnings(cycle: readonly string[], ports: PortGraph, seen: 
 			out.push(`agent "${nodeId}" input port "${port.portId}" sits on a cycle (${cycle.join(" -> ")}) and receives from ${port.sources.length} sources (${port.sources.join(", ")}) under the default all-of policy — all-of waits for every wired source, and a source beyond the loop-back delivers once and is consumed, so the loop body can never fire; set the port's policy to "any-of"`);
 		}
 	}
+}
+
+// ---- The canvas authoring assist (docs/proposals/loops.md, L3) -------------
+// Pure decisions for the browser half: whether a drop closes a cycle, and the
+// entry-port flip that preempts the seed-once deadlock. Both answers come from
+// the LOWERED graph — lowerControls contracts each control onto its producer,
+// so a branch edge drawn back to an earlier agent is seen exactly as the
+// kernel will run it — never from a second, hand-rolled control adjacency.
+
+/** The canvas assist's verdict for one prospective connection (see cycleClosingFlip). */
+export interface CycleClosingVerdict {
+	/** True when adding the connection closes a directed cycle. */
+	closesCycle: boolean;
+	/**
+	 * The target agent's rewritten `inputPorts` declaration — the entered port
+	 * flipped to "any-of", or the default entry declared as any-of — present
+	 * only when a cycle-closing drop can safely make the flip (the assist that
+	 * preempts `cycle-entry-all-of`). Absent when: the drop closes no cycle,
+	 * the target is a control (it owns no input port), the entered port is
+	 * already any-of, the ports do not resolve, or the flip would orphan
+	 * legacy wiring. The declaration is a real graph edit the canvas writes
+	 * verbatim — visible in the agent panel and View JSON.
+	 */
+	inputPorts?: InputPortSpec[];
+}
+
+/**
+ * The backward-edge assist's decision (loops L3): does adding this connection
+ * close a directed cycle, and which target input port must flip to "any-of"?
+ *
+ * Cycle detection runs on the lowered form of the honest graph PLUS the
+ * prospective connection (lowerControls — the same contraction the run path
+ * applies), so a control's branch edge is judged as the owner-agent edge it
+ * becomes. The drop closes a cycle exactly when its target can reach its
+ * source WITHOUT it — walkCycles reports the first cycle of a graph, not
+ * whether a given hop joins one, so the after-graph alone cannot tell a
+ * loop-closing back edge from an unrelated wire dropped into an
+ * already-cyclic graph (the multi-loop canvases this feature enables); the
+ * reachability probe below is the minimal exact consumer of the same lowered
+ * machinery.
+ *
+ * The flip follows the pinned policy: the default entry is declared as
+ * `inputPorts: [{ name: "in", policy: "any-of" }]` only when the entered wire
+ * id IS the agent's default in-port — a hand-edited legacy `input` string
+ * resolves to a different port id, and declaring `inputPorts` there would
+ * orphan the existing wiring (skip the flip; the warning speaks) — else the
+ * entered declared port's policy set to "any-of" in place (bound and side
+ * preserved). A port already at "any-of" needs no flip.
+ *
+ * Total over malformed input: anything unresolved returns
+ * `{ closesCycle: false }`, never throws.
+ *
+ * @param graph - the HONEST graph in its persisted shape (wire-id ports,
+ *   controls allowed) WITHOUT the prospective connection.
+ * @param connection - the prospective connection in the same persisted shape
+ *   (a control-targeted edge carries no targetPort, a control-sourced one
+ *   names its branch as sourcePort).
+ */
+export function cycleClosingFlip(graph: unknown, connection: unknown): CycleClosingVerdict {
+	if (graph == null || typeof graph !== "object" || Array.isArray(graph)) return { closesCycle: false };
+	if (connection == null || typeof connection !== "object") return { closesCycle: false };
+	const honest = graph as { agents?: unknown; connections?: unknown };
+	const conn = connection as { id?: unknown; source?: unknown; target?: unknown };
+	const connId = argStr(conn.id);
+	const target = argStr(conn.target);
+	if (connId.length === 0 || argStr(conn.source).length === 0 || target.length === 0) return { closesCycle: false };
+
+	const agentIds = new Set<string>();
+	for (const agent of Array.isArray(honest.agents) ? honest.agents : []) {
+		if (agent == null || typeof agent !== "object") continue;
+		const id = argStr((agent as { id?: unknown }).id);
+		if (id.length > 0) agentIds.add(id);
+	}
+
+	// The prospective hop in lowered form — a control-sourced edge re-sources
+	// onto its owner there (found by connection id; lowering preserves ids).
+	const after = lowerControls({
+		...honest,
+		connections: [...(Array.isArray(honest.connections) ? honest.connections : []), connection],
+	} as PipelineGraph);
+	let hopSource = "";
+	let hopTarget = "";
+	for (const c of Array.isArray(after.connections) ? after.connections : []) {
+		if (c == null || typeof c !== "object") continue;
+		const rec = c as { id?: unknown; source?: unknown; target?: unknown };
+		if (argStr(rec.id) !== connId) continue;
+		hopSource = argStr(rec.source);
+		hopTarget = argStr(rec.target);
+		break;
+	}
+	// A control-targeted edge lowers away entirely (the control's single
+	// unnamed input is not agent wiring): the helper reports no close for it —
+	// its target is a control, which owns no input port to flip, and the
+	// entry-port warning speaks for the honest cycle such a drop completes.
+	if (hopSource.length === 0 || hopTarget.length === 0 || !agentIds.has(hopSource) || !agentIds.has(hopTarget)) {
+		return { closesCycle: false };
+	}
+	// The drop closes a cycle iff its target reaches its source without it —
+	// trivially true for a self-hop (a branch wired back to its own feeder
+	// lowers to a one-node cycle the new edge itself closes).
+	const closes = hopSource === hopTarget || reaches(lowerControls(honest as PipelineGraph), hopTarget, hopSource);
+	if (!closes) return { closesCycle: false };
+
+	// Port resolution on the HONEST graph — the flip edits the authoring
+	// declaration, not the lowered twin.
+	const targetNode = portGraph(graph).byId[target];
+	if (targetNode === undefined) return { closesCycle: true };
+	const wireId = argStr((connection as { targetPort?: unknown }).targetPort) || target + ":in";
+	const port = targetNode.inputById[wireId];
+	if (port === undefined || port.policy === "any-of") return { closesCycle: true };
+	const rec = agentRecord(honest, target);
+	if (rec === undefined) return { closesCycle: true };
+	if (Array.isArray(rec.inputPorts)) {
+		const prefix = target + ":";
+		const name = wireId.startsWith(prefix) ? wireId.slice(prefix.length) : null;
+		if (name === null) return { closesCycle: true };
+		let hit = false;
+		const inputPorts = (rec.inputPorts as InputPortSpec[]).map((spec) => {
+			if (spec == null || typeof spec !== "object" || argStr(spec.name) !== name) return spec;
+			hit = true;
+			return { ...spec, policy: "any-of" } as InputPortSpec;
+		});
+		return hit ? { closesCycle: true, inputPorts } : { closesCycle: true };
+	}
+	// The default single port: declaring `inputPorts` re-ids it to "<id>:in",
+	// so the flip is safe only when the wire already carries that id.
+	const legacy = typeof rec.input === "string" && rec.input.length > 0 ? rec.input : target + ":in";
+	if (wireId !== target + ":in" || legacy !== target + ":in") return { closesCycle: true };
+	return { closesCycle: true, inputPorts: [{ name: port.name, policy: "any-of" }] };
+}
+
+/** Adjacency (source -> targets) over a connections array; with `ids`, only edges whose both endpoints are known. */
+function adjacencyOver(connections: unknown, ids: ReadonlySet<string> | null): Map<string, string[]> {
+	const adjacency = new Map<string, string[]>();
+	for (const conn of Array.isArray(connections) ? connections : []) {
+		if (conn == null || typeof conn !== "object") continue;
+		const rec = conn as { source?: unknown; target?: unknown };
+		const source = argStr(rec.source);
+		const next = argStr(rec.target);
+		if (source.length === 0 || next.length === 0) continue;
+		if (ids !== null && (!ids.has(source) || !ids.has(next))) continue;
+		adjacency.set(source, (adjacency.get(source) ?? []).concat([next]));
+	}
+	return adjacency;
+}
+
+/** The nodes reachable from `start` in one or more hops (start included only via a cycle back to it). */
+function reachableFrom(adjacency: ReadonlyMap<string, readonly string[]>, start: string): Set<string> {
+	const seen = new Set<string>();
+	const queue = [...(adjacency.get(start) ?? [])];
+	while (queue.length > 0) {
+		const node = queue.shift() as string;
+		if (seen.has(node)) continue;
+		seen.add(node);
+		queue.push(...(adjacency.get(node) ?? []));
+	}
+	return seen;
+}
+
+/** True when `to` is reachable from `from` over the lowered graph's connections. */
+function reaches(lowered: { connections?: unknown }, from: string, to: string): boolean {
+	return reachableFrom(adjacencyOver(lowered.connections, null), from).has(to);
+}
+
+/** Read one agent record out of the graph's agents array by id (first match). */
+function agentRecord(graph: { agents?: unknown }, id: string): Record<string, unknown> | undefined {
+	for (const agent of Array.isArray(graph.agents) ? graph.agents : []) {
+		if (agent == null || typeof agent !== "object") continue;
+		if (argStr((agent as { id?: unknown }).id) === id) return agent as Record<string, unknown>;
+	}
+	return undefined;
+}
+
+/**
+ * The agent ids lying on at least one directed cycle of the LOWERED graph —
+ * the canvas's membership test for the branch editor's shadowing diagnosis
+ * (which branches wire back into a loop). Lowered self-loops count (a branch
+ * wired back to its own feeder is a real one-node cycle the kernel runs), and
+ * so would an honest self-connection, which validateGraph refuses separately.
+ * Total over malformed declarations; never throws.
+ */
+export function cycleNodeIds(graph: unknown): ReadonlySet<string> {
+	const lowered = lowerControls(graph as PipelineGraph);
+	const ids = new Set<string>();
+	for (const agent of Array.isArray(lowered.agents) ? lowered.agents : []) {
+		if (agent == null || typeof agent !== "object") continue;
+		const id = argStr((agent as { id?: unknown }).id);
+		if (id.length > 0) ids.add(id);
+	}
+	const adjacency = adjacencyOver(lowered.connections, ids);
+	const onCycle = new Set<string>();
+	for (const id of ids) {
+		// Self-reachability: id lies on a cycle iff id reaches id.
+		if (reachableFrom(adjacency, id).has(id)) onCycle.add(id);
+	}
+	return onCycle;
 }
