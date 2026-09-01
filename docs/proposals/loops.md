@@ -510,7 +510,19 @@ restatements of the diff.
   ≥2 distinct sources, at least one on the cycle. (The all-of firing rule is
   per-SOURCE, which is what makes the one-port shape starve: the consumed
   seed source can never hold an unconsumed message again.) L4's docs must not
-  claim the warning covers the two-port variant.
+  claim the warning covers the two-port variant. The message words the
+  deadlock story for the canonical shape ("a source beyond the loop-back
+  delivers once") because the pinned firing test also catches a port whose
+  sources ALL lie on cycles — there both deliver per iteration and the loop
+  may run fine, so the warning over-fires; the `any-of` advice stays safe.
+  L4 should word the rule as "a source beyond the loop", not "outside".
+- **`$count ==` guards are shape-only.** Guard analysis never decides whether
+  a row will MATCH: a count row whose value can never match (`$count ==
+  "abc"`) still counts as a guard, the same class as `bound: 999999999` —
+  whether a row matches a run's result is data, not shape, and validateGraph
+  does not judge it (it does reject a non-finite `>=` value, the one
+  malformed shape). L4's docs must not present `$count ==` as
+  unconditionally terminating.
 - **`walkCycles` is exported** (src/graph.ts, with the `CycleWalk` finding
   shape): L3's cycle-closing helper is pinned to reuse the lifted machinery,
   and reuse means calling this over `lowerControls(honest + prospective
