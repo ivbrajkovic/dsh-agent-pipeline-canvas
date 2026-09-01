@@ -191,6 +191,21 @@ check("unknown branch side", {
 	connections: [conn("c1", "a", "if-1", "a:out")],
 	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1", side: "north" }, { name: "y" }] }],
 }, false, ["if-branch-invalid"]);
+check("unknown branch op", {
+	agents: [agent("a")],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1", op: "<" }, { name: "y" }] }],
+}, false, ["if-branch-invalid"]);
+check("a >= branch whose value is not a finite number", {
+	agents: [agent("a")],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "$count", value: "soon", op: ">=" }, { name: "y" }] }],
+}, false, ["if-branch-invalid"]);
+check("a >= branch over $count with a numeric value validates", {
+	agents: [agent("a", { settings: { outputSchema: { type: "object" } } })],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "$count", value: "3", op: ">=", side: "top" }, { name: "y" }] }],
+}, true, []);
 
 // --- non-fatal findings --------------------------------------------------
 check("two default-side branches stack with a warning", {
@@ -203,6 +218,36 @@ check("a schema-less source warns", {
 	connections: [conn("c1", "a", "if-1", "a:out")],
 	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1" }, { name: "y" }] }],
 }, true, [], ["if-source-no-schema"]);
+{
+	// The no-schema warning is SUPPRESSED when every valued branch is a
+	// $count row — counter rows test the firing's sequence, not the record
+	// (docs/proposals/loops.md L1) — and still fires when a content branch
+	// or a bare catch-all needs a structured result.
+	const validate = (branches: unknown[]) => validateGraph({
+		agents: [agent("a")],
+		connections: [conn("c1", "a", "if-1", "a:out")],
+		controls: [{ id: "if-1", kind: "if", x: 0, y: 0, branches }],
+	});
+	let result = validate([
+		{ name: "done", field: "$count", value: "3", op: ">=", side: "top" },
+		{ name: "retry", field: "$count", value: "1", op: ">=", side: "bottom" },
+	]);
+	deepStrictEqual(result.ok, true, "the $count-only control validates");
+	deepStrictEqual(result.warnings ?? [], [], "a $count-only control does not warn about the missing schema");
+	passed++;
+	console.log("ok    a $count-only control does not warn about the missing schema");
+	result = validate([
+		{ name: "done", field: "$count", value: "3", op: ">=", side: "top" },
+		{ name: "x", field: "f", value: "1", side: "bottom" },
+	]);
+	deepStrictEqual((result.warnings ?? []).map((w) => w.code), ["if-source-no-schema"], "one content branch restores the no-schema warning");
+	passed++;
+	console.log("ok    one content branch restores the no-schema warning");
+	result = validate([{ name: "only", side: "top" }]);
+	deepStrictEqual((result.warnings ?? []).map((w) => w.code), ["if-source-no-schema"], "a bare catch-all still needs a structured result");
+	passed++;
+	console.log("ok    a catch-all-only control still warns about the missing schema");
+}
 check("a breakpointed source warns", {
 	agents: [agent("a", { breakpoint: true, settings: { outputSchema: { type: "object" } } })],
 	connections: [conn("c1", "a", "if-1", "a:out")],
@@ -275,6 +320,74 @@ check("a future control kind validates as a plain endpoint", {
 		deepStrictEqual(lowered.agents[0].outputPorts, ["x", "y"]);
 		deepStrictEqual(lowered.agents[0].bindings, [{ field: "f", port: "x", value: "1" }, { field: "f", port: "y" }]);
 		deepStrictEqual(lowered.agents[0].outputPortSides, undefined, "all-default sides keep the map off the clone");
+	});
+	attempt("a >= branch forwards op into the binding; == and absence drop it", () => {
+		const lowered = lowerControls({
+			agents: [agent("a")],
+			connections: [conn("c1", "a", "if-1", "a:out")],
+			controls: [{
+				id: "if-1", kind: "if", x: 0, y: 0,
+				branches: [
+					{ name: "late", field: "$count", value: "3", op: ">=" },
+					{ name: "hit", field: "v", value: "1", op: "==" },
+					{ name: "else" },
+				],
+			}],
+		} as never) as { agents: Array<{ bindings?: Array<Record<string, unknown>> }> };
+		deepStrictEqual(lowered.agents[0].bindings, [
+			{ field: "$count", port: "late", value: "3", op: ">=" },
+			{ field: "v", port: "hit", value: "1" },
+			{ port: "else" },
+		]);
+	});
+	attempt("a loop-authored if lowers to exactly its hand-authored $count twin", () => {
+		const loopAuthored = {
+			agents: [
+				agent("k"),
+				agent("c", { inputPorts: [{ name: "in", policy: "any-of" }] }),
+				agent("r", { settings: { outputSchema: { type: "object" } } }),
+				agent("t"),
+			],
+			connections: [
+				conn("c0", "k", "c", "k:out", "c:in"),
+				conn("c1", "c", "r", "c:out", "r:in"),
+				conn("c2", "r", "if-1", "r:out"), // the control's single unnamed input
+				conn("c3", "if-1", "t", "if-1:done", "t:in"),
+				conn("c4", "if-1", "c", "if-1:retry", "c:in"), // the back edge
+			],
+			controls: [{
+				id: "if-1", kind: "if", x: 50, y: 60,
+				branches: [
+					{ name: "done", field: "verdict", value: "approve" },
+					{ name: "exhausted", field: "$count", value: "3", op: ">=" },
+					{ name: "retry", field: "verdict" }, // the catch-all loops
+				],
+			}],
+		};
+		const twin = {
+			agents: [
+				agent("k"),
+				agent("c", { inputPorts: [{ name: "in", policy: "any-of" }] }),
+				agent("r", {
+					settings: { outputSchema: { type: "object" } },
+					outputPorts: ["done", "exhausted", "retry"],
+					bindings: [
+						{ field: "verdict", value: "approve", port: "done" },
+						{ field: "$count", value: "3", op: ">=", port: "exhausted" },
+						{ field: "verdict", port: "retry" },
+					],
+				}),
+				agent("t"),
+			],
+			connections: [
+				conn("c0", "k", "c", "k:out", "c:in"),
+				conn("c1", "c", "r", "c:out", "r:in"),
+				conn("c3", "r", "t", "r:done", "t:in"),
+				conn("c4", "r", "c", "r:retry", "c:in"),
+			],
+		};
+		deepStrictEqual(lowerControls(loopAuthored as never), twin);
+		deepStrictEqual(validateGraph(lowerControls(loopAuthored as never)).ok, true, "the lowered twin validates");
 	});
 	attempt("total over malformed records: normalize or skip, never throw", () => {
 		// A control with no feed is skipped whole; its edges vanish with it.

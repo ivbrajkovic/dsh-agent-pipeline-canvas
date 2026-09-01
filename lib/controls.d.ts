@@ -46,6 +46,9 @@ export declare function validateControls(graph: {
  *   - a branch authored `value: ""` lowers to a binding with NO `value` key
  *     (the executor's catch-all test is `value === undefined`, so a literal
  *     empty string would compare against "" and never catch);
+ *   - a `>=` branch forwards its `op` into the binding (the key drops for
+ *     `==`/absent — the house convention for non-defaults; `$count` fields
+ *     pass through untouched);
  *   - non-default branch sides forward into `A`'s `outputPortSides`, the map
  *     omitted when it would be empty (the house convention);
  *   - the `controls` key is absent from the result (it is never persisted).

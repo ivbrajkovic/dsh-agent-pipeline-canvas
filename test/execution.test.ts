@@ -264,6 +264,58 @@ const graph = (agents: unknown[], connections: unknown[]) => ({ agents, connecti
 	eq("bindings: a value-less entry is the catch-all whatever its field", evaluateBindings([{ field: "", port: "p" }], { action: "mail" }), "p");
 }
 
+// --- evaluateBindings: `$count` and the >= operator (docs/proposals/loops.md L1)
+{
+	// ">=" compares numerically: both sides must coerce to finite numbers,
+	// otherwise the row does not match (the honest quiet).
+	const bindings = [{ field: "score", value: "3", port: "high", op: ">=" }];
+	eq("op-ge: numeric match", evaluateBindings(bindings, { score: 4 }), "high");
+	eq("op-ge: match on the boundary, string-typed actual", evaluateBindings(bindings, { score: "3" }), "high");
+	eq("op-ge: below the threshold does not match", evaluateBindings(bindings, { score: 2 }), null);
+	eq("op-ge: a string-coerced non-number actual never matches", evaluateBindings(bindings, { score: "soon" }), null);
+	eq("op-ge: a non-finite actual never matches", evaluateBindings(bindings, { score: Infinity }), null);
+	eq("op-ge: a missing field never matches", evaluateBindings(bindings, {}), null);
+}
+{
+	// An absent or unknown op behaves as "==" — the kernel stays total over
+	// malformed declarations; validateGraph reports them.
+	eq("op-ge: unknown op falls back to equality", evaluateBindings([{ field: "f", value: "1", port: "p", op: "<" }] as never, { f: "1" }), "p");
+	eq("op-ge: an explicit == equals the absent default", evaluateBindings([{ field: "f", value: "1", port: "p", op: "==" }], { f: "1" }), "p");
+}
+{
+	// `$count` tests the firing's own sequence, not the record — the one row
+	// that matches with NO structured result (the loop counter at a loop tail).
+	const counter = [{ field: "$count", value: "2", port: "late", op: ">=" }];
+	eq("count-row: matches with no structured result at all", evaluateBindings(counter, undefined, 2), "late");
+	eq("count-row: below the threshold stays quiet", evaluateBindings(counter, undefined, 1), null);
+	eq("count-row: no count passed never matches", evaluateBindings(counter, undefined), null);
+	eq("count-row: == keeps the String-coerced fallback", evaluateBindings([{ field: "$count", value: "2", port: "p" }], undefined, 2), "p");
+	eq("count-row: >= with a junk value row is a quiet no-match", evaluateBindings([{ field: "$count", value: "soon", port: "p", op: ">=" }], undefined, 5), null);
+}
+{
+	// First match wins across mixed content/count rows (the loop's escape
+	// ladder: approve first, exhaustion second, retry as the catch-all).
+	const mixed = [
+		{ field: "verdict", value: "approve", port: "done" },
+		{ field: "$count", value: "3", port: "exhausted", op: ">=" },
+		{ port: "retry" },
+	];
+	eq("count-mix: the content row wins when it matches", evaluateBindings(mixed, { verdict: "approve" }, 3), "done");
+	eq("count-mix: the count row fires on the third iteration", evaluateBindings(mixed, { verdict: "fix" }, 3), "exhausted");
+	eq("count-mix: below the threshold the catch-all takes it", evaluateBindings(mixed, { verdict: "fix" }, 2), "retry");
+	eq("count-mix: without a structured result only the count row can match", evaluateBindings(mixed, undefined, 2), null);
+	eq("count-mix: the count row still matches without a record", evaluateBindings(mixed, undefined, 3), "exhausted");
+}
+{
+	// Catch-all interplay: a valueless row is the catch-all whatever its field
+	// — and a catch-all STILL requires a structured result, even a $count one.
+	eq("count-catchall: a valueless $count row is the catch-all", evaluateBindings([{ field: "$count", port: "p" }], { a: 1 }, 9), "p");
+	eq("count-catchall: an empty-string $count value is the catch-all too", evaluateBindings([{ field: "$count", value: "", port: "p" }], { a: 1 }, 9), "p");
+	eq("count-catchall: the $count catch-all still needs a structured result", evaluateBindings([{ field: "$count", port: "p" }], undefined, 9), null);
+	eq("count-catchall: a plain catch-all after a count row stays quiet without a record", evaluateBindings([{ field: "$count", value: "3", port: "late", op: ">=" }, { port: "other" }], undefined, 1), null);
+	eq("count-catchall: the plain catch-all fires on a structured no-match", evaluateBindings([{ field: "$count", value: "3", port: "late", op: ">=" }, { port: "other" }], { a: 1 }, 1), "other");
+}
+
 // --- compareFiringIds (the projection's deterministic firing order) -------
 {
 	eq("firing ids: numeric order beyond 999 (the P5 scrutiny note)",

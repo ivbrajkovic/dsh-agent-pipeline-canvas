@@ -152,6 +152,12 @@ check("bindings not an array", { agents: [{ id: "a", name: "a", description: "",
 check("binding without a field", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["out"], bindings: [{ port: "out" }] }], connections: [] }, false, ["agent-binding-invalid"]);
 check("binding without a port", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "action" }] }], connections: [] }, false, ["agent-binding-invalid"]);
 
+// --- binding ops (docs/proposals/loops.md L1 — the hand-authored loop) ----
+check("a >= binding over the reserved $count validates", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["retry", "done"], bindings: [{ field: "$count", value: "1", op: ">=", port: "retry" }, { field: "$count", value: "3", op: ">=", port: "done" }] }], connections: [] }, true, []);
+check("an explicit == binding validates like the absent default", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "action", value: "mail", op: "==", port: "out" }] }], connections: [] }, true, []);
+check("binding with an unknown op", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "f", value: "1", op: "<", port: "out" }] }], connections: [] }, false, ["agent-binding-invalid"]);
+check("a >= binding whose value is not a finite number", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, bindings: [{ field: "f", value: "soon", op: ">=", port: "out" }] }], connections: [] }, false, ["agent-binding-invalid"]);
+
 // --- duplicate ids / connections -----------------------------------
 check("duplicate agent id", { agents: [agent("a"), agent("a")], connections: [] }, false, ["agent-duplicate-id"]);
 check("duplicate connection", { agents: [agent("a"), agent("b")], connections: [conn("c1", "a", "b"), conn("c2", "a", "b")] }, false, ["connection-duplicate"]);
