@@ -91,8 +91,14 @@
 }
 .palette-item:active { cursor: grabbing; }
 .palette-icon { width: 12px; height: 12px; border-radius: 3px; background: var(--dsw-alias-brand-primary); }
-/* The If brick: a dashed ring — the same mark the control node wears. */
-.palette-icon.if { background: transparent; border: 2px dashed var(--dsw-alias-brand-primary); border-radius: 50%; }
+/* The If brick: the decision diamond outline — the same mark the node wears. */
+.palette-icon.if {
+	background: transparent;
+	border: 2px solid var(--dsw-alias-brand-primary);
+	border-radius: 2px;
+	transform: rotate(45deg) scale(.82);
+	margin: 0 2px;
+}
 .pipeline-canvas {
 	position: relative;
 	flex: 1;
@@ -268,11 +274,47 @@
 }
 .pipeline-port.out { border-color: var(--dsw-alias-state-success-primary); }
 .pipeline-port.hover { box-shadow: 0 0 0 4px var(--dsw-alias-brand-primary); }
-/* The if control node: same footprint as an agent, kind-styled — a dashed
-   brand-tinted border marks the fork as a decision, not a model call. */
-.pipeline-node.control { border-style: dashed; border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, var(--dsw-alias-border-l2)); }
-.pipeline-node.control.selected { border-style: dashed; }
-.pipeline-node.control .node-name { font-style: italic; }
+/* The if control node: the flowchart DECISION shape — a diamond, taller than
+   an agent (150×84) — so the fork reads as a decision, not a model call. The
+   node box itself is a transparent hit area; the shape is an SVG layer whose
+   border follows the diamond (a clip-path on the box would clip the node's
+   own buttons away with the corners). Ticks anchor on the four vertices. */
+.pipeline-node.control {
+	width: 150px;
+	height: 84px;
+	background: transparent;
+	border: none;
+}
+.control-shape {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+}
+.control-shape polygon {
+	fill: var(--dsw-alias-bg-layer-2);
+	stroke: color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, var(--dsw-alias-border-l2));
+	stroke-width: 1.5;
+	vector-effect: non-scaling-stroke;
+}
+.pipeline-node.control.selected {
+	/* The base selection ring is rectangular — on the diamond the stroke and
+	   glow on the shape layer carry the selection instead. */
+	box-shadow: none;
+}
+.pipeline-node.control.selected .control-shape polygon {
+	stroke: var(--dsw-alias-brand-primary);
+	stroke-width: 2.5;
+}
+.pipeline-node.control.selected .control-shape {
+	filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dsw-alias-brand-primary) 70%, transparent));
+}
+/* The shape layer is absolutely positioned, which paints it over the static
+   text — lift the labels into the positioned layer (they come later in the
+   DOM, so this alone puts them back on top). */
+.pipeline-node.control .node-name,
+.pipeline-node.control .node-sub { position: relative; }
 /* One labeled tick per branch: a wrapper centered on the anchor carrying the
    dot plus the visible branch name, oriented away from the node edge. The
    wrapper never catches the pointer — only its tick does. */

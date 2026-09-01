@@ -99,6 +99,12 @@ function PipelineView({
 }) {
 	const NODE_W = 150;
 	const NODE_H = 58;
+	// The control's diamond (the flowchart decision shape): its bounding box.
+	// Ticks anchor on the four VERTICES — a single branch lands exactly on its
+	// vertex (frac 1/2); branches sharing a side spread along that axis and
+	// if-side-conflict tells the author to spread them.
+	const CONTROL_W = 150;
+	const CONTROL_H = 84;
 	const [agents, setAgents] = React.useState<CanvasAgent[]>([]);
 	const [connections, setConnections] = React.useState<CanvasConnection[]>([]);
 	// The if controls: first-class canvas nodes (the honest graph — what the
@@ -256,11 +262,12 @@ function PipelineView({
 		return { x: a.x + NODE_W * frac, y: a.y + NODE_H, side };
 	}
 
-	// The control's port-anchor model: one unnamed input tick on the left edge,
-	// one labeled tick per branch positioned by the branch `side` (default
-	// right), same stacking fraction as agent ports when branches share a side.
+	// The control's port-anchor model over its diamond: one unnamed input tick
+	// on the left vertex, one labeled tick per branch on its declared edge's
+	// vertex (default right), same stacking fraction as agent ports when
+	// branches share a side.
 	function controlInputAnchor(k: CanvasControl): { x: number; y: number; side: Side } {
-		return { x: k.x, y: k.y + NODE_H / 2, side: "left" };
+		return { x: k.x, y: k.y + CONTROL_H / 2, side: "left" };
 	}
 	function branchSideOf(k: CanvasControl, branch: string): Side {
 		const spec = k.branches.find((b) => String(b.name ?? "") === branch);
@@ -271,10 +278,10 @@ function PipelineView({
 		const names = branchNamesOf(k);
 		const sameSide = names.filter((n) => branchSideOf(k, n) === side);
 		const frac = (Math.max(0, sameSide.indexOf(branch)) + 1) / (sameSide.length + 1);
-		if (side === "left") return { x: k.x, y: k.y + NODE_H * frac, side };
-		if (side === "right") return { x: k.x + NODE_W, y: k.y + NODE_H * frac, side };
-		if (side === "top") return { x: k.x + NODE_W * frac, y: k.y, side };
-		return { x: k.x + NODE_W * frac, y: k.y + NODE_H, side };
+		if (side === "left") return { x: k.x, y: k.y + CONTROL_H * frac, side };
+		if (side === "right") return { x: k.x + CONTROL_W, y: k.y + CONTROL_H * frac, side };
+		if (side === "top") return { x: k.x + CONTROL_W * frac, y: k.y, side };
+		return { x: k.x + CONTROL_W * frac, y: k.y + CONTROL_H, side };
 	}
 
 	// node drag (pointer capture on the node). Primary button only: a
@@ -953,7 +960,7 @@ function PipelineView({
 			addAgent(p.x - NODE_W / 2, p.y - NODE_H / 2);
 		} else if (e.dataTransfer.getData("application/x-pipeline-control") === "if") {
 			const p = canvasPoint(e.clientX, e.clientY);
-			addControl(p.x - NODE_W / 2, p.y - NODE_H / 2);
+			addControl(p.x - CONTROL_W / 2, p.y - CONTROL_H / 2);
 		}
 	}
 
@@ -1317,11 +1324,14 @@ function PipelineView({
 		return (validation.warnings ?? []).filter((w) => w.message.indexOf('"' + control.id + '"') !== -1);
 	}
 
-	// The control nodes: kind-styled, one unnamed input tick on the left edge,
-	// one labeled tick per branch on its declared edge (stacking when branches
-	// share a side) — the fork is visible without opening any panel. No run
-	// statuses and no breakpoint button: a control never fires a child session
-	// (the projection knows agents only).
+	// The control nodes: the flowchart DECISION shape — a diamond — one
+	// unnamed input tick on the left vertex, one labeled tick per branch on
+	// its declared edge's vertex (stacking when branches share a side) — the
+	// fork is visible without opening any panel. The shape itself is an SVG
+	// layer (not a clip-path on the node box): the border follows the diamond
+	// and the node's buttons stay unclipped. No run statuses and no
+	// breakpoint button: a control never fires a child session (the
+	// projection knows agents only).
 	const controlNodes = controls.map((control) => {
 		const selected = control.id === selectedId;
 		const hoveredIn = hoverTarget === control.id && gesture;
@@ -1338,6 +1348,9 @@ function PipelineView({
 				onPointerUp={onNodePointerUp}
 				onContextMenu={(e) => { onNodeContextMenu(e, control.id); }}
 			>
+				<svg className="control-shape" viewBox={"0 0 " + CONTROL_W + " " + CONTROL_H} preserveAspectRatio="none" aria-hidden="true">
+					<polygon points={CONTROL_W / 2 + ",0 " + CONTROL_W + "," + CONTROL_H / 2 + " " + CONTROL_W / 2 + "," + CONTROL_H + " 0," + CONTROL_H / 2} />
+				</svg>
 				<button
 					className="node-edit"
 					title="Edit branches"
@@ -1362,7 +1375,7 @@ function PipelineView({
 				) : null}
 				<div
 					className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
-					style={{ left: "0px", top: (NODE_H / 2) + "px" }}
+					style={{ left: "0px", top: (CONTROL_H / 2) + "px" }}
 					onPointerEnter={(e) => { onInputPointerEnter(e, control.id); }}
 					onPointerLeave={(e) => { onInputPointerLeave(e, control.id); }}
 					// The input tick only swallows the primary press — a
