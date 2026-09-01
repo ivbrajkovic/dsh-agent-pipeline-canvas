@@ -268,6 +268,18 @@ menu opens on a control with its two entries; `pnpm test` green.
 
 *(append only on material divergence)*
 
+- **C2**: the view's result-shaping path could not stay untouched as C3
+  pins it: `recordToResult` classifies the record's graph snapshot for the
+  result modal's runs list and contract outputs, and the snapshot is the
+  HONEST graph — its control edges are not agent adjacency, so
+  `classifyGraph`/`topoOrder` see the if's source as terminal and a
+  control-sourced target as a root, putting the source's text output into
+  the modal's outputs (a phantom contract entry the run never produced).
+  `recordToResult` therefore lowers the snapshot first (`lowerControls`,
+  the same rewrite the run path applies) and classifies the lowered form —
+  the modal components themselves stay untouched, and controls still never
+  appear in runs or outputs.
+
 ## C3 — Run experience: highlight, quiet branches, warnings
 
 **Goal.** Running a graph with an if control behaves exactly like the

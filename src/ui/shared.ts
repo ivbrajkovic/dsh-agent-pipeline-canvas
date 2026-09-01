@@ -8,7 +8,7 @@
 // (src/client.tsx): the dynamic ctx proxy rejects property reads of undeclared
 // services, and nested Remote namespaces need their own dotted entry.
 
-import type { AgentSettings, InputPortSpec, OutputBinding, PipelineGraph, PortSide, RunFiring } from "../types.ts";
+import type { AgentSettings, Connection, ControlNode, IfBranch, InputPortSpec, OutputBinding, PipelineGraph, PortSide, RunFiring } from "../types.ts";
 
 export const ENDPOINT = "/dsh-agent-pipeline";
 export const SAVE_DEBOUNCE_MS = 250;
@@ -55,10 +55,30 @@ export interface CanvasAgent {
 }
 
 /**
+ * A control node as held in React state — the canvas twin of ControlNode
+ * (types.ts), with the branch sides included (each branch tick renders on its
+ * declared node edge). `kind` is held as a plain string so a hand-edited file
+ * carrying a future control kind round-trips untouched: the canvas renders
+ * branch ticks only for "if" and the graph contract treats other kinds as
+ * plain endpoints (validateControls), so nothing is lost across a
+ * load-and-save.
+ */
+export interface CanvasControl {
+	id: string;
+	kind: string;
+	branches: IfBranch[];
+	x: number;
+	y: number;
+}
+
+/**
  * A connection as held in React state. The ports are PORT NAMES (not wire
  * ids), defaulting to "out"/"in" — buildGraph composes the wire ids
  * `<agentId>:<name>` the graph and kernel resolve against. Undeclared port
- * names on an agent mean its single default port.
+ * names on an agent mean its single default port. Control endpoints break the
+ * default composition: a control-sourced edge's sourcePort is the BRANCH name
+ * (always serialized as `<controlId>:<branch>`), and a control-targeted edge
+ * serializes with NO targetPort — the control takes a single unnamed input.
  */
 export interface CanvasConnection {
 	id: string;
@@ -216,8 +236,18 @@ export function absolutePath(path: string, cwd: string | undefined): string {
 	return base.length > 0 ? base + "/" + path : path;
 }
 
-/** Serialize the internal graph to the wire/persisted shape (matches the View JSON contract). */
-export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[]): PipelineGraph {
+/**
+ * Serialize the internal graph to the wire/persisted shape (matches the View JSON contract).
+ * `controls` is optional so legacy callers keep composing exactly today's
+ * graph — with no controls (or an empty list) the `controls` key is omitted
+ * and the output is byte-identical to the pre-control shape (additive schema).
+ * Control endpoints serialize by their own rules: a control-sourced connection
+ * always carries the branch name as `sourcePort`, and a control-targeted one
+ * carries NO `targetPort` (the unconditional ":in" composition would fail the
+ * control's single-unnamed-input rule).
+ */
+export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[], controls: CanvasControl[] = []): PipelineGraph {
+	const controlIds = new Set(controls.map((k) => k.id));
 	return {
 		agents: agents.map((a) => ({
 			id: a.id,
@@ -243,10 +273,31 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 			source: c.source,
 			target: c.target,
 			// Wire ids compose from the PORT NAMES (default out/in — byte-identical
-			// to the historical shape on default graphs).
+			// to the historical shape on default graphs). A control source writes
+			// its BRANCH name even at the state default, so the branch is always
+			// named; a control target omits the key entirely — the pinned honest
+			// shape (a control takes a single unnamed input), read back as
+			// unknown by the graph contract, hence the cast.
 			sourcePort: c.source + ":" + (c.sourcePort ?? "out"),
-			targetPort: c.target + ":" + (c.targetPort ?? "in"),
-		})),
+			...(controlIds.has(c.target) ? {} : { targetPort: c.target + ":" + (c.targetPort ?? "in") }),
+		})) as Connection[],
+		// Branch rules serialize minimal: an empty field/value pair drops both
+		// keys (a catch-all), and a default side drops `side` — the same
+		// non-default-sides-only convention the port editor uses.
+		...(controls.length > 0 ? {
+			controls: controls.map((k) => ({
+				id: k.id,
+				kind: k.kind,
+				branches: k.branches.map((b) => ({
+					name: b.name,
+					...(typeof b.field === "string" && b.field.length > 0 ? { field: b.field } : {}),
+					...(b.value !== undefined && b.value !== "" ? { value: b.value } : {}),
+					...(b.side !== undefined && b.side !== "right" ? { side: b.side } : {}),
+				})) as IfBranch[],
+				x: Math.round(k.x),
+				y: Math.round(k.y),
+			})) as ControlNode[],
+		} : {}),
 	};
 }
 
@@ -303,6 +354,44 @@ export function loadAgent(raw: unknown): {
 		...(outputPortSides !== undefined ? { outputPortSides } : {}),
 		...(bindings !== undefined ? { bindings } : {}),
 	};
+}
+
+/**
+ * Read the persisted controls back into React state: object entries with a
+ * non-empty id survive, branches normalize to the editor's row shape (a
+ * missing field becomes "", an unknown side falls back to the default) so the
+ * canvas state is always clean. Malformed entries are skipped — validation
+ * reports them from the persisted file, and the next save canonicalizes the
+ * graph to what the canvas holds.
+ */
+export function loadControls(raw: unknown): CanvasControl[] {
+	if (!Array.isArray(raw)) return [];
+	const out: CanvasControl[] = [];
+	for (const entry of raw) {
+		if (entry == null || typeof entry !== "object" || Array.isArray(entry)) continue;
+		const rec = entry as { id?: unknown; kind?: unknown; branches?: unknown; x?: unknown; y?: unknown };
+		const id = rec.id == null ? "" : String(rec.id);
+		if (id.length === 0) continue;
+		const branches = Array.isArray(rec.branches) ? rec.branches.map((b: unknown): IfBranch | null => {
+			if (b == null || typeof b !== "object" || Array.isArray(b)) return null;
+			const br = b as { name?: unknown; field?: unknown; value?: unknown; side?: unknown };
+			const side = br.side === "left" || br.side === "right" || br.side === "top" || br.side === "bottom" ? br.side : undefined;
+			return {
+				name: br.name == null ? "" : String(br.name),
+				field: typeof br.field === "string" ? br.field : "",
+				...(br.value === undefined ? {} : { value: String(br.value) }),
+				...(side !== undefined ? { side } : {}),
+			};
+		}).filter((b): b is IfBranch => b !== null) : [];
+		out.push({
+			id,
+			kind: rec.kind == null ? "if" : String(rec.kind),
+			branches,
+			x: Number(rec.x) || 0,
+			y: Number(rec.y) || 0,
+		});
+	}
+	return out;
 }
 
 function loadSettingsShape(raw: unknown): (AgentSettings & { persona?: string }) | undefined {
