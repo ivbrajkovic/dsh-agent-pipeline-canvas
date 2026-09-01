@@ -12,12 +12,13 @@ import * as React from "react";
 import { Menu } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { MenuEntry } from "@deepseek-ai/dsh-client-ui-primitives";
 
-/** Where and on whom the menu is open: the canvas node id it targets (an
- * agent or a control — the dispatcher routes by node kind) and the viewport
- * point (clientX/clientY) it opened at — the portal anchors a zero-size rect
- * there. */
+/** Where and on whom the menu is open: the canvas object it targets — an
+ * agent/control node id or a connection id — and the viewport point
+ * (clientX/clientY) it opened at — the portal anchors a zero-size rect
+ * there. The dispatcher in the view routes by `kind`. */
 export interface NodeMenuTarget {
-	nodeId: string;
+	kind: "node" | "edge";
+	id: string;
 	x: number;
 	y: number;
 }

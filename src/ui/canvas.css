@@ -137,6 +137,24 @@
    classes. */
 .pipeline-edge.pipeline-edge-fired { stroke: var(--dsw-alias-state-success-primary); stroke-width: 2.5; }
 .pipeline-edge.pipeline-edge-quiet { opacity: 0.35; stroke-dasharray: 6 4; }
+/* Edge interaction: a transparent 12px stroke rides above each wire (a 2px
+   line is unclickable) and carries hover plus selection. Selection — the
+   transient "this wire is targeted" emphasis, brand stroke and arrowhead —
+   wins over the run-state styling, including the quiet dim. */
+.pipeline-edge-hit {
+	fill: none;
+	stroke: transparent;
+	stroke-width: 12;
+	pointer-events: stroke;
+	cursor: pointer;
+}
+.pipeline-edge-group:hover .pipeline-edge { stroke-width: 3; }
+.pipeline-edge.pipeline-edge-selected {
+	stroke: var(--dsw-alias-brand-primary);
+	stroke-width: 2.5;
+	opacity: 1;
+}
+.pipeline-arrowfill-selected { fill: var(--dsw-alias-brand-primary); }
 /* Named-port edge labels ("mail → data") at the edge midpoint: small, muted,
    and stroked with the canvas background so they read over the edge line. */
 .pipeline-edge-label {
@@ -279,6 +297,10 @@
 	border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent);
 	border-style: solid;
 }
+/* Ports hide at rest — a node's border stays uninterrupted and wires land
+   flush on it. A node reveals its ticks (`.reveal-full`: hover or selection,
+   or it is the wire drag's source) or just its input ticks (`.reveal-in`: a
+   wire-drag drop target); hidden ticks never catch the pointer. */
 .pipeline-port {
 	position: absolute;
 	width: 14px;
@@ -289,6 +311,14 @@
 	cursor: crosshair;
 	/* left/top carry the anchor point (see portAnchor) — center on it. */
 	transform: translate(-50%, -50%);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 0.12s ease;
+}
+.pipeline-node.reveal-full .pipeline-port,
+.pipeline-node.reveal-in > .pipeline-port.in { opacity: 1; pointer-events: auto; }
+@media (prefers-reduced-motion: reduce) {
+	.pipeline-port { transition: none; }
 }
 .pipeline-port.out { border-color: var(--dsw-alias-state-success-primary); }
 .pipeline-port.hover { box-shadow: 0 0 0 4px var(--dsw-alias-brand-primary); }
@@ -351,7 +381,8 @@
    chip DIAGONALLY off the vertex — outward AND lateral — because the branch
    wire always leaves along the outward axis, and a label placed straight out
    sits inside its own wire. The wrapper never catches the pointer — only its
-   tick does. */
+   tick does, and only while revealed (the label stays visible at rest: it
+   carries the fork's semantics, the dot is just the affordance). */
 .control-branch {
 	position: absolute;
 	width: 18px;
@@ -359,7 +390,7 @@
 	transform: translate(-50%, -50%);
 	pointer-events: none;
 }
-.control-branch .pipeline-port { position: static; transform: none; pointer-events: auto; }
+.control-branch .pipeline-port { position: static; transform: none; }
 .control-branch .branch-label {
 	position: absolute;
 	font-size: 9px;

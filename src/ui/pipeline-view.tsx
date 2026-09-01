@@ -183,8 +183,25 @@ function PipelineView({
 	const [controls, setControls] = React.useState<CanvasControl[]>([]);
 	const [seq, setSeq] = React.useState(1);
 	const [selectedId, setSelectedId] = React.useState<string | null>(null);
+	// The selected CONNECTION, when the selection is an edge — selection is a
+	// node or an edge, never both (selectNode/selectEdge keep that invariant),
+	// so the Delete key and the toolbar button always act on one thing.
+	const [selectedEdgeId, setSelectedEdgeId] = React.useState<string | null>(null);
+	/** Select a node (agent or control) — or clear the selection with null. */
+	function selectNode(id: string | null) {
+		setSelectedId(id);
+		setSelectedEdgeId(null);
+	}
+	/** Select a connection by id — or clear the selection with null. */
+	function selectEdge(id: string | null) {
+		setSelectedEdgeId(id);
+		setSelectedId(null);
+	}
 	const [connectCursor, setConnectCursor] = React.useState<{ x: number; y: number } | null>(null);
 	const [hoverTarget, setHoverTarget] = React.useState<string | null>(null);
+	// The node under the pointer at rest: its ports reveal on hover (and on
+	// selection) — at rest every border stays uninterrupted, wires land flush.
+	const [hoverNodeId, setHoverNodeId] = React.useState<string | null>(null);
 	const [showJson, setShowJson] = React.useState(false);
 	const [configAgentId, setConfigAgentId] = React.useState<string | null>(null);
 	const [configControlId, setConfigControlId] = React.useState<string | null>(null);
@@ -269,13 +286,18 @@ function PipelineView({
 		if (sseRef.current !== null) { sseRef.current.close(); sseRef.current = null; }
 	}, []);
 
-	// A menu whose node vanished (Delete key, toolbar Delete, the menu's own
+	// A menu whose target vanished (Delete key, toolbar Delete, the menu's own
 	// delete row, Clear) has nothing left to act on — close it. Controls are
 	// watched beside agents: a menu opened on a control must not survive that
-	// control's deletion.
+	// control's deletion. Edge menus watch the connection list the same way.
 	React.useEffect(() => {
-		if (nodeMenu !== null && !agents.some((a) => a.id === nodeMenu.nodeId) && !controls.some((k) => k.id === nodeMenu.nodeId)) setNodeMenu(null);
-	}, [agents, controls, nodeMenu]);
+		if (nodeMenu === null) return;
+		if (nodeMenu.kind === "edge") {
+			if (!connections.some((c) => c.id === nodeMenu.id)) setNodeMenu(null);
+			return;
+		}
+		if (!agents.some((a) => a.id === nodeMenu.id) && !controls.some((k) => k.id === nodeMenu.id)) setNodeMenu(null);
+	}, [agents, connections, controls, nodeMenu]);
 
 	function newId(prefix: string): string {
 		idRef.current += 1;
@@ -289,7 +311,7 @@ function PipelineView({
 		const agent: CanvasAgent = { id: newId("agent"), name: "Agent " + seq, description: "", instructions: "", x, y };
 		setAgents((prev) => prev.concat([agent]));
 		setSeq((s) => s + 1);
-		setSelectedId(agent.id);
+		selectNode(agent.id);
 		return agent;
 	}
 	// A fresh if starts with a single catch-all branch ("else") — a valid,
@@ -298,7 +320,7 @@ function PipelineView({
 	function addControl(x: number, y: number): CanvasControl {
 		const control: CanvasControl = { id: newId("if"), kind: "if", branches: [{ name: "else", field: "" }], x, y };
 		setControls((prev) => prev.concat([control]));
-		setSelectedId(control.id);
+		selectNode(control.id);
 		return control;
 	}
 	// Per-port anchor points (edge-routing iteration 2): each port renders on
@@ -363,7 +385,7 @@ function PipelineView({
 		e.preventDefault(); e.stopPropagation();
 		if (canvasRef.current) canvasRef.current.focus();
 		e.currentTarget.setPointerCapture(e.pointerId);
-		setSelectedId(id);
+		selectNode(id);
 		dragRef.current = { id, kind, startClientX: e.clientX, startClientY: e.clientY, startX: x, startY: y };
 	}
 	function onNodePointerMove(e: React.PointerEvent) {
@@ -390,17 +412,27 @@ function PipelineView({
 		const p = canvasPoint(e.clientX, e.clientY);
 		connectRef.current = { from: nodeId, cursor: { x: p.x, y: p.y }, hoverTarget: null, startPort: port };
 		setConnectCursor({ x: p.x, y: p.y });
-		setSelectedId(nodeId);
+		selectNode(nodeId);
 	}
-	function onInputPointerEnter(e: React.PointerEvent, nodeId: string) {
-		e.stopPropagation();
-		if (!connectRef.current) return;
-		connectRef.current.hoverTarget = nodeId;
-		setHoverTarget(nodeId);
+	// Hover + drop targeting ride the NODE, not the ticks: at rest hovering a
+	// node reveals its ports; during a wire drag every node other than the
+	// source is a live drop target — the WHOLE node accepts the drop, not just
+	// the 14px tick (ports are hidden at rest, so the generous target is what
+	// keeps wiring easy). Enter/leave semantics keep this stable across the
+	// node's children (ticks, badge, breakpoint button).
+	function onNodePointerEnter(e: React.PointerEvent, nodeId: string) {
+		setHoverNodeId(nodeId);
+		const c = connectRef.current;
+		if (c !== null && c.from !== nodeId) {
+			c.hoverTarget = nodeId;
+			setHoverTarget(nodeId);
+		}
 	}
-	function onInputPointerLeave(e: React.PointerEvent, nodeId: string) {
-		if (connectRef.current && connectRef.current.hoverTarget === nodeId) {
-			connectRef.current.hoverTarget = null;
+	function onNodePointerLeave(e: React.PointerEvent, nodeId: string) {
+		setHoverNodeId((prev) => (prev === nodeId ? null : prev));
+		const c = connectRef.current;
+		if (c !== null && c.hoverTarget === nodeId) {
+			c.hoverTarget = null;
 			setHoverTarget(null);
 		}
 	}
@@ -419,6 +451,12 @@ function PipelineView({
 			const exists = connections.some((conn) => conn.source === c.from && conn.target === target);
 			if (!exists) {
 				const conn = { id: newId("conn"), source: c.from, target };
+				// The snap: the drop aims at the target's input port nearest
+				// the cursor (the temp wire landed on it); the picker — when
+				// it opens — and the wire preselect it.
+				const tgtPorts = inputPortNamesOf(target);
+				const snap = nearestInputPort(target, c.cursor);
+				const targetPort = snap !== null && tgtPorts.includes(snap) ? snap : tgtPorts[0];
 				const fromControl = controls.find((k) => k.id === c.from);
 				const targetControl = controls.find((k) => k.id === target);
 				if (fromControl !== undefined) {
@@ -431,7 +469,7 @@ function PipelineView({
 					setEdgeDraft({
 						...conn,
 						sourcePort: c.startPort !== undefined && branches.includes(c.startPort) ? c.startPort : (branches[0] ?? ""),
-						targetPort: inputPortNamesOf(target)[0],
+						targetPort,
 					});
 				} else if (targetControl !== undefined) {
 					// Agent → control: the if owns the source's whole emission
@@ -452,14 +490,13 @@ function PipelineView({
 					// source side.
 					const srcPorts = outputPortNamesOf(c.from);
 					const sourcePort = c.startPort && srcPorts.includes(c.startPort) ? c.startPort : srcPorts[0];
-					const tgtPorts = inputPortNamesOf(target);
 					if (srcPorts.length > 1 || tgtPorts.length > 1) {
-						setEdgeDraft({ ...conn, sourcePort, targetPort: tgtPorts[0] });
+						setEdgeDraft({ ...conn, sourcePort, targetPort });
 					} else {
 						setConnections((prev) => prev.concat([{
 							...conn,
 							...(sourcePort !== "out" ? { sourcePort } : {}),
-							...(tgtPorts[0] !== "in" ? { targetPort: tgtPorts[0] } : {}),
+							...(targetPort !== "in" ? { targetPort } : {}),
 						}]));
 					}
 				}
@@ -475,10 +512,11 @@ function PipelineView({
 			setHoverTarget(null);
 			setConnectCursor(null);
 		}
+		setHoverNodeId(null);
 	}
 	function onCanvasPointerDown(e: React.PointerEvent) {
 		if (canvasRef.current) canvasRef.current.focus();
-		setSelectedId(null);
+		selectNode(null);
 		if (connectRef.current) {
 			connectRef.current = null;
 			setHoverTarget(null);
@@ -496,9 +534,13 @@ function PipelineView({
 	// control removes just its own edges. Shared by the toolbar Delete, the
 	// Delete/Backspace key, and the context menu's delete row.
 	function deleteNode(nodeId: string) {
+		// The edge selection dies with the node when the selected connection
+		// is one the removal takes with it.
+		const selectedConn = selectedEdgeId !== null ? connections.find((c) => c.id === selectedEdgeId) : undefined;
 		if (controls.some((k) => k.id === nodeId)) {
 			setControls((prev) => prev.filter((k) => k.id !== nodeId));
 			setConnections((prev) => prev.filter((c) => c.source !== nodeId && c.target !== nodeId));
+			if (selectedConn !== undefined && (selectedConn.source === nodeId || selectedConn.target === nodeId)) setSelectedEdgeId(null);
 		} else {
 			const dying = new Set(
 				controls.filter((k) => connections.some((c) => c.source === nodeId && c.target === k.id)).map((k) => k.id),
@@ -507,15 +549,29 @@ function PipelineView({
 			setControls((prev) => prev.filter((k) => !dying.has(k.id)));
 			setConnections((prev) => prev.filter((c) =>
 				c.source !== nodeId && c.target !== nodeId && !dying.has(c.source) && !dying.has(c.target)));
+			if (selectedConn !== undefined
+				&& (selectedConn.source === nodeId || selectedConn.target === nodeId || dying.has(selectedConn.source) || dying.has(selectedConn.target))) {
+				setSelectedEdgeId(null);
+			}
 		}
 		if (selectedId === nodeId) setSelectedId(null);
 	}
+	// Remove one connection by id — the direct answer to "undo a wire"
+	// (previously only deleting an agent removed its connections). Shared by
+	// the toolbar Delete, the Delete/Backspace key, and the edge context menu.
+	function deleteEdge(connId: string) {
+		setConnections((prev) => prev.filter((c) => c.id !== connId));
+		if (selectedEdgeId === connId) setSelectedEdgeId(null);
+	}
 	function deleteSelected() {
-		if (!selectedId) return;
-		deleteNode(selectedId);
+		if (selectedId) {
+			deleteNode(selectedId);
+			return;
+		}
+		if (selectedEdgeId) deleteEdge(selectedEdgeId);
 	}
 	function clearAll() {
-		setAgents([]); setConnections([]); setControls([]); setSelectedId(null); setHoverTarget(null); setConnectCursor(null);
+		setAgents([]); setConnections([]); setControls([]); selectNode(null); setHoverTarget(null); setConnectCursor(null);
 		dragRef.current = null; connectRef.current = null;
 		setSeq(1); idRef.current = 0;
 		setRunResult(null); setResultOpen(false); setShowRunModal(false); setDoneRun(null);
@@ -531,14 +587,21 @@ function PipelineView({
 	// node (live, paused, and restored-last-run records all project one; a
 	// never-fired node shows the row disabled, and disabled rows never
 	// dispatch). A control never fires a child session, so its menu carries
-	// only Edit branches and Delete control.
+	// only Edit branches and Delete control. A connection's menu (right-click
+	// the wire) carries just Delete connection.
 	function onNodeContextMenu(e: React.MouseEvent, nodeId: string) {
 		e.preventDefault(); e.stopPropagation();
-		setSelectedId(nodeId);
+		selectNode(nodeId);
 		// A connection gesture owns the pointer; it keeps its cancel path
 		// (Escape) and the right-click opens nothing.
 		if (connectRef.current) return;
-		setNodeMenu({ nodeId, x: e.clientX, y: e.clientY });
+		setNodeMenu({ kind: "node", id: nodeId, x: e.clientX, y: e.clientY });
+	}
+	function onEdgeContextMenu(e: React.MouseEvent, connId: string) {
+		e.preventDefault(); e.stopPropagation();
+		selectEdge(connId);
+		if (connectRef.current) return;
+		setNodeMenu({ kind: "edge", id: connId, x: e.clientX, y: e.clientY });
 	}
 	function nodeMenuEntries(node: CanvasAgent | CanvasControl): MenuEntry[] {
 		if ("branches" in node) {
@@ -560,7 +623,11 @@ function PipelineView({
 	}
 	function runNodeMenuAction(id: string) {
 		if (nodeMenu === null) return;
-		const nodeId = nodeMenu.nodeId;
+		if (nodeMenu.kind === "edge") {
+			if (id === "delete") deleteEdge(nodeMenu.id);
+			return;
+		}
+		const nodeId = nodeMenu.id;
 		const menuIsControl = controls.some((k) => k.id === nodeId);
 		if (id === "edit") {
 			// Route by node kind: an agent opens its config panel, a control
@@ -1070,7 +1137,10 @@ function PipelineView({
 	// must not pop the new session's restored lastRun open), a pending
 	// debounced save (a timer scheduled for the old session would write the
 	// OLD graph into the NEW session's file — the callback reads stateRef at
-	// fire time), and a node menu anchored to ids the new graph may reuse.
+	// fire time), a node menu anchored to ids the new graph may reuse, and
+	// the selection — a selected wire must not survive into a graph whose
+	// ids (conn-N is a per-session counter) may collide, or Delete would
+	// remove the NEW session's connection.
 	React.useEffect(() => {
 		disconnectRunEvents();
 		setActiveRun(null);
@@ -1078,6 +1148,7 @@ function PipelineView({
 		setRunResult(null);
 		setResultOpen(false);
 		setNodeMenu(null);
+		selectNode(null);
 		if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
 		if (typeof cwd !== "string" || cwd.length === 0) return;
 		let cancelled = false;
@@ -1188,6 +1259,9 @@ function PipelineView({
 	}, [agents, connections, controls]);
 
 	const gesture = connectRef.current;
+	// The port the in-flight draft is aimed at: set while the pointer hovers a
+	// valid target, driving the temp wire's landing point and the tick ring.
+	const snapPort = gesture !== null && hoverTarget !== null ? nearestInputPort(hoverTarget, gesture.cursor) : null;
 	// Edge geometry (edge-routing iteration 2): the path leaves perpendicular
 	// to the source port's edge and arrives perpendicular to the target port's
 	// edge (60px control offset), so top/bottom ports arc over/under the band
@@ -1198,11 +1272,9 @@ function PipelineView({
 	const EDGE_OFF = 60;
 	const BRACKET_CLEAR = 30;
 	const BRACKET_R = 8;
-	// The tick renders 14px + a 2px border (content-box) — its rim sits 9px
-	// from the anchor. Arrow paths stop TICK_R + HEAD_CLEAR short of the
-	// anchor so the head lands just off the rim, never under the dot.
-	const TICK_R = 9;
-	const HEAD_CLEAR = 2;
+	// Wires land FLUSH on the border: ports are hidden at rest (they reveal on
+	// node hover / during a drag), so the bare joint must read clean, and a
+	// revealed tick paints above the edge layer over the junction anyway.
 	function edgeGeometry(
 		s: { x: number; y: number; side: Side },
 		t: { x: number; y: number; side: Side },
@@ -1215,20 +1287,19 @@ function PipelineView({
 			const down = s.side === "bottom";
 			const vdir = down ? 1 : -1;
 			const lane = down ? Math.max(s.y, t.y) + BRACKET_CLEAR : Math.min(s.y, t.y) - BRACKET_CLEAR;
-			const endY = t.y + vdir * (TICK_R + HEAD_CLEAR);
 			const sx = Math.sign(t.x - s.x);
-			const r = Math.min(BRACKET_R, Math.abs(t.x - s.x) / 2, Math.abs(lane - s.y), Math.abs(lane - endY));
+			const r = Math.min(BRACKET_R, Math.abs(t.x - s.x) / 2, Math.abs(lane - s.y), Math.abs(lane - t.y));
 			let d: string;
 			if (!Number.isFinite(r) || r < 1 || sx === 0) {
 				// Nodes nearly aligned: sharp corners (or a straight drop).
-				d = "M" + s.x + " " + s.y + " L" + s.x + " " + lane + " L" + t.x + " " + lane + " L" + t.x + " " + endY;
+				d = "M" + s.x + " " + s.y + " L" + s.x + " " + lane + " L" + t.x + " " + lane + " L" + t.x + " " + t.y;
 			} else {
 				d = "M" + s.x + " " + s.y
 					+ " L" + s.x + " " + (lane - vdir * r)
 					+ " Q" + s.x + " " + lane + " " + (s.x + sx * r) + " " + lane
 					+ " L" + (t.x - sx * r) + " " + lane
 					+ " Q" + t.x + " " + lane + " " + t.x + " " + (lane - vdir * r)
-					+ " L" + t.x + " " + endY;
+					+ " L" + t.x + " " + t.y;
 			}
 			// Label rides the bracket's horizontal run (above it for a bottom
 			// lane, below it for a top lane).
@@ -1249,16 +1320,9 @@ function PipelineView({
 			c1 = { x: s.x + n1.x * EDGE_OFF, y: s.y + n1.y * EDGE_OFF };
 			c2 = { x: t.x + n2.x * EDGE_OFF, y: t.y + n2.y * EDGE_OFF };
 		}
-		// Stop short of the anchor: the port tick renders above the edge layer,
-		// so a path ending at the anchor buries the arrowhead under the dot.
-		// End on the rim instead — tick radius + a hair of clearance — along
-		// the arrival direction (c2 -> anchor).
-		const arrX = t.x - c2.x, arrY = t.y - c2.y;
-		const arrLen = Math.hypot(arrX, arrY);
-		const head = TICK_R + HEAD_CLEAR;
-		const ex = arrLen > head ? t.x - (arrX / arrLen) * head : t.x;
-		const ey = arrLen > head ? t.y - (arrY / arrLen) * head : t.y;
-		const d = "M" + s.x + " " + s.y + " C" + c1.x + " " + c1.y + " " + c2.x + " " + c2.y + " " + ex + " " + ey;
+		// Arrive at the anchor: the wire lands flush on the border (a revealed
+		// tick paints over the junction; hidden, the joint reads clean).
+		const d = "M" + s.x + " " + s.y + " C" + c1.x + " " + c1.y + " " + c2.x + " " + c2.y + " " + t.x + " " + t.y;
 		// Exact cubic midpoint of the full curve — the label rides the curve,
 		// offset along the curve's NORMAL at that point so it sits beside the
 		// wire instead of crossing it (a bare vertical shift still crosses on
@@ -1289,6 +1353,21 @@ function PipelineView({
 	function inputAnchorOf(node: CanvasAgent | CanvasControl, port: string): { x: number; y: number; side: Side } {
 		return "branches" in node ? controlInputAnchor(node) : portAnchor(node, "in", port);
 	}
+	// The snap: the input port of `nodeId` nearest to `pt` (a control answers
+	// through the uniform resolvers — one unnamed input). The temp wire lands
+	// on it and the drop defaults to it; null with no node or no point.
+	function nearestInputPort(nodeId: string, pt: { x: number; y: number } | null): string | null {
+		const node = findNode(nodeId);
+		if (node === null || pt === null) return null;
+		let best: string | null = null;
+		let bestD = Infinity;
+		for (const p of inputPortNamesOf(nodeId)) {
+			const a = inputAnchorOf(node, p);
+			const d = (a.x - pt.x) * (a.x - pt.x) + (a.y - pt.y) * (a.y - pt.y);
+			if (d < bestD) { bestD = d; best = p; }
+		}
+		return best;
+	}
 	const edges = connections.map((c) => {
 		const src = findNode(c.source);
 		const tgt = findNode(c.target);
@@ -1315,18 +1394,38 @@ function PipelineView({
 			? (controlState.chosen.indexOf(sourceName) !== -1 ? "fired" : "quiet")
 			: "";
 		const geo = edgeGeometry(s, t);
+		// Selection (brand stroke + arrow) wins over the run-state styling —
+		// it is the transient "you are pointing at this wire" emphasis.
+		const selected = selectedEdgeId === c.id;
 		return (
-			<g key={c.id}>
+			<g key={c.id} className="pipeline-edge-group">
 				<path
 					d={geo.d}
-					className={"pipeline-edge" + (edgeState !== "" ? " pipeline-edge-" + edgeState : "")}
-					markerEnd={edgeState === "fired" ? "url(#pipeline-arrow-fired)" : "url(#pipeline-arrow)"}
+					className={"pipeline-edge" + (edgeState !== "" ? " pipeline-edge-" + edgeState : "") + (selected ? " pipeline-edge-selected" : "")}
+					markerEnd={selected ? "url(#pipeline-arrow-selected)" : edgeState === "fired" ? "url(#pipeline-arrow-fired)" : "url(#pipeline-arrow)"}
 				/>
 				{labeled ? (
 					<text x={geo.mx} y={geo.my} className="pipeline-edge-label" textAnchor="middle">
 						{sourceName + " → " + targetName}
 					</text>
 				) : null}
+				{/* The hit path: a 2px wire is unclickable, so a transparent
+				    12px stroke above it carries selection (click) and the
+				    menu (right-click); its hover lights the visible wire via
+				    the group's :hover. A press during a wire drag is swallowed
+				    (not the canvas's cancel), and a right-button press bubbles
+				    to the canvas like a node's. */}
+				<path
+					d={geo.d}
+					className="pipeline-edge-hit"
+					onPointerDown={(e) => {
+						if (e.button !== 0) return;
+						e.preventDefault(); e.stopPropagation();
+						if (canvasRef.current) canvasRef.current.focus();
+						if (!connectRef.current) selectEdge(c.id);
+					}}
+					onContextMenu={(e) => { onEdgeContextMenu(e, c.id); }}
+				/>
 			</g>
 		);
 	});
@@ -1335,9 +1434,14 @@ function PipelineView({
 		const src0 = findNode(gesture.from);
 		if (src0) {
 			const s0 = outputAnchorOf(src0, gesture.startPort ?? ("branches" in src0 ? branchNamesOf(src0)[0] ?? "" : "out"));
-			const cx = gesture.cursor ? gesture.cursor.x : s0.x;
-			const cy = gesture.cursor ? gesture.cursor.y : s0.y;
-			tempEdge = <path d={edgeGeometry(s0, { x: cx, y: cy, side: "left" }).d} className="pipeline-edge-temp" />;
+			// Snap: over a target the wire lands on the aimed input port's
+			// anchor; free space keeps it on the cursor.
+			let end0: { x: number; y: number; side: Side } = { x: gesture.cursor.x, y: gesture.cursor.y, side: "left" };
+			if (snapPort !== null && hoverTarget !== null) {
+				const tgt0 = findNode(hoverTarget);
+				if (tgt0 !== null) end0 = inputAnchorOf(tgt0, snapPort);
+			}
+			tempEdge = <path d={edgeGeometry(s0, end0).d} className="pipeline-edge-temp" />;
 		}
 	}
 
@@ -1349,14 +1453,24 @@ function PipelineView({
 		// Everything but pending renders: the node-state class (border + tint)
 		// and the corner badge.
 		const liveStatus = status !== undefined && status !== "pending" ? status : null;
+		// Port reveal: at rest a node shows its ticks on hover or selection;
+		// during a wire drag the source keeps everything and EVERY other node
+		// shows its input ticks — you can see where you can land (the snap
+		// ring and the aim stay on the node under the pointer). Otherwise
+		// none — the border stays uninterrupted and wires land flush on it.
+		const reveal = gesture !== null
+			? (gesture.from === agent.id ? " reveal-full" : " reveal-in")
+			: (hoverNodeId === agent.id || selected ? " reveal-full" : "");
 		return (
 			<div
 				key={agent.id}
-				className={"pipeline-node" + (selected ? " selected" : "") + (liveStatus !== null ? " node-" + liveStatus : "")}
+				className={"pipeline-node" + (selected ? " selected" : "") + (liveStatus !== null ? " node-" + liveStatus : "") + reveal}
 				style={{ left: agent.x + "px", top: agent.y + "px" }}
 				data-agent-id={agent.id}
 				data-node-status={status ?? ""}
 				onPointerDown={(e) => { onNodePointerDown(e, agent.id, agent.x, agent.y, "agent"); }}
+				onPointerEnter={(e) => { onNodePointerEnter(e, agent.id); }}
+				onPointerLeave={(e) => { onNodePointerLeave(e, agent.id); }}
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
 				onContextMenu={(e) => { onNodeContextMenu(e, agent.id); }}
@@ -1390,13 +1504,13 @@ function PipelineView({
 					return (
 						<div
 							key={portName}
-							className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
+							className={"pipeline-port in" + (hoveredIn && snapPort === portName ? " hover" : "")}
 							style={{ left: (anchor.x - agent.x) + "px", top: (anchor.y - agent.y) + "px" }}
-							onPointerEnter={(e) => { onInputPointerEnter(e, agent.id); }}
-							onPointerLeave={(e) => { onInputPointerLeave(e, agent.id); }}
-							// The port only swallows the primary press (nothing to do —
-							// connections start at the output); a right-button press goes
-							// unhandled so it bubbles to the node and opens the menu.
+							// The tick swallows the primary press so pressing a
+							// revealed input doesn't drag the node (connections
+							// start at the output); hover/drop targeting lives on
+							// the node itself, and a right-button press bubbles
+							// to the node and opens the menu.
 							onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); }}
 							title={multiple ? portName : "Input"}
 						/>
@@ -1450,15 +1564,25 @@ function PipelineView({
 		const warnings = controlWarnings(control);
 		const runState = controlRunState(control);
 		const lit = runState !== null && runState.state !== "idle" ? " control-" + runState.state : "";
+		// Port reveal, same rule as the agents: the input tick and the branch
+		// dots show on hover/selection, and during a wire drag every control
+		// but the source shows just its input tick. The branch NAME labels
+		// stay visible always — they carry the fork's semantics, not the
+		// affordance.
+		const reveal = gesture !== null
+			? (gesture.from === control.id ? " reveal-full" : " reveal-in")
+			: (hoverNodeId === control.id || selected ? " reveal-full" : "");
 		return (
 			<div
 				key={control.id}
-				className={"pipeline-node control" + (selected ? " selected" : "") + lit}
+				className={"pipeline-node control" + (selected ? " selected" : "") + lit + reveal}
 				style={{ left: control.x + "px", top: control.y + "px" }}
 				data-control-id={control.id}
 				data-control-run-state={runState?.state ?? ""}
 				title={runState !== null ? controlRunTitle(runState) : undefined}
 				onPointerDown={(e) => { onNodePointerDown(e, control.id, control.x, control.y, "control"); }}
+				onPointerEnter={(e) => { onNodePointerEnter(e, control.id); }}
+				onPointerLeave={(e) => { onNodePointerLeave(e, control.id); }}
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
 				onContextMenu={(e) => { onNodeContextMenu(e, control.id); }}
@@ -1474,12 +1598,11 @@ function PipelineView({
 					</div>
 				) : null}
 				<div
-					className={"pipeline-port in" + (hoveredIn ? " hover" : "")}
+					className={"pipeline-port in" + (hoveredIn && snapPort === "in" ? " hover" : "")}
 					style={{ left: "0px", top: (CONTROL_H / 2) + "px" }}
-					onPointerEnter={(e) => { onInputPointerEnter(e, control.id); }}
-					onPointerLeave={(e) => { onInputPointerLeave(e, control.id); }}
-					// The input tick only swallows the primary press — a
-					// right-button press bubbles to the node and opens the menu.
+					// The input tick only swallows the primary press — hover/drop
+					// targeting lives on the node, and a right-button press
+					// bubbles to the node and opens the menu.
 					onPointerDown={(e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); }}
 					title="Input"
 				/>
@@ -1512,8 +1635,14 @@ function PipelineView({
 	// The context menu's entries re-compute per its node, so the breakpoint
 	// label always reflects the live state; while the node is mid-vanish
 	// (before the close effect lands) the list simply renders empty.
-	const menuNode: CanvasAgent | CanvasControl | null = nodeMenu !== null ? findNode(nodeMenu.nodeId) : null;
-	const menuEntries: readonly MenuEntry[] = menuNode !== null ? nodeMenuEntries(menuNode) : [];
+	const menuNode: CanvasAgent | CanvasControl | null = nodeMenu !== null && nodeMenu.kind === "node" ? findNode(nodeMenu.id) : null;
+	// The context menu's entries re-compute per its target: per-node rows for
+	// agents/controls, the single delete row for a connection. While the
+	// target is mid-vanish (before the close effect lands) the list renders
+	// empty.
+	const menuEntries: readonly MenuEntry[] = nodeMenu !== null && nodeMenu.kind === "edge"
+		? [{ id: "delete", label: "Delete connection", danger: true }]
+		: menuNode !== null ? nodeMenuEntries(menuNode) : [];
 
 	const inspectNode: ProjectedNode | undefined = pausedNodeId !== null && runProjection ? runProjection.nodes[pausedNodeId] : undefined;
 
@@ -1554,7 +1683,12 @@ function PipelineView({
 					</span>
 				) : null}
 				<button className="pipeline-btn" onClick={addAgentFromToolbar}>+ Add Agent</button>
-				<button className="pipeline-btn" onClick={deleteSelected} disabled={!selectedId}>Delete</button>
+				<button
+					className="pipeline-btn"
+					onClick={deleteSelected}
+					disabled={!selectedId && !selectedEdgeId}
+					title={selectedEdgeId && !selectedId ? "Delete the selected connection" : "Delete the selected node"}
+				>Delete</button>
 				<button className="pipeline-btn" onClick={() => { setShowJson(!showJson); }}>{showJson ? "Hide JSON" : "View JSON"}</button>
 				<button className="pipeline-btn" onClick={clearAll}>Clear</button>
 				{runResult && !resultOpen ? (
@@ -1634,6 +1768,10 @@ function PipelineView({
 							    edge points at its own success-filled def. */}
 							<marker id="pipeline-arrow-fired" markerWidth={8} markerHeight={8} refX={6} refY={3} orient="auto" markerUnits="strokeWidth">
 								<path d="M0,0 L6,3 L0,6 Z" className="pipeline-arrowfill-fired" />
+							</marker>
+							{/* Same rule for selection: the brand arrowhead. */}
+							<marker id="pipeline-arrow-selected" markerWidth={8} markerHeight={8} refX={6} refY={3} orient="auto" markerUnits="strokeWidth">
+								<path d="M0,0 L6,3 L0,6 Z" className="pipeline-arrowfill-selected" />
 							</marker>
 						</defs>
 						{edges}

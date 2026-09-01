@@ -35,15 +35,33 @@ edits in one are visible in the other.
   ports each render as their own tick on a node edge — inputs default left,
   outputs right, and each port may take the top or bottom edge instead — and
   edges anchor at their port's tick, leaving and entering perpendicular to
-  that edge. Drag from an agent's output port to another agent's input port
-  to connect them; edges are directed and arrow-marked. When a node declares
-  several ports the connection editor offers **port pickers** on both ends,
-  defaulted to the tick the drag started from.
+  that edge.
+- **Ports stay hidden until they are needed.** At rest a node's border is
+  uninterrupted and wires land flush on it; the arrows are the wiring story.
+  Hovering a node (or selecting it) fades in its ticks; dragging from an
+  output tick starts a connection, the source keeps its ticks for the whole
+  drag, and every other node on the canvas reveals its input ticks — the
+  drop targets. The **whole node is the drop target**: the drafted wire
+  snaps to the input tick nearest the cursor (the tick lights up), and
+  dropping anywhere on the node connects. When a node declares several
+  ports the connection editor offers **port pickers** on both ends,
+  defaulted to the tick the drag started from and the input the wire snapped
+  to. Edges are directed and arrow-marked.
 - Connections are flexible: an output may **fan out** to many inputs, and an
   input may **fan in** from many sources. Semantically, `A → B` means A's
   output becomes (part of) B's input. There are no explicit
   parallel/join node types — a node fires when its inputs say so
   ([running-pipelines.md](running-pipelines.md#how-a-run-executes)).
+- **Connections are deletable.** Hovering a wire thickens it; click it to
+  select — the line and its arrowhead light brand — then press
+  **Delete** / **Backspace**, use the toolbar's **Delete** button, or
+  right-click the wire and pick **Delete connection**. The wire has a wide
+  invisible hit zone, so a click on the line itself is enough (a node sitting
+  over the wire still wins the click — the labels never do). Selection is one
+  thing at a time:
+  selecting a wire deselects any node, and vice versa. Deleting the wire
+  that feeds an If starves the control — the validation strip reports it
+  (`if-source-invalid`) until rewired.
 - **Cycles are legal wiring** — the executor loops until a port goes quiet.
   A cycle shows as a non-fatal warning in the issue strip, not an error.
   Rendering keeps loops readable: put a loop's two ports on the same top or
@@ -80,7 +98,10 @@ drag (Escape also cancels it) and then opens the menu. The transcript route
 is described in
 [running-pipelines.md](running-pipelines.md#results-and-the-continue-routes).
 A control's menu carries **Edit branches** and **Delete control** (danger)
-only — a control never fires a child session.
+only — a control never fires a child session. A **connection's** menu
+(right-click the wire) carries just **Delete connection** (danger); like the
+per-node menus it selects its target when it opens, and it closes if the
+wire vanishes before it is acted on.
 
 ## Validation while editing
 
@@ -215,7 +236,9 @@ something you can see and point at:
   renders as a flowchart decision diamond: one unnamed input tick on the
   left vertex, and one **labeled tick per branch** on the edge that branch's
   `side` picks (default right; two branches on one edge render stacked, same
-  as ports).
+  as ports). Like an agent's ticks, these hide at rest — the branch **name
+  labels stay visible** (they carry the fork's semantics), the dots fade in
+  on hover or selection and during a connection drag.
 - **One owner.** Exactly one agent feeds the control, and the if **owns**
   that agent's entire emission surface: the agent declares no output ports
   or bindings of its own, feeds only this control, and has no other outgoing
@@ -234,7 +257,8 @@ something you can see and point at:
   first match wins, and the empty value is the catch-all and must stay last
   (the editor enforces both live and blocks Save on a broken shape). A
   branch tick drags to the agent that handles it like any output tick — the
-  port picker opens with the branch list on every control-sourced draft.
+  port picker opens with the branch list on every control-sourced draft, and
+  the whole target node is the drop target exactly as with agents.
 - **Warnings.** The control's ⚠ chip (and the same messages under the
   editor's rows) shows the non-fatal findings that name it: branches sharing
   one edge (`if-side-conflict`), and the never-fire cases — a source without
