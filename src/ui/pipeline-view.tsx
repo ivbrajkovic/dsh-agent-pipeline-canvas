@@ -1324,10 +1324,10 @@ function PipelineView({
 	// unnamed input tick on the left vertex, one labeled tick per branch on
 	// its declared edge's vertex (stacking when branches share a side) — the
 	// fork is visible without opening any panel. The shape itself is an SVG
-	// layer (not a clip-path on the node box): the border follows the diamond
-	// and the node's buttons stay unclipped. No run statuses and no
-	// breakpoint button: a control never fires a child session (the
-	// projection knows agents only).
+	// layer (not a clip-path on the node box) so the border follows the
+	// diamond. No run statuses and no breakpoint button: a control never
+	// fires a child session (the projection knows agents only). Editing is
+	// the context menu's Edit branches — nodes carry no edit button.
 	const controlNodes = controls.map((control) => {
 		const selected = control.id === selectedId;
 		const hoveredIn = hoverTarget === control.id && gesture;
@@ -1347,21 +1347,6 @@ function PipelineView({
 				<svg className="control-shape" viewBox={"0 0 " + CONTROL_W + " " + CONTROL_H} preserveAspectRatio="none" aria-hidden="true">
 					<polygon points={CONTROL_W / 2 + ",0 " + CONTROL_W + "," + CONTROL_H / 2 + " " + CONTROL_W / 2 + "," + CONTROL_H + " 0," + CONTROL_H / 2} />
 				</svg>
-				<button
-					className="node-edit"
-					title="Edit branches"
-					aria-label={"Edit branches of " + control.id}
-					// Keep the button's pointer events off the node's drag handler.
-					onPointerDown={(e) => { e.stopPropagation(); }}
-					onClick={(e) => { e.stopPropagation(); setConfigControlId(control.id); }}
-				>
-					<svg width={10} height={10} viewBox="0 0 24 24" aria-hidden="true">
-						<path
-							d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"
-							fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"
-						/>
-					</svg>
-				</button>
 				<div className="node-name">{isIf ? "if" : control.kind}</div>
 				<div className="node-sub">{control.id}</div>
 				{warnings.length > 0 ? (

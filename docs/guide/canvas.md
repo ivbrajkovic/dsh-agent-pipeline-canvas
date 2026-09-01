@@ -49,14 +49,15 @@ edits in one are visible in the other.
   bottom edge and the return edge routes as an orthogonal bracket over or
   under the node band, arrowhead rising straight into the port; a leftward
   wire on horizontal edges falls back to a lane below the nodes.
-- Each node carries a **breakpoint dot** (top-left) and an **edit button**
-  (pencil, top-right). The dot arms the
-  [pause-on-output breakpoint](running-pipelines.md#breakpoints-grouped-pause-the-queue-resume--rerun--steer--abort);
-  the pencil opens the configuration panel.
+- Each agent carries a **breakpoint dot** (top-left) that arms the
+  [pause-on-output breakpoint](running-pipelines.md#breakpoints-grouped-pause-the-queue-resume--rerun--steer--abort).
+  Nodes carry no edit button: editing an agent goes through its right-click
+  context menu (**Edit agent**), an If control's through **Edit branches**.
 
 **Node context menu.** Right-click a node to select it and open a small
-per-agent menu (the browser's native menu is suppressed on nodes only — the
-canvas background keeps its own): **Go to transcript**, **Edit agent**,
+per-node menu (the browser's native menu is suppressed on nodes only — the
+canvas background keeps its own). An agent's menu: **Go to transcript**,
+**Edit agent**,
 **Arm breakpoint** / **Disarm breakpoint** (the label reflects the state),
 and **Delete agent** (danger). **Go to transcript** is enabled once the node
 has a child session — live, paused, and restored-last-run records all
@@ -68,6 +69,8 @@ right-click included — so right-clicking a node during a drag cancels the
 drag (Escape also cancels it) and then opens the menu. The transcript route
 is described in
 [running-pipelines.md](running-pipelines.md#results-and-the-continue-routes).
+A control's menu carries **Edit branches** and **Delete control** (danger)
+only — a control never fires a child session.
 
 ## Validation while editing
 
