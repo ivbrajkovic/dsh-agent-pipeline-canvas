@@ -124,6 +124,11 @@
 .pipeline-edge { stroke: var(--dsw-alias-label-secondary); stroke-width: 2; fill: none; }
 .pipeline-arrowfill { fill: var(--dsw-alias-label-secondary); }
 .pipeline-edge-temp { stroke: var(--dsw-alias-brand-primary); stroke-width: 2; fill: none; stroke-dasharray: 6 4; }
+/* The if's branch-edge highlight (the derived run view): once the decision has
+   landed, the chosen branch's edge lights green and the branches that stayed
+   idle render dimmed. Only control-sourced edges ever carry these classes. */
+.pipeline-edge.pipeline-edge-fired { stroke: var(--dsw-alias-state-success-primary); stroke-width: 2.5; }
+.pipeline-edge.pipeline-edge-quiet { opacity: 0.35; }
 /* Named-port edge labels ("mail → data") at the edge midpoint: small, muted,
    and stroked with the canvas background so they read over the edge line. */
 .pipeline-edge-label {
@@ -293,6 +298,26 @@
 .pipeline-node.control.selected .control-shape {
 	filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dsw-alias-brand-primary) 70%, transparent));
 }
+/* The derived run state lights the diamond the way an agent's border moves:
+   armed = the feeding agent is producing the decision's input (brand), fired =
+   the decision landed on a branch (success). idle/quiet leave the shape at
+   rest — the chip and the branch edges carry those. */
+.pipeline-node.control.control-armed .control-shape polygon { stroke: var(--dsw-alias-brand-primary); stroke-width: 2; }
+.pipeline-node.control.control-armed .control-shape { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dsw-alias-brand-primary) 60%, transparent)); }
+.pipeline-node.control.control-fired .control-shape polygon { stroke: var(--dsw-alias-state-success-primary); stroke-width: 2; }
+.pipeline-node.control.control-fired .control-shape { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dsw-alias-state-success-primary) 60%, transparent)); }
+/* The control's derived run chip flows INSIDE the diamond as the flex row
+   under the node-sub — every vertex slot is a branch tick's, the bottom one
+   also carries the warning chip, and the two can coexist (a never-fire source
+   during a run). armed/fired take the running/done colors; idle/quiet keep the
+   muted base chip. */
+.pipeline-node .node-status.control-status {
+	position: static;
+	transform: none;
+	margin-top: 3px;
+}
+.pipeline-node .node-status.control-status.status-armed { color: var(--dsw-alias-brand-primary); border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, transparent); }
+.pipeline-node .node-status.control-status.status-fired { color: var(--dsw-alias-state-success-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 50%, transparent); }
 /* The shape layer is absolutely positioned, which paints it over the static
    text — lift the labels into the positioned layer (they come later in the
    DOM, so this alone puts them back on top). */

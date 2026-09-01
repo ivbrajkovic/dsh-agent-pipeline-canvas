@@ -2,7 +2,9 @@
 // draggable Agent and an If control, a canvas, node move/select, the
 // breakpoint toggle, output→input connections with directed edges
 // (an If's branch ticks are the labeled sources; the if takes one unnamed
-// input and owns its feeding agent's whole emission surface), the toolbar
+// input and owns its feeding agent's whole emission surface; during a run the
+// if shows a DERIVED idle/armed/fired/quiet chip from the feeding agent's
+// firing, its chosen branch edge lights and quiet branches dim), the toolbar
 // (add/delete/JSON/clear/run/abort), load/save through the Host routes, the
 // run/result modals, and the paused-run inspection modal. Renders inside the
 // per-session view tab AND the frame-wide shell panel (see ./shell-panel.tsx);
@@ -33,7 +35,7 @@
 import * as React from "react";
 import type { MenuEntry } from "@deepseek-ai/dsh-client-ui-primitives";
 import { validateGraph } from "../graph.ts";
-import { lowerControls } from "../controls.ts";
+import { firedBranches, lowerControls } from "../controls.ts";
 import { classifyGraph, topoOrder } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
@@ -83,6 +85,10 @@ function requestChatView(sessionId: string) {
 	pendingChatView = sessionId;
 	window.setTimeout(() => { if (pendingChatView === sessionId) pendingChatView = null; }, 5000);
 }
+
+/** One if control's DERIVED run state (see controlRunState): the decision word
+ * the chip shows plus the branch names the source's firing chose. */
+type ControlRunState = { state: "idle" | "armed" | "fired" | "quiet"; chosen: string[] };
 
 function PipelineView({
 	sessionId, useSessions, useWorkspaces, inputActions, openView, services, onDismiss,
@@ -542,6 +548,27 @@ function PipelineView({
 		&& activeRun !== null
 		&& typeof activeRun.runId === "string"
 		&& inspectDismissedFor !== (activeRun.runId + ":" + (activeRun.pausedAt ?? pausedNodeId));
+
+	// ---- The if control's derived run state ----------------------------------
+	// A control never fires and never appears in the record's firings, nodes,
+	// or results — its run state is DERIVED from the feeding agent's firing:
+	// the firing's `emittedTo` names the lowered output ports, which are the
+	// branch names (firedBranches). The state rides the source's LATEST firing
+	// — the projection's own rule — so a rerun re-arms the control until the
+	// new firing emits, exactly as an agent's chip moves. quiet is the decided
+	// empty selection (the source emitted on no branch); armed is anything
+	// in flight or settled without reaching emission. Null when no run view
+	// exists at all.
+	function controlRunState(control: CanvasControl): ControlRunState | null {
+		if (runProjection === null) return null;
+		const sourceId = connections.find((c) => c.target === control.id)?.source;
+		const node = sourceId !== undefined ? runProjection.nodes[sourceId] : undefined;
+		const firing = node !== undefined && node.firings.length > 0 ? node.firings[node.firings.length - 1] : undefined;
+		if (node === undefined || firing === undefined) return { state: "idle", chosen: [] };
+		if (!Array.isArray(firing.emittedTo)) return { state: "armed", chosen: [] };
+		const chosen = firedBranches(control.branches, firing.emittedTo);
+		return chosen.length > 0 ? { state: "fired", chosen } : { state: "quiet", chosen: [] };
+	}
 
 	function disconnectRunEvents() {
 		if (sseRef.current !== null) { sseRef.current.close(); sseRef.current = null; }
@@ -1213,10 +1240,18 @@ function PipelineView({
 		// the branch tick at the decision point, and an edge label would
 		// repeat it verbatim.
 		const labeled = !("branches" in src) && (sourceName !== "out" || targetName !== "in");
+		// Branch-edge highlighting (the run view): once the control's decision
+		// has landed (fired or quiet), the chosen branch's edge lights and the
+		// branches that stayed idle render dimmed; idle/armed decisions leave
+		// every edge at its default (no promise yet).
+		const controlState = "branches" in src ? controlRunState(src) : null;
+		const edgeState = controlState !== null && (controlState.state === "fired" || controlState.state === "quiet")
+			? (controlState.chosen.indexOf(sourceName) !== -1 ? " pipeline-edge-fired" : " pipeline-edge-quiet")
+			: "";
 		const geo = edgeGeometry(s, t);
 		return (
 			<g key={c.id}>
-				<path d={geo.d} className="pipeline-edge" markerEnd="url(#pipeline-arrow)" />
+				<path d={geo.d} className={"pipeline-edge" + edgeState} markerEnd="url(#pipeline-arrow)" />
 				{labeled ? (
 					<text x={geo.mx} y={geo.my} className="pipeline-edge-label" textAnchor="middle">
 						{sourceName + " → " + targetName}
@@ -1325,20 +1360,25 @@ function PipelineView({
 	// its declared edge's vertex (stacking when branches share a side) — the
 	// fork is visible without opening any panel. The shape itself is an SVG
 	// layer (not a clip-path on the node box) so the border follows the
-	// diamond. No run statuses and no breakpoint button: a control never
-	// fires a child session (the projection knows agents only). Editing is
-	// the context menu's Edit branches — nodes carry no edit button.
+	// diamond. No breakpoint button: a control never fires a child session
+	// (the projection knows agents only); its run state is the DERIVED chip
+	// (idle/armed/fired/quiet from the feeding agent's firing) plus the
+	// branch-edge highlight, never a recorded status. Editing is the context
+	// menu's Edit branches — nodes carry no edit button.
 	const controlNodes = controls.map((control) => {
 		const selected = control.id === selectedId;
 		const hoveredIn = hoverTarget === control.id && gesture;
 		const isIf = control.kind === "if";
 		const warnings = controlWarnings(control);
+		const runState = controlRunState(control);
+		const lit = runState !== null && (runState.state === "armed" || runState.state === "fired") ? " control-" + runState.state : "";
 		return (
 			<div
 				key={control.id}
-				className={"pipeline-node control" + (selected ? " selected" : "")}
+				className={"pipeline-node control" + (selected ? " selected" : "") + lit}
 				style={{ left: control.x + "px", top: control.y + "px" }}
 				data-control-id={control.id}
+				data-control-run-state={runState?.state ?? ""}
 				onPointerDown={(e) => { onNodePointerDown(e, control.id, control.x, control.y, "control"); }}
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
@@ -1352,6 +1392,20 @@ function PipelineView({
 				{warnings.length > 0 ? (
 					<div className="node-warn" title={warnings.map((w) => w.message).join("\n")}>
 						{"⚠ " + warnings.length}
+					</div>
+				) : null}
+				{runState !== null ? (
+					<div
+						className={"node-status control-status status-" + runState.state}
+						title={runState.state === "fired"
+							? "The decision fired — branch " + runState.chosen.join(", ")
+							: runState.state === "quiet"
+								? "The feeding agent's result matched no branch — nothing downstream of the if ran"
+								: runState.state === "armed"
+									? "No branch decision recorded — the feeding agent's last firing never reached emission"
+									: "The run has not reached this decision yet"}
+					>
+						{runState.state}
 					</div>
 				) : null}
 				<div

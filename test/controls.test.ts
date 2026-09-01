@@ -8,7 +8,7 @@
 // to exactly its hand-authored ports+bindings twin), the ""-value catch-all
 // normalization, and lowering's totality over malformed records.
 import { validateGraph } from "../lib/graph.js";
-import { lowerControls } from "../lib/controls.js";
+import { firedBranches, lowerControls } from "../lib/controls.js";
 import { deepStrictEqual } from "node:assert";
 
 let passed = 0;
@@ -293,6 +293,44 @@ check("a future control kind validates as a plain endpoint", {
 		deepStrictEqual(branchless.agents[0].outputPorts, ["x"]);
 		deepStrictEqual(branchless.agents[0].bindings, [{ port: "x" }]);
 		deepStrictEqual((branchless as { connections: unknown[] }).connections.length, 1, "the control's feeding edge is gone");
+	});
+}
+
+// --- the run view's derivation: firedBranches -------------------------------
+{
+	let ok = true;
+	const attempt = (name: string, run: () => void) => {
+		try {
+			run();
+			passed++;
+			console.log(`ok    ${name}`);
+		} catch (error) {
+			ok = false;
+			failed++;
+			console.error(`FAIL  ${name} — ${error && (error as Error).message}`);
+		}
+	};
+	const branches = [{ name: "billing", field: "action", value: "billing" }, { name: "other", field: "action" }];
+	attempt("the firing's emission names the chosen branch", () => {
+		deepStrictEqual(firedBranches(branches, ["billing"]), ["billing"]);
+	});
+	attempt("the choice reads in DECLARATION order, not emission order", () => {
+		deepStrictEqual(firedBranches(branches, ["other", "billing"]), ["billing", "other"]);
+	});
+	attempt("a port the control never declared reports no branch", () => {
+		deepStrictEqual(firedBranches(branches, ["out"]), []);
+	});
+	attempt("no emittedTo (the firing never reached emission) maps to nothing", () => {
+		deepStrictEqual(firedBranches(branches, undefined), []);
+	});
+	attempt("an empty selection (the quiet) maps to nothing", () => {
+		deepStrictEqual(firedBranches(branches, []), []);
+	});
+	attempt("total over malformed input, never throws", () => {
+		deepStrictEqual(firedBranches(undefined, ["billing"]), []);
+		deepStrictEqual(firedBranches(null, ["billing"]), []);
+		deepStrictEqual(firedBranches(branches, [null, 7, "billing"]), ["billing"]);
+		deepStrictEqual(firedBranches([null, { name: "" }, { name: "x" }] as never, ["x"]), ["x"]);
 	});
 }
 
