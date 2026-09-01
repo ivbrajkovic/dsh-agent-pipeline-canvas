@@ -315,27 +315,33 @@
    DOM, so this alone puts them back on top). */
 .pipeline-node.control .node-name,
 .pipeline-node.control .node-sub { position: relative; }
-/* One labeled tick per branch: a wrapper centered on the anchor carrying the
-   dot plus the visible branch name, oriented away from the node edge. The
+/* One labeled tick per branch: the WRAPPER is dot-sized and centered on the
+   vertex, so the dot sits exactly on it (straddling the corner, like an
+   agent's tick on its node edge); the label hangs outside the diamond with a
+   gap, on a small base-colored chip so it reads over edges and dots. The
    wrapper never catches the pointer — only its tick does. */
 .control-branch {
 	position: absolute;
-	display: flex;
-	align-items: center;
-	gap: 4px;
+	width: 18px;
+	height: 18px;
 	transform: translate(-50%, -50%);
 	pointer-events: none;
 }
-.control-branch.side-left { flex-direction: row-reverse; }
-.control-branch.side-top { flex-direction: column-reverse; }
-.control-branch.side-bottom { flex-direction: column; }
-.control-branch .pipeline-port { position: static; transform: none; pointer-events: auto; flex: 0 0 auto; }
+.control-branch .pipeline-port { position: static; transform: none; pointer-events: auto; }
 .control-branch .branch-label {
+	position: absolute;
 	font-size: 9px;
 	line-height: 1;
 	color: var(--dsw-alias-label-secondary);
 	white-space: nowrap;
+	background: var(--dsw-alias-bg-base);
+	padding: 2px 5px;
+	border-radius: 4px;
 }
+.control-branch.side-right .branch-label { left: calc(100% + 4px); top: 50%; transform: translateY(-50%); }
+.control-branch.side-left .branch-label { right: calc(100% + 4px); top: 50%; transform: translateY(-50%); }
+.control-branch.side-top .branch-label { bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); }
+.control-branch.side-bottom .branch-label { top: calc(100% + 4px); left: 50%; transform: translateX(-50%); }
 /* The control's warning chip (never-fire sources, side stacking) rides the
    same bottom slot an agent's status chip uses — a control has none. */
 .pipeline-node .node-warn {
