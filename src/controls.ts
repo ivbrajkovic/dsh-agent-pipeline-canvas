@@ -31,7 +31,7 @@
 // without passing validateGraph, so the lowering is the last line of defense
 // (the portGraph discipline: this view stays total, validation reports).
 
-import { COUNT_KEY } from "./execution.ts";
+import { COUNT_KEY, isValuedRow } from "./execution.ts";
 import type { Connection, ControlNode, IfBranch, OutputBinding, PipelineGraph, PortSide, ValidationError } from "./types.ts";
 
 /** Node edges a branch tick may render on (same vocabulary as graph.ts). */
@@ -57,11 +57,6 @@ export interface ControlAnalysis {
 
 function argStr(value: unknown): string {
 	return value == null ? "" : String(value);
-}
-
-/** True for a branch that tests a value (everything but the catch-all). */
-function isValued(branch: IfBranch): boolean {
-	return branch.value !== undefined && branch.value !== "";
 }
 
 /**
@@ -209,10 +204,10 @@ function validateBranches(controlId: string, branches: unknown, errors: Validati
 			seen.add(name);
 			names.push(name);
 		}
-		if (isValued(branch) && (typeof branch.field !== "string" || branch.field.length === 0)) {
+		if (isValuedRow(branch) && (typeof branch.field !== "string" || branch.field.length === 0)) {
 			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} compares a value but names no field` });
 		}
-		if (!isValued(branch) && index < branches.length - 1) {
+		if (!isValuedRow(branch) && index < branches.length - 1) {
 			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} is a catch-all but not last — the catch-all must be the final branch` });
 		}
 		if (branch.side !== undefined && !(PORT_SIDES as readonly unknown[]).includes(branch.side)) {
@@ -275,7 +270,7 @@ function countsOnly(branches: unknown): boolean {
 	for (const entry of branches) {
 		if (entry == null || typeof entry !== "object") continue;
 		const branch = entry as IfBranch;
-		if (!isValued(branch)) continue;
+		if (!isValuedRow(branch)) continue;
 		valued += 1;
 		if (branch.field !== COUNT_KEY) return false;
 	}
@@ -405,7 +400,7 @@ export function lowerControls(graph: PipelineGraph | null | undefined): Pipeline
 			// fieldless branch lowers without it (the cast covers that case —
 			// OutputBinding types the authoring shape, which always has one).
 			const branchValue = spec.value;
-			const valued = branchValue !== undefined && branchValue !== "";
+			const valued = isValuedRow(spec);
 			const field = typeof spec.field === "string" && spec.field.length > 0 ? spec.field : null;
 			// `op` forwards only when it means something (">=") — the same
 			// non-defaults discipline as `side`, so the lowered graph stays

@@ -56,9 +56,12 @@ check("linear A->B", { agents: [agent("a"), agent("b")], connections: [conn("c1"
 check("fan-out A->B,A->C", { agents: [agent("a"), agent("b"), agent("c")], connections: [conn("c1", "a", "b"), conn("c2", "a", "c")] }, true, []);
 check("fan-in A->C,B->C", { agents: [agent("a"), agent("b"), agent("c")], connections: [conn("c1", "a", "c"), conn("c2", "b", "c")] }, true, []);
 
-// --- cycles: legal wiring, reported as a warning ---------------------
-check("legal cycle A->B->A (warning, not error)", { agents: [agent("a"), agent("b")], connections: [conn("c1", "a", "b"), conn("c2", "b", "a")] }, true, [], ["cycle-present"]);
-check("legal named-port cycle (warning, not error)", { agents: [portsAgent("a", [{ name: "resp" }], ["request"]), portsAgent("b", [{ name: "req", policy: "any-of" }], ["feedback"])], connections: [portConn("c1", "a", "a:request", "b", "b:req"), portConn("c2", "b", "b:feedback", "a", "a:resp")] }, true, [], ["cycle-present"]);
+// --- cycles: legal wiring, but every cycle carries its guard -------------
+// An unguarded cycle is the `cycle-unguarded` ERROR (loops L2); the guard is
+// a bound on a hop of the cycle or a valued $count row escaping it (the
+// matrix lives in the cycle-guard section below).
+check("unguarded cycle A->B->A is refused", { agents: [agent("a"), agent("b")], connections: [conn("c1", "a", "b"), conn("c2", "b", "a")] }, false, ["cycle-unguarded"], ["cycle-present"]);
+check("unguarded named-port cycle is refused", { agents: [portsAgent("a", [{ name: "resp" }], ["request"]), portsAgent("b", [{ name: "req", policy: "any-of" }], ["feedback"])], connections: [portConn("c1", "a", "a:request", "b", "b:req"), portConn("c2", "b", "b:feedback", "a", "a:resp")] }, false, ["cycle-unguarded"], ["cycle-present"]);
 check("self cycle A->->A", { agents: [agent("a")], connections: [conn("c1", "a", "a")] }, false, ["connection-self"]);
 
 // --- missing / unknown agents --------------------------------------
@@ -115,7 +118,7 @@ check("outputPorts entry not a string", { agents: [portsAgent("a", undefined, [7
 check("two default-left input ports stack with a warning", { agents: [portsAgent("a", [{ name: "x" }, { name: "y" }])], connections: [] }, true, [], ["agent-port-side-conflict"]);
 check("input left vs output pulled to left warns", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "x" }], outputPorts: ["y"], outputPortSides: { y: "left" } }], connections: [] }, true, [], ["agent-port-side-conflict"]);
 check("two outputs on the default right warn but stay valid", { agents: [portsAgent("a", undefined, ["mail", "slack"])], connections: [] }, true, [], ["agent-port-side-conflict"]);
-check("sided loop cycle still legal wiring", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "resp" }], outputPorts: ["request"], outputPortSides: { request: "bottom" } }, { id: "b", name: "b", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "req", policy: "any-of" }, { name: "fix", policy: "any-of", bound: 3, side: "bottom" }], outputPorts: ["out"] }], connections: [portConn("c1", "a", "a:request", "b", "b:req"), portConn("c2", "b", "b:out", "a", "a:resp")] }, true, [], ["cycle-present"]);
+check("sided loop cycle stays legal wiring (the bound caps the loop hop)", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "resp", bound: 3 }], outputPorts: ["request"], outputPortSides: { request: "bottom" } }, { id: "b", name: "b", description: "", instructions: "", x: 0, y: 0, inputPorts: [{ name: "req", policy: "any-of" }, { name: "fix", policy: "any-of", bound: 3, side: "bottom" }], outputPorts: ["out"] }], connections: [portConn("c1", "a", "a:request", "b", "b:req"), portConn("c2", "b", "b:out", "a", "a:resp")] }, true, [], ["cycle-present"]);
 check("unknown input side value", { agents: [portsAgent("a", [{ name: "x", side: "north" }])], connections: [] }, false, ["agent-port-side-invalid"]);
 check("unknown output side value", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["y"], outputPortSides: { y: "up" } }], connections: [] }, false, ["agent-port-side-invalid"]);
 check("outputPortSides names an undeclared port", { agents: [{ id: "a", name: "a", description: "", instructions: "", x: 0, y: 0, outputPorts: ["y"], outputPortSides: { z: "top" } }], connections: [] }, false, ["agent-port-side-invalid"]);
@@ -175,11 +178,11 @@ check("graph not object", "nope", false, ["graph-invalid"]);
 	console.log("ok    acyclic graph carries no warnings field");
 }
 {
-	const result = validateGraph({ agents: [agent("a"), agent("b")], connections: [conn("c1", "a", "b"), conn("c2", "b", "a")] });
-	deepStrictEqual(result.errors, [], "legal cycle has no errors");
-	deepStrictEqual(result.warnings?.map((w) => w.code), ["cycle-present"], "legal cycle warns once");
+	const result = validateGraph({ agents: [agent("a"), { ...agent("b"), inputPorts: [{ name: "in", bound: 2 }] }], connections: [conn("c1", "a", "b"), conn("c2", "b", "a")] });
+	deepStrictEqual(result.errors, [], "guarded cycle has no errors");
+	deepStrictEqual(result.warnings?.map((w) => w.code), ["cycle-present"], "guarded cycle warns exactly once");
 	passed++;
-	console.log("ok    legal cycle warns exactly once");
+	console.log("ok    guarded cycle warns exactly once");
 }
 
 // --- controls as connection endpoints (the if control — shared rules) ---
@@ -209,6 +212,182 @@ check("control-sourced unknown branch skips the agent-port rule", {
 	connections: [controlConn("c1", "a", "if-1", "a:out"), controlConn("c2", "if-1", "b", "if-1:zzz")],
 	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1" }, { name: "y" }] }],
 }, false, ["if-edge-port-unknown"]);
+
+// --- the cycle guard (loops L2): every cycle carries its guard -----------
+// The walk runs over the LOWERED graph, so the if-authored loop and its
+// hand-authored twin are guarded identically. The guard is a `bound` capping
+// a hop of the cycle, or a valued `$count` row escaping off the cycle ahead
+// of every row that wires back into it. `check` matches codes as a subset;
+// rows that pin exact findings read the result directly.
+const cagent = (id: string, extra: Record<string, unknown> = {}) => ({ ...agent(id), ...extra });
+/**
+ * The if-authored one-node loop: r -> <if> -> { <branches>, retry -> r },
+ * optionally seeded. The escape branch rides side "top" so the two branch
+ * ticks never share the default right edge (if-side-conflict would warn).
+ */
+const ifLoop = (branches: unknown[], opts: { seed?: boolean; entryPolicy?: string } = {}) => ({
+	agents: [
+		...(opts.seed ? [agent("k")] : []),
+		cagent("r", {
+			settings: { outputSchema: { type: "object" } },
+			...(opts.entryPolicy !== undefined ? { inputPorts: [{ name: "in", policy: opts.entryPolicy }] } : {}),
+		}),
+		agent("t"),
+	],
+	connections: [
+		...(opts.seed ? [conn("c0", "k", "r")] : []),
+		controlConn("c1", "r", "if-1", "r:out"),
+		portConn("c2", "if-1", "if-1:done", "t", "t:in"),
+		portConn("c3", "if-1", "if-1:retry", "r", "r:in"), // the back edge
+	],
+	controls: [{ id: "if-1", kind: "if", x: 0, y: 0, branches }],
+});
+const countFirst = [{ name: "done", field: "$count", value: "3", op: ">=", side: "top" }, { name: "retry" }];
+
+check("a bound on the loop hop guards a raw cycle (cycle-present only)", {
+	agents: [agent("a"), cagent("b", { inputPorts: [{ name: "in", bound: 2 }] })],
+	connections: [conn("c1", "a", "b"), conn("c2", "b", "a")],
+}, true, [], ["cycle-present"]);
+check("a control loop with the count row first is valid", ifLoop(countFirst), true, [], ["cycle-present"]);
+check("a $count == 2 escape guards too", ifLoop([{ name: "done", field: "$count", value: "2", side: "top" }, { name: "retry" }]), true, [], ["cycle-present"]);
+check("a count row above off-cycle branches only is valid", ifLoop([
+	{ name: "done", field: "$count", value: "3", op: ">=", side: "top" },
+	{ name: "other", field: "kind", value: "x", side: "left" },
+	{ name: "retry" },
+]), true, [], ["cycle-present"]);
+check("the hand-authored two-node twin is guarded by its count row", {
+	agents: [
+		cagent("c", {
+			outputPorts: ["done", "retry"],
+			outputPortSides: { done: "top" },
+			bindings: [{ field: "$count", value: "3", op: ">=", port: "done" }, { field: "verdict", port: "retry" }],
+			settings: { outputSchema: { type: "object" } },
+		}),
+		agent("m"),
+		agent("t"),
+	],
+	connections: [portConn("c1", "c", "c:done", "t", "t:in"), portConn("c2", "c", "c:retry", "m", "m:in"), portConn("c3", "m", "m:out", "c", "c:in")],
+}, true, [], ["cycle-present"]);
+check("the shadowed arrangement is refused", ifLoop([
+	{ name: "retry", field: "verdict", value: "fix", side: "top" },
+	{ name: "done", field: "$count", value: "3", op: ">=" },
+]), false, ["cycle-unguarded"], ["cycle-present"]);
+{
+	// The error names BOTH rows: the count row and the loop row that shadows it.
+	const result = validateGraph(ifLoop([
+		{ name: "retry", field: "verdict", value: "fix", side: "top" },
+		{ name: "done", field: "$count", value: "3", op: ">=" },
+	]));
+	const message = result.errors.find((e) => e.code === "cycle-unguarded")?.message ?? "";
+	if (message.includes('"done"') && message.includes('"retry"')) {
+		passed++;
+		console.log("ok    the shadowed error names the count row and its shadower");
+	} else {
+		failed++;
+		console.error(`FAIL  the shadowed error names the count row and its shadower — got: ${message}`);
+	}
+}
+check("a count row aimed back into the loop is no guard (row named)", ifLoop([
+	{ name: "retry", field: "$count", value: "3", op: ">=", side: "top" },
+	{ name: "done" },
+]), false, ["cycle-unguarded"], ["cycle-present"]);
+{
+	const result = validateGraph(ifLoop([
+		{ name: "retry", field: "$count", value: "3", op: ">=", side: "top" },
+		{ name: "done" },
+	]));
+	const message = result.errors.find((e) => e.code === "cycle-unguarded")?.message ?? "";
+	if (message.includes('"retry"') && message.includes("re-matches")) {
+		passed++;
+		console.log("ok    the aims-in error names the count row aiming back into the loop");
+	} else {
+		failed++;
+		console.error(`FAIL  the aims-in error names the count row aiming back into the loop — got: ${message}`);
+	}
+}
+check("a valueless $count row is the catch-all, so it guards nothing", {
+	agents: [
+		cagent("c", {
+			outputPorts: ["done", "retry"],
+			outputPortSides: { done: "top" },
+			bindings: [{ field: "$count", port: "done" }, { field: "verdict", port: "retry" }],
+		}),
+		agent("m"),
+		agent("t"),
+	],
+	connections: [portConn("c1", "c", "c:done", "t", "t:in"), portConn("c2", "c", "c:retry", "m", "m:in"), portConn("c3", "m", "m:out", "c", "c:in")],
+}, false, ["cycle-unguarded"], ["cycle-present"]);
+check("a bound on an unwired chord does not guard (the loop hop is unbounded)", {
+	agents: [
+		cagent("a", { inputPorts: [{ name: "resp" }], outputPorts: ["request"] }),
+		cagent("b", { inputPorts: [{ name: "req" }, { name: "fix", bound: 3 }], outputPorts: ["out"] }),
+	],
+	connections: [portConn("c1", "a", "a:request", "b", "b:req"), portConn("c2", "b", "b:out", "a", "a:resp")],
+}, false, ["cycle-unguarded"], ["cycle-present"]);
+check("a bound port sharing its hop with an unbounded parallel edge does not guard", {
+	agents: [
+		cagent("a", { outputPorts: ["out"] }),
+		cagent("b", { inputPorts: [{ name: "capped", bound: 2 }, { name: "in" }] }),
+	],
+	connections: [portConn("c1", "a", "a:out", "b", "b:capped"), portConn("c2", "a", "a:out", "b", "b:in"), portConn("c3", "b", "b:out", "a", "a:in")],
+}, false, ["cycle-unguarded"], ["cycle-present"]);
+check("two disjoint cycles, one unguarded, are refused", {
+	agents: [agent("a"), cagent("b", { inputPorts: [{ name: "in", bound: 2 }] }), agent("x"), agent("y")],
+	connections: [conn("c1", "a", "b"), conn("c2", "b", "a"), conn("c3", "x", "y"), conn("c4", "y", "x")],
+}, false, ["cycle-unguarded"], ["cycle-present"]);
+check("an all-of entry port fed by the loop and a seed warns (the seed-once deadlock)", ifLoop(countFirst, { seed: true }), true, [], ["cycle-present", "cycle-entry-all-of"]);
+check("an any-of entry port stays quiet under the same shape", ifLoop(countFirst, { seed: true, entryPolicy: "any-of" }), true, [], ["cycle-present"]);
+check("a single-source entry port stays quiet", ifLoop(countFirst), true, [], ["cycle-present"]);
+{
+	// The shipped Coder→Reviewer sample (docs/guide/pipeline-samples.md): the
+	// bound on the coder's feedback port is the loop budget — regression anchor.
+	const result = validateGraph({
+		agents: [
+			{ "id": "agent-1", "name": "Task", "description": "", "instructions": "Restate the run input as a one-sentence coding task.",
+				"x": 40, "y": 80, "input": "agent-1:in", "output": "agent-1:out" },
+			{ "id": "agent-2", "name": "Coder", "description": "", "instructions": "Write the requested function. Address any review feedback you receive, then output the final code.",
+				"inputPorts": [{ "name": "in", "policy": "any-of" }, { "name": "feedback", "policy": "any-of", "side": "bottom", "bound": 3 }],
+				"x": 260, "y": 80, "input": "agent-2:in", "output": "agent-2:out" },
+			{ "id": "agent-3", "name": "Reviewer", "description": "", "instructions": "Review the code you receive. If it needs changes, report {\"verdict\": \"fix\"}; if it is good, report {\"verdict\": \"approve\"}.",
+				"outputPorts": ["feedback", "result"],
+				"outputPortSides": { "feedback": "bottom" },
+				"bindings": [
+					{ "field": "verdict", "port": "feedback", "value": "fix" },
+					{ "field": "verdict", "port": "result", "value": "approve" }
+				],
+				"settings": { "outputSchema": { "type": "object", "properties": { "verdict": { "type": "string", "enum": ["fix", "approve"] } }, "required": ["verdict"] } },
+				"x": 500, "y": 80, "input": "agent-3:in", "output": "agent-3:out" }
+		],
+		connections: [
+			{ "id": "c1", "source": "agent-1", "target": "agent-2", "sourcePort": "agent-1:out", "targetPort": "agent-2:in" },
+			{ "id": "c2", "source": "agent-2", "target": "agent-3", "sourcePort": "agent-2:out", "targetPort": "agent-3:in" },
+			{ "id": "c3", "source": "agent-3", "target": "agent-2", "sourcePort": "agent-3:feedback", "targetPort": "agent-2:feedback" }
+		],
+	});
+	deepStrictEqual(result.ok, true, "the shipped sample stays valid");
+	deepStrictEqual(result.warnings?.map((w) => w.code), ["cycle-present"], "the shipped sample warns cycle-present only");
+	passed++;
+	console.log("ok    the shipped Coder->Reviewer sample stays valid (bound 3 is the guard)");
+}
+{
+	// Exact codes on the refusal: the error plus the awareness warning, and
+	// nothing else — an unguarded cycle is one diagnosis, not a cascade.
+	const result = validateGraph({ agents: [agent("a"), agent("b")], connections: [conn("c1", "a", "b"), conn("c2", "b", "a")] });
+	deepStrictEqual(result.errors.map((e) => e.code), ["cycle-unguarded"], "unguarded cycle errors exactly once");
+	deepStrictEqual(result.warnings?.map((w) => w.code), ["cycle-present"], "unguarded cycle keeps the awareness warning");
+	passed++;
+	console.log("ok    an unguarded cycle reports cycle-unguarded once, cycle-present once");
+}
+{
+	// The lowered self-loop (a branch wired back to its own feeder) is a real
+	// one-node cycle the kernel runs — guarded, it runs; unguarded, refused.
+	// An HONEST self-connection is still only `connection-self` (pinned above).
+	const result = validateGraph(ifLoop(countFirst));
+	deepStrictEqual(result.ok, true, "the one-node lowered loop is a cycle the walk sees");
+	deepStrictEqual(result.warnings?.map((w) => w.code), ["cycle-present"], "the one-node lowered loop warns cycle-present");
+	passed++;
+	console.log("ok    a branch wired back to its own feeder joins the walk as a one-node cycle");
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

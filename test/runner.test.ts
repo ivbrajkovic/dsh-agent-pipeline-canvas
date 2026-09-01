@@ -127,12 +127,13 @@ function makeCtx(providerNames?: string[]) {
 
 // --- cycle graph: legal wiring now, but the sequential runner only runs its
 // --- acyclic prefix (the stream executor is what runs cycles; validateGraph
-// --- reports `cycle-present` as a warning, no longer an error) ------------
+// --- keeps `cycle-present` as a warning once the cycle carries its guard —
+// --- loops L2: the bound on b's entry port is that guard) ----------------
 {
 	const { ctx, invocations } = makeCtx();
 	const result = await runPipeline(ctx, {
 		// a -> b -> c -> b: a is the acyclic prefix; b/c sit on the cycle.
-		graph: graph([agent("a", "A", ""), agent("b", "B", ""), agent("c", "C", "")], [conn("c1", "a", "b"), conn("c2", "b", "c"), conn("c3", "c", "b")]),
+		graph: graph([agent("a", "A", ""), { ...agent("b", "B", ""), inputPorts: [{ name: "in", bound: 8 }] }, agent("c", "C", "")], [conn("c1", "a", "b"), conn("c2", "b", "c"), conn("c3", "c", "b")]),
 		input: "",
 		sessionId: "sess",
 	});

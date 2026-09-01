@@ -265,8 +265,11 @@ check("two branches of one if may reach one target (the validator allows distinc
 	graph.connections[2] = conn("c3", "if-1", "billing", "if-1:other", "billing:in");
 	return graph;
 })(), true, []);
-check("a cycle through the control warns on the agent path", (() => {
-	const graph = routerControlGraph() as { connections: unknown[] };
+check("a cycle through the control warns on the agent path (guarded)", (() => {
+	const graph = routerControlGraph() as { agents: Array<Record<string, unknown>>; connections: unknown[] };
+	// Loops L2: the back edge closes a cycle, so the router's entry port
+	// carries the guard (a bound); without it the graph would be refused.
+	(graph.agents[0] as Record<string, unknown>).inputPorts = [{ name: "in", bound: 4 }];
 	graph.connections.push(conn("c4", "billing", "router", "billing:out", "router:in"));
 	return graph;
 })(), true, [], ["cycle-present"]);
