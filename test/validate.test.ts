@@ -317,6 +317,18 @@ check("a valueless $count row is the catch-all, so it guards nothing", {
 	],
 	connections: [portConn("c1", "c", "c:done", "t", "t:in"), portConn("c2", "c", "c:retry", "m", "m:in"), portConn("c3", "m", "m:out", "c", "c:in")],
 }, false, ["cycle-unguarded"], ["cycle-present"]);
+check("an unwired count row still guards (the marbles' dead exhausted row)", {
+	agents: [
+		cagent("c", {
+			outputPorts: ["late", "retry"],
+			outputPortSides: { late: "top" },
+			bindings: [{ field: "$count", value: "3", op: ">=", port: "late" }, { field: "verdict", port: "retry" }],
+			settings: { outputSchema: { type: "object" } },
+		}),
+		agent("m"),
+	],
+	connections: [portConn("c2", "c", "c:retry", "m", "m:in"), portConn("c3", "m", "m:out", "c", "c:in")],
+}, true, [], ["cycle-present"]);
 check("a bound on an unwired chord does not guard (the loop hop is unbounded)", {
 	agents: [
 		cagent("a", { inputPorts: [{ name: "resp" }], outputPorts: ["request"] }),
