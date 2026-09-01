@@ -57,8 +57,10 @@ whole.
 
 **Can replace:** the persona slot, per agent, via the config modal's
 **System prompt** field (left column, above Instructions). It is a
-first-class agent field (`Agent.systemPrompt`, persisted in pipeline.json,
-forwarded by `src/runner.ts` as `SubagentStartRequest.persona`).
+first-class agent field (`Agent.systemPrompt`, persisted with the pipeline
+graph — the session's `pipelines/<sessionId>.json` once it forks, else the
+legacy `pipeline.json` — forwarded by `src/runner.ts` as
+`SubagentStartRequest.persona`).
 
 - Write plain prose. The text goes through the harness's strict
   `{{variable}}` template interpolation (the deployment persona uses the same
