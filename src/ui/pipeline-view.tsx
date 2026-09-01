@@ -1140,7 +1140,7 @@ function PipelineView({
 			}
 			// Label rides the bracket's horizontal run (above it for a bottom
 			// lane, below it for a top lane).
-			return { d, mx: (s.x + t.x) / 2, my: down ? lane - 5 : lane + 14 };
+			return { d, mx: (s.x + t.x) / 2, my: down ? lane - 8 : lane + 14 };
 		}
 		// Everything else: leave perpendicular to the source edge, arrive
 		// perpendicular to the target edge. One fallback keeps iteration 1's
@@ -1167,10 +1167,21 @@ function PipelineView({
 		const ex = arrLen > head ? t.x - (arrX / arrLen) * head : t.x;
 		const ey = arrLen > head ? t.y - (arrY / arrLen) * head : t.y;
 		const d = "M" + s.x + " " + s.y + " C" + c1.x + " " + c1.y + " " + c2.x + " " + c2.y + " " + ex + " " + ey;
-		// Exact cubic midpoint of the full curve — the label rides the curve.
+		// Exact cubic midpoint of the full curve — the label rides the curve,
+		// offset along the curve's NORMAL at that point so it sits beside the
+		// wire instead of crossing it (a bare vertical shift still crosses on
+		// steep or S-curving wires). The normal is flipped to one consistent
+		// side: above the wire where it runs horizontal, to its left when
+		// vertical.
 		const mx = (s.x + 3 * c1.x + 3 * c2.x + t.x) / 8;
-		const my = (s.y + 3 * c1.y + 3 * c2.y + t.y) / 8 - 6;
-		return { d, mx, my };
+		const my = (s.y + 3 * c1.y + 3 * c2.y + t.y) / 8;
+		const tgx = t.x + c2.x - c1.x - s.x;
+		const tgy = t.y + c2.y - c1.y - s.y;
+		const tgLen = Math.hypot(tgx, tgy);
+		let nx = tgLen > 0 ? -tgy / tgLen : 0;
+		let ny = tgLen > 0 ? tgx / tgLen : -1;
+		if (ny > 0 || (ny === 0 && nx > 0)) { nx = -nx; ny = -ny; }
+		return { d, mx: mx + nx * 11, my: my + ny * 11 };
 	}
 	// Endpoint resolution spans both node kinds: an agent anchors through its
 	// port model, a control through the branch ticks (source) and the single
