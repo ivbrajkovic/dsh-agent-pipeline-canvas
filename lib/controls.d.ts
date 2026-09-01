@@ -70,4 +70,15 @@ export declare function lowerControls(graph: PipelineGraph | null | undefined): 
  * by this return value.
  */
 export declare function firedBranches(branches: readonly IfBranch[] | undefined | null, emittedTo: readonly unknown[] | undefined | null): string[];
+/**
+ * The loop budget a control's branches declare, for the run view's iteration
+ * display (docs/proposals/loops.md L4): the first valued `$count >=` row
+ * whose value coerces to a finite number. `==` count rows are deliberately
+ * not read as a budget (guard analysis is shape-only — whether a row matches
+ * a run is data, not shape), a valueless row is the catch-all rather than a
+ * threshold, and the malformed `>=` shapes validation reports simply parse to
+ * nothing. Null when no threshold parses — the diamond then shows a plain
+ * `iter N`. Total over malformed input; never throws.
+ */
+export declare function countThreshold(branches: readonly IfBranch[] | undefined | null): number | null;
 //# sourceMappingURL=controls.d.ts.map

@@ -765,11 +765,7 @@ export function cycleClosingFlip(graph: unknown, connection: unknown): CycleClos
 	if (connId.length === 0 || argStr(conn.source).length === 0 || target.length === 0) return { closesCycle: false };
 
 	const agentIds = new Set<string>();
-	for (const agent of Array.isArray(honest.agents) ? honest.agents : []) {
-		if (agent == null || typeof agent !== "object") continue;
-		const id = argStr((agent as { id?: unknown }).id);
-		if (id.length > 0) agentIds.add(id);
-	}
+	collectIds(honest.agents, agentIds);
 
 	// The prospective hop in lowered form — a control-sourced edge re-sources
 	// onto its owner there (found by connection id; lowering preserves ids).
@@ -828,6 +824,15 @@ export function cycleClosingFlip(graph: unknown, connection: unknown): CycleClos
 	return { closesCycle: true, inputPorts: [{ name: port.name, policy: "any-of" }] };
 }
 
+/** Collect the non-empty string ids of one raw record array into `into` (the shared shape behind the graph walks' node universes). */
+function collectIds(records: unknown, into: Set<string>): void {
+	for (const entry of Array.isArray(records) ? records : []) {
+		if (entry == null || typeof entry !== "object") continue;
+		const id = argStr((entry as { id?: unknown }).id);
+		if (id.length > 0) into.add(id);
+	}
+}
+
 /** Adjacency (source -> targets) over a connections array; with `ids`, only edges whose both endpoints are known. */
 function adjacencyOver(connections: unknown, ids: ReadonlySet<string> | null): Map<string, string[]> {
 	const adjacency = new Map<string, string[]>();
@@ -871,6 +876,38 @@ function agentRecord(graph: { agents?: unknown }, id: string): Record<string, un
 }
 
 /**
+ * The control ids lying on at least one directed cycle of the HONEST graph —
+ * the canvas's membership test for the run view's iteration display
+ * (docs/proposals/loops.md L4: an if on a cycle shows the loop's iteration).
+ * A control lies on a cycle exactly when the drawn graph can walk back to it
+ * (feeder → control → branch → … → feeder); a feeder that sits on some other
+ * loop does not pull its control in, and a branch aimed into an unrelated
+ * cycle does not either — participation, not presence (the cycleClosingFlip
+ * precedent). Lowering contracts each such cycle onto the feeder, so every
+ * cycle found here is one the kernel really runs. Total over malformed
+ * declarations; never throws.
+ */
+export function loopControlIds(graph: unknown): ReadonlySet<string> {
+	const out = new Set<string>();
+	if (graph == null || typeof graph !== "object" || Array.isArray(graph)) return out;
+	const raw = (graph as { controls?: unknown }).controls;
+	if (!Array.isArray(raw)) return out;
+	// The walk's node universe: known agent and control ids — a dangling
+	// connection from a hand-edited file must not fabricate a cycle (the
+	// cycleNodeIds discipline; validation reports the dangling edge).
+	const known = new Set<string>();
+	collectIds((graph as { agents?: unknown }).agents, known);
+	collectIds(raw, known);
+	const adjacency = adjacencyOver((graph as { connections?: unknown }).connections, known);
+	for (const entry of Array.isArray(raw) ? raw : []) {
+		if (entry == null || typeof entry !== "object") continue;
+		const id = argStr((entry as { id?: unknown }).id);
+		if (id.length > 0 && reachableFrom(adjacency, id).has(id)) out.add(id);
+	}
+	return out;
+}
+
+/**
  * The agent ids lying on at least one directed cycle of the LOWERED graph —
  * the canvas's membership test for the branch editor's shadowing diagnosis
  * (which branches wire back into a loop). Lowered self-loops count (a branch
@@ -881,11 +918,7 @@ function agentRecord(graph: { agents?: unknown }, id: string): Record<string, un
 export function cycleNodeIds(graph: unknown): ReadonlySet<string> {
 	const lowered = lowerControls(graph as PipelineGraph);
 	const ids = new Set<string>();
-	for (const agent of Array.isArray(lowered.agents) ? lowered.agents : []) {
-		if (agent == null || typeof agent !== "object") continue;
-		const id = argStr((agent as { id?: unknown }).id);
-		if (id.length > 0) ids.add(id);
-	}
+	collectIds(lowered.agents, ids);
 	const adjacency = adjacencyOver(lowered.connections, ids);
 	const onCycle = new Set<string>();
 	for (const id of ids) {

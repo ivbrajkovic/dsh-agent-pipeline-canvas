@@ -122,8 +122,15 @@ strip lists current problems:
   that is not last, an edge naming an undeclared branch (see [the if
   control](#the-if-control--the-fork-as-a-node) below).
 
-A **directed cycle** is reported as a *warning* (legal wiring), and the
-toolbar chip gains a warning count. An absent or empty graph is valid (there
+A **directed cycle** is reported as a *warning* (legal wiring — awareness
+that a loop exists), and the toolbar chip gains a warning count. A cycle
+with **no guard** is different: `cycle-unguarded` is an *error* — the strip
+names the cycle's agents and the fix (add a bound to a loop port, or put a
+valued `$count` row ahead of every row that wires back), and the Run button
+refuses while it stands. The seed-once starvation of an `all-of` loop entry
+warns too (`cycle-entry-all-of` — set the port to `any-of`; the canvas
+usually does that for you, see [the loop](#the-loop--the-if-with-a-back-edge)).
+An absent or empty graph is valid (there
 is nothing to run). Validation is **detection, not enforcement**: you can
 save an invalid graph, but you cannot run it — the runner re-validates
 before starting and refuses an invalid snapshot.
@@ -252,13 +259,43 @@ something you can see and point at:
   strip.
 - **Branches.** Right-click the control → **Edit branches** (nodes carry no
   edit button; the menu is the only editor path). One row per branch —
-  `name | field == value | side` — with reorder, add, and remove. Branches
-  evaluate top to bottom against the feeding agent's **structured output**:
-  first match wins, and the empty value is the catch-all and must stay last
-  (the editor enforces both live and blocks Save on a broken shape). A
-  branch tick drags to the agent that handles it like any output tick — the
-  port picker opens with the branch list on every control-sourced draft, and
-  the whole target node is the drop target exactly as with agents.
+  `name | field op value | side` — with reorder, add, and remove. Each row
+  carries an **operator picker** (`==` the default, `>=` for a numeric
+  at-least comparison), and the field input suggests the reserved
+  **`$count`** — the feeding agent's firing sequence for this firing, the
+  iteration counter at a loop tail; a counter row reads as `count >= 3 →
+  name` on the row. Branches evaluate top to bottom: first match wins, and
+  the empty value is the catch-all and must stay last (the editor enforces
+  both live and blocks Save on a broken shape). Live row errors: a `>=`
+  whose value is not a finite number is flagged on the row, and a valued
+  `$count` row that sits BELOW a row wiring back into the loop shows the
+  shadowing inline — that arrangement makes the count row no guard
+  (`cycle-unguarded` names the same rows in the strip). A branch tick drags
+  to the agent that handles it like any output tick — the port picker opens
+  with the branch list on every control-sourced draft, and the whole target
+  node is the drop target exactly as with agents.
+- **The loop — the if with a back edge.** A flowchart loop is this control
+  drawn with one arrow rising back into the body: drag the `retry` branch's
+  tick back to an earlier agent and the canvas closes the cycle for you in
+  one more way — **the backward-edge assist**. A drop that closes a cycle
+  automatically sets the target agent's entered input port to `any-of`
+  (declaring the default port when the agent had none), so the seed message
+  and the loop-back can both reach the body; the flip is a real, visible
+  graph edit (the agent panel's port surface and View JSON), never run-time
+  magic. Cycles are legal wiring, but **every cycle carries its guard**:
+  either a `bound` on the input port a loop hop enters, or a valued
+  `$count` row positioned ahead of every row that wires back into the loop.
+  Without one, `cycle-unguarded` appears in the issue strip and the Run
+  button stays disabled (see the issue strip above);
+  with one, the loop just runs. During a run the loop's decision shows the
+  iteration: the diamond's top chip reads `iter 2` — the feeding agent's
+  firing count (per node per run: a feeder fed from several contexts counts
+  all of its firings; at a loop tail that is exactly the iteration number) —
+  promoted to `iter 2/3` when a `$count >= 3` row parses off the branches.
+  It is derived from the run record, never stored — it restores with the
+  last run exactly like the node statuses — and it rides alongside the
+  border's fired/quiet state and the ⚠ warning chip (which keeps the
+  diamond's bottom vertex).
 - **Warnings.** The control's ⚠ chip (and the same messages under the
   editor's rows) shows the non-fatal findings that name it: branches sharing
   one edge (`if-side-conflict`), and the never-fire cases — a source without

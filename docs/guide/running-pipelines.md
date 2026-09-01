@@ -103,12 +103,27 @@ each time its input policy is satisfied — running its agent once.
    quiet — nothing in flight, nothing fireable — the run ends
    (**quiescence**) and finalizes `completed`.
 
-**Cycles are ordinary wiring.** A loop ends when a port goes quiet (the
-reviewer emitting a verdict instead of feedback), and an input port's
-**bound** — a delivery count, the loop budget — drops further arrivals and
-records them in the record's `dropped` list. A graph that goes quiet with an
-unfilled all-of port still finalizes `completed`, and the executor log
-reports the starving nodes by name — never a silent skip.
+**Cycles are ordinary wiring — guarded.** A loop ends when a port goes quiet
+(the reviewer emitting a verdict instead of feedback), and every cycle
+carries its budget as data: an input port's **bound** (a delivery count that
+drops further arrivals and records them in the record's `dropped` list), or
+a valued **`$count`** branch escaping the loop. `$count` at a loop tail is
+the feeding agent's firing sequence for this firing — 1-based, the same
+`seq` the firing log records — so `$count >= 3 → exhausted` above the
+loop-back row runs the body exactly three times. Counter rows test the
+firing, not the structured result: a loop whose feeder has no
+`settings.outputSchema` is written as two VALUED `$count` rows (the
+catch-all shape needs a structured result and would stall the loop after one
+iteration), and a released breakpointed firing — which has no structured
+result — still fires its `$count` row. An `==` count row guards by shape
+only; whether it ever matches is data. **An unguarded cycle refuses to
+run**: `validateGraph` reports `cycle-unguarded` and the Run button stays
+disabled until the graph carries a budget (the issue strip names the cycle
+and the fix). A graph that goes quiet with an unfilled all-of port still
+finalizes `completed`, and the executor log reports the starving nodes by
+name — never a silent skip. On the canvas the loop's diamond counts along —
+`iter 2`, `iter 2/3` when the threshold parses
+([the loop](canvas.md#the-loop--the-if-with-a-back-edge)).
 
 **Errors fail the run (fail-fast, no continue-on-error).** A firing that
 settles as anything but `completed` — `error`, `refusal`, `max-tokens` —

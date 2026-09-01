@@ -20,11 +20,14 @@
 //     runs, at the top of RunExecutor.run(). The kernel never learns controls
 //     exist; the lowered graph is never persisted (the record's snapshot
 //     carries the honest controls, and a resumed run re-lowers on re-entry).
-//   - firedBranches — the run view's one derivation: maps a feeding-agent
-//     firing's `emittedTo` (the P7 kernel's emission record) back to the
-//     branches it chose, so the canvas can light the chosen branch edge. A
-//     control itself never appears in firings, nodes, or results — its run
-//     state is always DERIVED, never stored.
+//   - firedBranches / countThreshold — the run view's derivations:
+//     firedBranches maps a feeding-agent firing's `emittedTo` (the P7
+//     kernel's emission record) back to the branches it chose, so the canvas
+//     can light the chosen branch edge; countThreshold parses the loop budget
+//     a valued `$count >=` row declares, for the iteration display
+//     (docs/proposals/loops.md L4). A control itself never appears in
+//     firings, nodes, or results — its run state is always DERIVED, never
+//     stored.
 //
 // Lowering is TOTAL over malformed records — a hand-edited control normalizes
 // or skips, never throws — because the resurrection path re-enters run()
@@ -486,4 +489,26 @@ export function firedBranches(
 			.filter((name) => name.length > 0)
 		: [];
 	return declared.filter((name) => chosen.has(name));
+}
+
+/**
+ * The loop budget a control's branches declare, for the run view's iteration
+ * display (docs/proposals/loops.md L4): the first valued `$count >=` row
+ * whose value coerces to a finite number. `==` count rows are deliberately
+ * not read as a budget (guard analysis is shape-only — whether a row matches
+ * a run is data, not shape), a valueless row is the catch-all rather than a
+ * threshold, and the malformed `>=` shapes validation reports simply parse to
+ * nothing. Null when no threshold parses — the diamond then shows a plain
+ * `iter N`. Total over malformed input; never throws.
+ */
+export function countThreshold(branches: readonly IfBranch[] | undefined | null): number | null {
+	if (!Array.isArray(branches)) return null;
+	for (const entry of branches) {
+		if (entry == null || typeof entry !== "object") continue;
+		const row = entry as IfBranch;
+		if (row.field !== COUNT_KEY || row.op !== ">=" || !isValuedRow(row)) continue;
+		const threshold = Number(row.value);
+		if (Number.isFinite(threshold)) return threshold;
+	}
+	return null;
 }

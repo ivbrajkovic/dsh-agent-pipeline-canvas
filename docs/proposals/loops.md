@@ -559,3 +559,27 @@ restatements of the diff.
   assist (control targets simply never flip). `moveEmissionInto` forwards
   `op` alongside value/side — a moved hand-authored `>=` loop must not lose
   its guard.
+
+### L4
+
+- **The loop-membership fact is a NEW helper, not `cycleNodeIds`.** The plan
+  pointed at "the L2/L3 graph facts" for "the control lies on a cycle", but
+  those facts are LOWERED AGENT ids — they cannot tell the control that IS
+  the loop's decision from a control whose feeder merely loops somewhere
+  else (a diamond exiting a looping agent toward a straight line would
+  wrongly count iterations). The shipped `loopControlIds` (src/graph.ts)
+  answers participation on the HONEST graph — the drawn graph, controls as
+  nodes: a control counts iff the wiring can walk back to it. Lowering
+  contracts each such cycle onto the feeder, so every honest cycle through
+  a control is one the kernel really runs. Same participation-not-presence
+  discipline as L3's close test.
+- **The iteration chip shows from the first firing only, at the TOP vertex.**
+  `iter N` renders only when the feeding agent has ≥1 firing (before that
+  the diamond stays idle and says nothing — "iter 0" reads as a promise),
+  and the chip takes the diamond's top vertex while the ⚠ warning chip
+  keeps the bottom one (the plan's "chip slot" is therefore split, mirrored,
+  not stacked); chips render before the branch ticks in DOM order, so a
+  top-side tick keeps the pointer. `countThreshold` reads only VALUED
+  `>=` rows (first match wins) — an `==` count row is never a threshold,
+  consistent with the shape-only guard pin; the plan's E2E confirmed the
+  plain-`iter N` rendering survives removing the threshold row.

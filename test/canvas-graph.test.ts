@@ -12,7 +12,7 @@
 // without a `controls` key, and the canvas-authored Billing/General sample
 // validating and serializing to exactly its hand-authored ports+bindings twin.
 import { buildGraph, loadControls, type CanvasAgent, type CanvasConnection, type CanvasControl } from "../src/ui/shared.ts";
-import { cycleClosingFlip, validateGraph } from "../lib/graph.js";
+import { cycleClosingFlip, cycleNodeIds, loopControlIds, validateGraph } from "../lib/graph.js";
 import { lowerControls } from "../lib/controls.js";
 import { deepStrictEqual, ok } from "node:assert";
 
@@ -314,6 +314,117 @@ attempt("the helper is total over malformed input", () => {
 	deepStrictEqual(cycleClosingFlip({ agents: [node("a")], connections: [] }, null), { closesCycle: false });
 	deepStrictEqual(cycleClosingFlip({ agents: [node("a")], connections: [] }, { id: "", source: "a", target: "a" }), { closesCycle: false });
 	deepStrictEqual(cycleClosingFlip({ agents: [node("a")], connections: [] }, wire("c1", "a", "ghost", "a:out", "ghost:in")), { closesCycle: false });
+});
+
+// ---- the run view's loop membership: loopControlIds --------------------------
+// docs/proposals/loops.md L4 — which if diamonds show the run's iteration. The
+// honest graph is the drawn graph: a control lies on a cycle exactly when the
+// wiring can walk back to it.
+const ifNode = (id: string, branches: Array<Record<string, unknown>>) => ({ id, kind: "if", x: 0, y: 0, branches });
+
+attempt("a control whose branch wires back to its feeder lies on the loop", () => {
+	const graph = {
+		agents: [node("k"), node("r"), node("t")],
+		connections: [
+			wire("c1", "k", "r", "k:out", "r:in"),
+			wire("c2", "r", "if-1", "r:out"),
+			wire("c3", "if-1", "t", "if-1:done", "t:in"),
+			wire("c4", "if-1", "r", "if-1:retry", "r:in"),
+		],
+		controls: [ifNode("if-1", [{ name: "done", field: "$count", value: "3", op: ">=" }, { name: "retry" }])],
+	};
+	deepStrictEqual([...loopControlIds(graph)], ["if-1"]);
+	// Consistency with the lowered facts: the feeder the control contracts
+	// onto is a cycle node of the lowered graph.
+	ok(cycleNodeIds(graph).has("r"));
+});
+
+attempt("a one-branch loop back to the feeder counts (the one-node lowered cycle)", () => {
+	const graph = {
+		agents: [node("k"), node("r")],
+		connections: [wire("c1", "k", "r", "k:out", "r:in"), wire("c2", "r", "if-1", "r:out"), wire("c3", "if-1", "r", "if-1:retry", "r:in")],
+		controls: [ifNode("if-1", [{ name: "retry" }])],
+	};
+	deepStrictEqual([...loopControlIds(graph)], ["if-1"]);
+});
+
+attempt("a feeder on an unrelated loop does not pull its control in (participation, not presence)", () => {
+	// r loops with m through raw wiring; if-1 only exits r toward t.
+	const graph = {
+		agents: [node("r"), node("m"), node("t")],
+		connections: [
+			wire("c1", "r", "m", "r:out", "m:in"),
+			wire("c2", "m", "r", "m:out", "r:in"),
+			wire("c3", "r", "if-1", "r:out"),
+			wire("c4", "if-1", "t", "if-1:done", "t:in"),
+		],
+		controls: [ifNode("if-1", [{ name: "done" }])],
+	};
+	deepStrictEqual([...loopControlIds(graph)], []);
+	ok(cycleNodeIds(graph).has("r"));
+});
+
+attempt("a branch aimed into an unrelated cycle does not make the control a loop decision", () => {
+	// c feeds if-1; if-1's branch lands on the a⇄b cycle, but nothing on that
+	// cycle can walk back to if-1.
+	const graph = {
+		agents: [node("c"), node("a"), node("b")],
+		connections: [
+			wire("c1", "c", "if-1", "c:out"),
+			wire("c2", "if-1", "a", "if-1:go", "a:in"),
+			wire("c3", "a", "b", "a:out", "b:in"),
+			wire("c4", "b", "a", "b:out", "a:in"),
+		],
+		controls: [ifNode("if-1", [{ name: "go" }])],
+	};
+	deepStrictEqual([...loopControlIds(graph)], []);
+});
+
+attempt("two loops are found independently, and a straight-line control joins neither", () => {
+	const graph = {
+		agents: [node("r"), node("s"), node("x"), node("y"), node("out")],
+		connections: [
+			wire("c1", "r", "if-1", "r:out"),
+			wire("c2", "if-1", "r", "if-1:retry", "r:in"),
+			wire("c3", "x", "if-2", "x:out"),
+			wire("c4", "if-2", "y", "if-2:again", "y:in"),
+			wire("c5", "y", "if-2", "y:out"),
+			wire("c6", "if-2", "out", "if-2:done", "out:in"),
+			wire("c7", "s", "out", "s:out", "out:in"),
+		],
+		controls: [ifNode("if-1", [{ name: "retry" }]), ifNode("if-2", [{ name: "again" }, { name: "done" }])],
+	};
+	deepStrictEqual([...loopControlIds(graph)].sort(), ["if-1", "if-2"]);
+});
+
+attempt("a hand-authored loop has no controls to name", () => {
+	const graph = {
+		agents: [node("a"), node("b")],
+		connections: [wire("c1", "a", "b", "a:out", "b:in"), wire("c2", "b", "a", "b:out", "a:in")],
+	};
+	deepStrictEqual([...loopControlIds(graph)], []);
+});
+
+attempt("a dangling connection cannot fabricate a cycle for a control", () => {
+	// Unfiltered, the ghost hop would close if-1 -> a -> ghost -> if-1; the
+	// known-id filter drops it (validation reports the dangling edge).
+	const graph = {
+		agents: [node("a")],
+		connections: [
+			wire("c1", "if-1", "a", "if-1:go", "a:in"),
+			wire("c2", "a", "ghost", "a:out", "ghost:in"),
+			wire("c3", "ghost", "if-1", "ghost:out", "if-1:go"),
+		],
+		controls: [ifNode("if-1", [{ name: "go" }])],
+	};
+	deepStrictEqual([...loopControlIds(graph)], []);
+});
+
+attempt("loopControlIds is total over malformed input", () => {
+	deepStrictEqual([...loopControlIds(null)], []);
+	deepStrictEqual([...loopControlIds({ agents: [node("a")], connections: [] })], []);
+	deepStrictEqual([...loopControlIds({ agents: [node("a")], connections: [], controls: "nope" })], []);
+	deepStrictEqual([...loopControlIds({ agents: [node("a")], connections: [], controls: [null, { kind: "if" }, ifNode("if-1", [])] })], []);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
