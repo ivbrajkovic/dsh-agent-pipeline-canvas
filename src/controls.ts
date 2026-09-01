@@ -156,7 +156,7 @@ export function validateControls(
 			errors.push({ code: "if-source-invalid", message: `control "${id}" is fed by another control ("${source}") — control-to-control chaining is not supported` });
 			continue;
 		}
-		if (!agentIds.has(source)) continue; // unknown source: connection-source-missing already reported it
+		if (!agentIds.has(source)) continue; // unknown source: validateGraph's connection pass (which runs after this one) reports connection-source-missing
 		sourceByControl.set(id, source);
 		const owner = findAgent(agents, source);
 		if (owner !== undefined) {
