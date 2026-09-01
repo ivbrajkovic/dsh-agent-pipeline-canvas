@@ -36,7 +36,7 @@ ordinary connections to ordinary downstream agents.
   record for a decision that costs no model call, plus a new firing
   semantics for no executor gain. **Rejected: labels-only rendering** —
   does not give the decision a home; kept as a rendering detail *inside*
-  the control (one labeled dot per branch).
+  the control (one labeled tick per branch).
 - **Lego bricks.** One new pure module owns the control behavior
   (`src/controls.ts` — validation-rule helpers and the lowering; the
   `ControlNode`/`IfBranch` types live in `src/types.ts` beside
@@ -86,7 +86,8 @@ ordinary connections to ordinary downstream agents.
 interface IfBranch {
     name: string;    // the branch/output-port name ("billing")
     field: string;   // structured-output field to compare ("action")
-    value?: string;  // required equality; absent/"" = catch-all (else)
+    value?: string;  // required equality; absent = catch-all (else)
+                     // ("": normalizes to absent on lowering — see below)
     side?: PortSide; // node edge the branch tick renders on; absent = "right"
 }                    // (geometry only — the executor never reads it)
 interface ControlNode {
@@ -100,16 +101,24 @@ interface ControlNode {
 
 - **Lowering** (pure, host run path): for control `K` with source agent `A` —
   `A` gains `outputPorts = K.branches[].name` and `bindings` mapped from the
-  branch rules; branch `side`s forward into `A`'s `outputPortSides` (the
-  kernel never reads geometry, but forwarding keeps the lowered graph
-  honestly equivalent to its hand-authored twin); every connection
+  branch rules, with one normalization: a branch authored `value: ""`
+  lowers to a binding with **no `value` key** — the executor's catch-all
+  test is `value === undefined` (`evaluateBindings`), so a literal empty
+  string would compare against `""` and never catch. Branch `side`s
+  forward into `A`'s `outputPortSides` under the house convention —
+  **non-default sides only, the map omitted when it would be empty** (as
+  the port editor and `buildGraph` already do) — keeping the lowered graph
+  honestly equivalent to its hand-authored twin; every connection
   `K:<branch> → T:<port>` becomes `A:<branch> → T:<port>`; `K` is dropped.
-  The lowered graph is exactly what a hand-authored P7 graph would be — the
-  equivalence is a test. The lowered graph is **never persisted**:
-  `record.graph` carries the honest graph **including `controls`** —
-  required, because a resumed run re-enters `run()` and re-lowers from the
-  snapshot. Controls appear in the record only there; firings, nodes, and
-  results name agents only.
+  `lowerControls` is **total**: a hand-edited record's malformed controls
+  normalize or skip, never throw — the resurrection path re-enters
+  `run()` without validation, so the lowering is the last line of defense
+  (the `portGraph` discipline). The lowered graph is exactly what
+  a hand-authored P7 graph would be — the equivalence is a test. The
+  lowered graph is **never persisted**: `record.graph` carries the honest
+  graph **including `controls`** — required, because a resumed run
+  re-enters `run()` and re-lowers from the snapshot. Controls appear in
+  the record only there; firings, nodes, and results name agents only.
 - **Decision semantics are the bindings semantics**: first match wins,
   catch-all last, no match (or no structured result — e.g. a breakpointed
   source cannot produce one) emits on no branch; the quiet branch never
@@ -136,10 +145,6 @@ interface ControlNode {
 - warning (non-fatal, cycle-style) `if-side-conflict` — two or more
   branches of one control resolve to the same node side; the control
   renders the stack, mirroring `agent-port-side-conflict`.
-- `control-invalid` — a malformed control record: `controls` present but
-  not an array, an entry not an object, blank or missing `id`/`kind`;
-  also duplicate control ids, and control ids colliding with agent ids
-  (hand-edited files) — endpoint resolution must stay unambiguous.
 - `if-edge-port-unknown` — a control-sourced connection must name a declared
   branch; a control-targeted connection must be its single input (no
   `targetPort`). The existing connection-port rules exempt control
@@ -147,6 +152,9 @@ interface ControlNode {
   a control-targeted edge, and `connection-source-port-mismatch` checks a
   control-sourced edge's `sourcePort` against the declared branches, not
   agent ports.
+- `cycle-present` unions each control with its source agent when walking
+  (a control adds no node beyond its producer), so a loop through the
+  control warns exactly as the lowered graph's loop would.
 - warning (non-fatal, surfaces on the control): source agent lacks
   `settings.outputSchema`, or is breakpointed — the branches can never fire.
 
@@ -179,8 +187,10 @@ hand-authored one. Nothing visual changes yet.
   chain (a new test file otherwise never runs and the gate passes vacuously).
 - `test/validate.test.ts`, new `test/controls.test.ts` — every rule fired by
   a targeted bad graph; **lowering equivalence**: the lowered sample graph
-  deep-equals the hand-authored ports+bindings graph; legacy graphs
-  validate and lower to themselves.
+  deep-equals the hand-authored ports+bindings graph (the twin fixture
+  follows the same conventions — non-default sides only, catch-all as an
+  absent `value`); an empty-string branch value normalizes to a valueless
+  binding; legacy graphs validate and lower to themselves.
 
 **Verification gate.** `pnpm test` green; the equivalence test in place;
 old fixtures untouched and passing.
@@ -193,7 +203,7 @@ the why, never the how; see the protocol at the end)*
 ## C2 — Canvas: render and author the control
 
 **Goal.** The palette offers an **If** brick; the canvas shows the control
-as a node with one labeled dot per branch; the fork is visible without
+as a node with one labeled tick per branch; the fork is visible without
 opening any panel; the persisted file is the honest graph.
 
 **Work items.**
@@ -202,16 +212,23 @@ opening any panel; the persisted file is the honest graph.
   labeled tick per branch on the control's four edges — the same
   port-anchor model as agents, positioned by the branch `side`, stacking
   when two branches share a side; single input tick); drag gestures:
-  branch tick → agent input opens the port picker with the branch list;
-  agent output tick → control opens the owner handoff (the agent must not
-  carry its own emission config — offer to move/clear it, else surface
-  `if-owner-conflict`); the primary-button gesture guards cover control
-  ticks too; Delete/Clear/select cover controls.
+  branch tick → agent input opens the port picker with the branch list —
+  and the picker opens for EVERY control-sourced draft, single-branch or
+  not (the port-name resolvers are agent-keyed and would otherwise fall
+  back to `"out"`); agent output tick → control opens the owner handoff
+  (the agent must not carry its own emission config — offer to move/clear
+  it, else surface `if-owner-conflict`); the primary-button gesture guards
+  cover control ticks too; Delete/Clear/select cover controls.
 - The right-click **node context menu** gains control entries — Edit
   branches, Delete control (no breakpoint or transcript rows: a control
   never fires a child session). This generalizes `NodeMenuTarget.agentId`
   to a node id and routes the action dispatcher by node kind; dismissal,
-  clamping, and close-on-activation stay the wrapper's.
+  clamping, and close-on-activation stay the wrapper's. All three
+  agent-only touchpoints generalize with it: the vanish-cleanup effect
+  must watch controls too (today it keys on `agents` alone, so a menu
+  opened on a control survives that control's deletion), the entries
+  computation must resolve control targets, and BOTH delete paths (the
+  toolbar's and the menu's) apply the source cascade.
 - New `src/ui/control-config.tsx` — the branch editor: rows of
   `name | field == value → branch` with a **side select**, reusing the
   port-row pattern (name + side) edge routing introduced in
@@ -219,7 +236,16 @@ opening any panel; the persisted file is the honest graph.
   constraint; warnings from the validation rules rendered on the node and
   in the panel.
 - `src/ui/shared.ts` — `CanvasControl` state type (branch sides included);
-  `buildGraph` emits `controls`; load path restores them.
+  `buildGraph` emits `controls` and **special-cases control endpoints**:
+  a control-targeted connection serializes with no `targetPort` (the
+  unconditional default would compose `if-N:in`), and a control-sourced
+  connection always carries the branch name as `sourcePort`; the load
+  path restores controls and **re-seeds the `if-N` counter** from them
+  (mirroring the max-id scans — Clear resets the counter, load re-seeds
+  it). Also in scope, listed because every other surface is: `canvas.css`
+  (control node/tick styling), the palette drop plumbing
+  (`handleCanvasDrop` matches a single data type today), and the toolbar
+  stat string (counts agents and connections today).
 - Pinned UI semantics: deleting an agent cascade-deletes any control it
   feeds and that control's edges (a control never outlives its source);
   **Clear** resets controls state and the `if-N` counter; the existing
