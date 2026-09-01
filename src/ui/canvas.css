@@ -40,9 +40,14 @@
 	color: var(--dsw-alias-state-error-primary);
 	border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent);
 }
+/* Every warning amber carries a literal fallback: the host theme injects the
+   alias palette at runtime and currently defines success/error/brand but no
+   warning alias, so a bare var() silently inherits the label color (white in
+   the dark theme). The fallback defers to the host theme once it defines the
+   alias. */
 .pipeline-view .pipeline-toolbar .pipeline-validation.warn {
-	color: var(--dsw-alias-state-warning-primary);
-	border-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 45%, transparent);
+	color: var(--dsw-alias-state-warning-primary, #f59e0b);
+	border-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 45%, transparent);
 }
 .pipeline-issues {
 	background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, var(--dsw-alias-bg-layer-1));
@@ -55,11 +60,11 @@
 	gap: 3px;
 }
 .pipeline-issues.warnings-only {
-	background: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 10%, var(--dsw-alias-bg-layer-1));
-	border-bottom-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 25%, var(--dsw-alias-border-l1));
+	background: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 10%, var(--dsw-alias-bg-layer-1));
+	border-bottom-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 25%, var(--dsw-alias-border-l1));
 }
 .pipeline-issue { font-size: 12px; color: var(--dsw-alias-state-error-primary); line-height: 1.4; }
-.pipeline-issue.warn { color: var(--dsw-alias-state-warning-primary); }
+.pipeline-issue.warn { color: var(--dsw-alias-state-warning-primary, #f59e0b); }
 .pipeline-body { flex: 1; min-height: 0; display: flex; border-top: 1px solid var(--dsw-alias-border-l1); }
 .pipeline-palette {
 	width: 170px;
@@ -123,12 +128,15 @@
 .pipeline-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .pipeline-edge { stroke: var(--dsw-alias-label-secondary); stroke-width: 2; fill: none; }
 .pipeline-arrowfill { fill: var(--dsw-alias-label-secondary); }
+.pipeline-arrowfill-fired { fill: var(--dsw-alias-state-success-primary); }
 .pipeline-edge-temp { stroke: var(--dsw-alias-brand-primary); stroke-width: 2; fill: none; stroke-dasharray: 6 4; }
-/* The if's branch-edge highlight (the derived run view): once the decision has
-   landed, the chosen branch's edge lights green and the branches that stayed
-   idle render dimmed. Only control-sourced edges ever carry these classes. */
+/* The if's branch-edge highlight (the derived run view): once the decision
+   has landed, the chosen branch's edge — and its arrowhead (the -fired
+   marker above) — light success green, and the branches that stayed
+   unchosen dim to dashed gray. Only control-sourced edges ever carry these
+   classes. */
 .pipeline-edge.pipeline-edge-fired { stroke: var(--dsw-alias-state-success-primary); stroke-width: 2.5; }
-.pipeline-edge.pipeline-edge-quiet { opacity: 0.35; }
+.pipeline-edge.pipeline-edge-quiet { opacity: 0.35; stroke-dasharray: 6 4; }
 /* Named-port edge labels ("mail → data") at the edge midpoint: small, muted,
    and stroked with the canvas background so they read over the edge line. */
 .pipeline-edge-label {
@@ -204,39 +212,61 @@
 	color: color-mix(in srgb, var(--dsw-alias-label-secondary) 45%, transparent);
 	cursor: pointer;
 }
-.pipeline-node .node-breakpoint:hover { color: var(--dsw-alias-state-warning-primary); background: var(--dsw-alias-interactive-bg-hover); }
-.pipeline-node .node-breakpoint.armed { color: var(--dsw-alias-state-warning-primary); }
-/* Live per-node run states (from the active run's record). */
-.pipeline-node.node-running { border-color: var(--dsw-alias-brand-primary); }
-.pipeline-node.node-paused { border-color: var(--dsw-alias-state-warning-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-warning-primary) 55%, transparent); }
-.pipeline-node.node-done { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 60%, var(--dsw-alias-border-l2)); }
-.pipeline-node.node-aborted { border-color: var(--dsw-alias-state-error-primary); }
-.pipeline-node.node-error { border-color: var(--dsw-alias-state-error-primary); }
-.pipeline-node .node-status {
+.pipeline-node .node-breakpoint:hover { color: var(--dsw-alias-state-warning-primary, #f59e0b); background: var(--dsw-alias-interactive-bg-hover); }
+.pipeline-node .node-breakpoint.armed { color: var(--dsw-alias-state-warning-primary, #f59e0b); }
+/* Live per-node run states (from the active run's record): the border, a
+   faint state tint over the node, and a corner icon badge. Everything paints
+   INSIDE the node box — the old status pill hung off the bottom edge at dead
+   center, exactly where a bottom-side port anchors and wires route — so
+   ports and connections stay clear. The badge rides the bottom edge's wide
+   axis: even three stacked bottom-side ports (frac 1/4..3/4 of 150px) clear
+   it. */
+.pipeline-node.node-running { border-color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 9%, var(--dsw-alias-bg-layer-2)); }
+.pipeline-node.node-paused { border-color: var(--dsw-alias-state-warning-primary, #f59e0b); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 55%, transparent); background: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 11%, var(--dsw-alias-bg-layer-2)); }
+.pipeline-node.node-done { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 60%, var(--dsw-alias-border-l2)); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 9%, var(--dsw-alias-bg-layer-2)); }
+.pipeline-node.node-aborted { border-color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 9%, var(--dsw-alias-bg-layer-2)); }
+.pipeline-node.node-error { border-color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 9%, var(--dsw-alias-bg-layer-2)); }
+/* The status badge: shape-coded (check / pause bars / stop square / cross;
+   running is the bare pulsing dot — brand reads near-white in the dark
+   theme, so motion carries "in flight") so the state never rides color
+   alone; the tooltip carries the word. Icons are currentColor inline SVGs,
+   same idiom as the breakpoint dot's. */
+.pipeline-node .node-badge {
 	position: absolute;
-	bottom: -8px;
-	left: 50%;
-	transform: translateX(-50%);
-	font-size: 9px;
-	line-height: 1;
-	padding: 2px 7px;
-	border-radius: 999px;
+	right: 3px;
+	bottom: 3px;
+	width: 16px;
+	height: 16px;
+	box-sizing: border-box;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 50%;
 	background: var(--dsw-alias-bg-overlay);
 	border: 1px solid var(--dsw-alias-border-l2);
-	text-transform: uppercase;
-	letter-spacing: .05em;
 }
-.pipeline-node .node-status.status-running { color: var(--dsw-alias-brand-primary); border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, transparent); }
-.pipeline-node .node-status.status-paused { color: var(--dsw-alias-state-warning-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary) 50%, transparent); }
-.pipeline-node .node-status.status-done { color: var(--dsw-alias-state-success-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 50%, transparent); }
-.pipeline-node .node-status.status-aborted,
-.pipeline-node .node-status.status-error { color: var(--dsw-alias-state-error-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent); }
+.pipeline-node .node-badge.status-done { color: var(--dsw-alias-state-success-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 55%, transparent); }
+.pipeline-node .node-badge.status-paused { color: var(--dsw-alias-state-warning-primary, #f59e0b); border-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 55%, transparent); }
+.pipeline-node .node-badge.status-aborted,
+.pipeline-node .node-badge.status-error { color: var(--dsw-alias-state-error-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 55%, transparent); }
+.pipeline-node .node-badge.status-running {
+	background: var(--dsw-alias-brand-primary);
+	border-color: var(--dsw-alias-brand-primary);
+	animation: node-badge-pulse 1.6s ease-out infinite;
+}
+@keyframes node-badge-pulse {
+	0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent); }
+	70%, 100% { box-shadow: 0 0 0 5px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.pipeline-node .node-badge.status-running { animation: none; }
+}
 .pipeline-view .pipeline-toolbar .pipeline-run-live {
 	font-size: 12px;
-	color: var(--dsw-alias-state-warning-primary);
+	color: var(--dsw-alias-state-warning-primary, #f59e0b);
 	padding: 3px 9px;
 	border-radius: 999px;
-	border: 1px dashed color-mix(in srgb, var(--dsw-alias-state-warning-primary) 50%, transparent);
+	border: 1px dashed color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 50%, transparent);
 	line-height: 1;
 	max-width: 260px;
 	overflow: hidden;
@@ -300,24 +330,16 @@
 }
 /* The derived run state lights the diamond the way an agent's border moves:
    armed = the feeding agent is producing the decision's input (brand), fired =
-   the decision landed on a branch (success). idle/quiet leave the shape at
-   rest — the chip and the branch edges carry those. */
+   the decision landed on a branch (success), quiet = the decision landed on
+   nothing — no branch matched (warning). idle leaves the shape at rest. No
+   run word is rendered: the border and the branch edges ARE the state, and
+   the hover tooltip names it. */
 .pipeline-node.control.control-armed .control-shape polygon { stroke: var(--dsw-alias-brand-primary); stroke-width: 2; }
 .pipeline-node.control.control-armed .control-shape { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dsw-alias-brand-primary) 60%, transparent)); }
 .pipeline-node.control.control-fired .control-shape polygon { stroke: var(--dsw-alias-state-success-primary); stroke-width: 2; }
 .pipeline-node.control.control-fired .control-shape { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dsw-alias-state-success-primary) 60%, transparent)); }
-/* The control's derived run chip flows INSIDE the diamond as the flex row
-   under the node-sub — every vertex slot is a branch tick's, the bottom one
-   also carries the warning chip, and the two can coexist (a never-fire source
-   during a run). armed/fired take the running/done colors; idle/quiet keep the
-   muted base chip. */
-.pipeline-node .node-status.control-status {
-	position: static;
-	transform: none;
-	margin-top: 3px;
-}
-.pipeline-node .node-status.control-status.status-armed { color: var(--dsw-alias-brand-primary); border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, transparent); }
-.pipeline-node .node-status.control-status.status-fired { color: var(--dsw-alias-state-success-primary); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 50%, transparent); }
+.pipeline-node.control.control-quiet .control-shape polygon { stroke: var(--dsw-alias-state-warning-primary, #f59e0b); stroke-width: 2; }
+.pipeline-node.control.control-quiet .control-shape { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 60%, transparent)); }
 /* The shape layer is absolutely positioned, which paints it over the static
    text — lift the labels into the positioned layer (they come later in the
    DOM, so this alone puts them back on top). */
@@ -352,8 +374,11 @@
 .control-branch.side-left .branch-label { right: calc(100% + 5px); bottom: calc(50% + 5px); }
 .control-branch.side-top .branch-label { bottom: calc(100% + 5px); right: calc(50% + 5px); }
 .control-branch.side-bottom .branch-label { top: calc(100% + 5px); right: calc(50% + 5px); }
-/* The control's warning chip (never-fire sources, side stacking) rides the
-   same bottom slot an agent's status chip uses — a control has none. */
+/* The control's warning chip (never-fire sources, side stacking) hangs below
+   the diamond's bottom vertex — a control has no status badge (its run state
+   rides the border), so the slot is the authoring warning's alone. A
+   bottom-side branch tick anchors on that same vertex; the chip's base
+   overlay keeps both readable when they coexist. */
 .pipeline-node .node-warn {
 	position: absolute;
 	bottom: -8px;
@@ -364,8 +389,8 @@
 	padding: 2px 7px;
 	border-radius: 999px;
 	background: var(--dsw-alias-bg-overlay);
-	border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warning-primary) 50%, transparent);
-	color: var(--dsw-alias-state-warning-primary);
+	border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 50%, transparent);
+	color: var(--dsw-alias-state-warning-primary, #f59e0b);
 }
 /* The owner-handoff dialog's body text. */
 .pipeline-edge-picker .handoff-text { font-size: 12px; color: var(--dsw-alias-label-primary); line-height: 1.5; }

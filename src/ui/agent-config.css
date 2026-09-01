@@ -132,7 +132,7 @@
 }
 .pipeline-config .config-warning {
   font-size: 11px;
-  color: var(--dsw-alias-state-warning-primary, #b8860b);
+  color: var(--dsw-alias-state-warning-primary, #f59e0b);
 }
 .pipeline-config .config-check {
   display: flex;

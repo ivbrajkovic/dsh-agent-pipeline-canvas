@@ -3,12 +3,14 @@
 // breakpoint toggle, output→input connections with directed edges
 // (an If's branch ticks are the labeled sources; the if takes one unnamed
 // input and owns its feeding agent's whole emission surface; during a run the
-// if shows a DERIVED idle/armed/fired/quiet chip from the feeding agent's
-// firing, its chosen branch edge lights and quiet branches dim), the toolbar
-// (add/delete/JSON/clear/run/abort), load/save through the Host routes, the
-// run/result modals, and the paused-run inspection modal. Renders inside the
-// per-session view tab AND the frame-wide shell panel (see ./shell-panel.tsx);
-// the two hosts differ only in the props below.
+// if's DERIVED idle/armed/fired/quiet state lights the diamond's border and
+// its branch edges — the chosen branch's edge and arrowhead light success
+// green, the unchosen branches dim dashed — and a hover tooltip names the
+// decision), the toolbar (add/delete/JSON/clear/run/abort), load/save
+// through the Host routes, the run/result modals, and the paused-run
+// inspection modal. Renders inside the per-session view tab AND the
+// frame-wide shell panel (see ./shell-panel.tsx); the two hosts differ only
+// in the props below.
 //
 // Persistence is PER SESSION: the load GET and the debounced save POST carry
 // the session id, so each session owns
@@ -39,7 +41,7 @@ import { firedBranches, lowerControls } from "../controls.ts";
 import { classifyGraph, topoOrder } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
-import type { IfBranch, PortSide, ValidationError, ValidationResult } from "../types.ts";
+import type { IfBranch, PortSide, RunFiringStatus, ValidationError, ValidationResult } from "../types.ts";
 import { AgentConfigPanel } from "./agent-config.tsx";
 import { ControlConfigPanel } from "./control-config.tsx";
 import { RunModal } from "./run-modal.tsx";
@@ -86,9 +88,72 @@ function requestChatView(sessionId: string) {
 	window.setTimeout(() => { if (pendingChatView === sessionId) pendingChatView = null; }, 5000);
 }
 
-/** One if control's DERIVED run state (see controlRunState): the decision word
- * the chip shows plus the branch names the source's firing chose. */
+/** One if control's DERIVED run state (see controlRunState): the decision
+ * state the border and branch edges show plus the branch names the source's
+ * firing chose. */
 type ControlRunState = { state: "idle" | "armed" | "fired" | "quiet"; chosen: string[] };
+
+/** The if control's hover tooltip: names the decision and its branches — the
+ * words no longer rendered as a node tag. */
+function controlRunTitle(runState: ControlRunState): string {
+	return runState.state === "fired"
+		? "The decision fired — branch " + runState.chosen.join(", ")
+		: runState.state === "quiet"
+			? "The feeding agent's result matched no branch — nothing downstream of the if ran"
+			: runState.state === "armed"
+				? "No branch decision recorded — the feeding agent's last firing never reached emission"
+				: "The run has not reached this decision yet";
+}
+
+/** The statuses that render on an agent node — pending renders nothing
+ * (nothing has happened yet). */
+type LiveFiringStatus = Exclude<RunFiringStatus, "pending">;
+
+/** The status badge's tooltip: the word the old hanging pill printed. */
+const RUN_STATUS_TITLE: Record<LiveFiringStatus, string> = {
+	running: "Running",
+	paused: "Paused at a breakpoint",
+	done: "Finished",
+	aborted: "Aborted — the run was stopped before this agent finished",
+	error: "Failed — open Result for the error",
+};
+
+/** The status badge's glyph, shape-coded so the state never rides color
+ * alone (the check/pause/stop/cross marks; running is the bare pulsing dot —
+ * the badge itself, no glyph). currentColor inline SVGs, the breakpoint
+ * dot's idiom. */
+function statusBadgeIcon(status: LiveFiringStatus): React.ReactNode {
+	switch (status) {
+		case "done":
+			return (
+				<svg width={9} height={9} viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M4 13l5 5L20 7" fill="none" stroke="currentColor" strokeWidth={3.5} strokeLinecap="round" strokeLinejoin="round" />
+				</svg>
+			);
+		case "paused":
+			return (
+				<svg width={8} height={8} viewBox="0 0 24 24" aria-hidden="true">
+					<rect x={5} y={4} width={5} height={16} rx={1.5} fill="currentColor" />
+					<rect x={14} y={4} width={5} height={16} rx={1.5} fill="currentColor" />
+				</svg>
+			);
+		case "aborted":
+			return (
+				<svg width={8} height={8} viewBox="0 0 24 24" aria-hidden="true">
+					<rect x={5} y={5} width={14} height={14} rx={2} fill="currentColor" />
+				</svg>
+			);
+		case "error":
+			return (
+				<svg width={8} height={8} viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" strokeWidth={3.5} strokeLinecap="round" />
+				</svg>
+			);
+		case "running":
+			// The bare pulsing dot IS the badge — no glyph.
+			return null;
+	}
+}
 
 function PipelineView({
 	sessionId, useSessions, useWorkspaces, inputActions, openView, services, onDismiss,
@@ -555,7 +620,7 @@ function PipelineView({
 	// the firing's `emittedTo` names the lowered output ports, which are the
 	// branch names (firedBranches). The state rides the source's LATEST firing
 	// — the projection's own rule — so a rerun re-arms the control until the
-	// new firing emits, exactly as an agent's chip moves. quiet is the decided
+	// new firing emits, exactly as an agent's badge moves. quiet is the decided
 	// empty selection (the source emitted on no branch); armed is anything
 	// in flight or settled without reaching emission. Null when no run view
 	// exists at all.
@@ -1241,17 +1306,22 @@ function PipelineView({
 		// repeat it verbatim.
 		const labeled = !("branches" in src) && (sourceName !== "out" || targetName !== "in");
 		// Branch-edge highlighting (the run view): once the control's decision
-		// has landed (fired or quiet), the chosen branch's edge lights and the
-		// branches that stayed idle render dimmed; idle/armed decisions leave
+		// has landed (fired or quiet), the chosen branch's edge — and its
+		// arrowhead (the -fired marker) — light success green and the branches
+		// that stayed unchosen dim to dashed gray; idle/armed decisions leave
 		// every edge at its default (no promise yet).
 		const controlState = "branches" in src ? controlRunState(src) : null;
 		const edgeState = controlState !== null && (controlState.state === "fired" || controlState.state === "quiet")
-			? (controlState.chosen.indexOf(sourceName) !== -1 ? " pipeline-edge-fired" : " pipeline-edge-quiet")
+			? (controlState.chosen.indexOf(sourceName) !== -1 ? "fired" : "quiet")
 			: "";
 		const geo = edgeGeometry(s, t);
 		return (
 			<g key={c.id}>
-				<path d={geo.d} className={"pipeline-edge" + edgeState} markerEnd="url(#pipeline-arrow)" />
+				<path
+					d={geo.d}
+					className={"pipeline-edge" + (edgeState !== "" ? " pipeline-edge-" + edgeState : "")}
+					markerEnd={edgeState === "fired" ? "url(#pipeline-arrow-fired)" : "url(#pipeline-arrow)"}
+				/>
 				{labeled ? (
 					<text x={geo.mx} y={geo.my} className="pipeline-edge-label" textAnchor="middle">
 						{sourceName + " → " + targetName}
@@ -1276,11 +1346,13 @@ function PipelineView({
 		const hoveredIn = hoverTarget === agent.id && gesture;
 		const nodeState = runProjection !== null ? runProjection.nodes[agent.id] : undefined;
 		const status = nodeState?.status;
-		const showStatus = status !== undefined && status !== "pending";
+		// Everything but pending renders: the node-state class (border + tint)
+		// and the corner badge.
+		const liveStatus = status !== undefined && status !== "pending" ? status : null;
 		return (
 			<div
 				key={agent.id}
-				className={"pipeline-node" + (selected ? " selected" : "") + (showStatus && status ? " node-" + status : "")}
+				className={"pipeline-node" + (selected ? " selected" : "") + (liveStatus !== null ? " node-" + liveStatus : "")}
 				style={{ left: agent.x + "px", top: agent.y + "px" }}
 				data-agent-id={agent.id}
 				data-node-status={status ?? ""}
@@ -1307,7 +1379,11 @@ function PipelineView({
 				</button>
 				<div className="node-name">{agent.name}</div>
 				<div className="node-sub">{agent.id}</div>
-				{showStatus ? <div className={"node-status status-" + status}>{status}</div> : null}
+				{liveStatus !== null ? (
+					<div className={"node-badge status-" + liveStatus} title={RUN_STATUS_TITLE[liveStatus]} aria-label={agent.name + ": " + RUN_STATUS_TITLE[liveStatus]}>
+						{statusBadgeIcon(liveStatus)}
+					</div>
+				) : null}
 				{inputPortNamesOf(agent.id).map((portName) => {
 					const anchor = portAnchor(agent, "in", portName);
 					const multiple = inputPortNamesOf(agent.id).length > 1 || anchor.side !== "left";
@@ -1361,17 +1437,19 @@ function PipelineView({
 	// fork is visible without opening any panel. The shape itself is an SVG
 	// layer (not a clip-path on the node box) so the border follows the
 	// diamond. No breakpoint button: a control never fires a child session
-	// (the projection knows agents only); its run state is the DERIVED chip
-	// (idle/armed/fired/quiet from the feeding agent's firing) plus the
-	// branch-edge highlight, never a recorded status. Editing is the context
-	// menu's Edit branches — nodes carry no edit button.
+	// (the projection knows agents only). Its run state is DERIVED (idle/
+	// armed/fired/quiet from the feeding agent's firing) and shows as the
+	// diamond's BORDER — armed brand, fired success, quiet warning; idle
+	// stays at rest — plus the branch-edge highlight and the hover tooltip;
+	// no run word is rendered. Editing is the context menu's Edit branches —
+	// nodes carry no edit button.
 	const controlNodes = controls.map((control) => {
 		const selected = control.id === selectedId;
 		const hoveredIn = hoverTarget === control.id && gesture;
 		const isIf = control.kind === "if";
 		const warnings = controlWarnings(control);
 		const runState = controlRunState(control);
-		const lit = runState !== null && (runState.state === "armed" || runState.state === "fired") ? " control-" + runState.state : "";
+		const lit = runState !== null && runState.state !== "idle" ? " control-" + runState.state : "";
 		return (
 			<div
 				key={control.id}
@@ -1379,6 +1457,7 @@ function PipelineView({
 				style={{ left: control.x + "px", top: control.y + "px" }}
 				data-control-id={control.id}
 				data-control-run-state={runState?.state ?? ""}
+				title={runState !== null ? controlRunTitle(runState) : undefined}
 				onPointerDown={(e) => { onNodePointerDown(e, control.id, control.x, control.y, "control"); }}
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
@@ -1392,20 +1471,6 @@ function PipelineView({
 				{warnings.length > 0 ? (
 					<div className="node-warn" title={warnings.map((w) => w.message).join("\n")}>
 						{"⚠ " + warnings.length}
-					</div>
-				) : null}
-				{runState !== null ? (
-					<div
-						className={"node-status control-status status-" + runState.state}
-						title={runState.state === "fired"
-							? "The decision fired — branch " + runState.chosen.join(", ")
-							: runState.state === "quiet"
-								? "The feeding agent's result matched no branch — nothing downstream of the if ran"
-								: runState.state === "armed"
-									? "No branch decision recorded — the feeding agent's last firing never reached emission"
-									: "The run has not reached this decision yet"}
-					>
-						{runState.state}
 					</div>
 				) : null}
 				<div
@@ -1563,6 +1628,12 @@ function PipelineView({
 						<defs>
 							<marker id="pipeline-arrow" markerWidth={8} markerHeight={8} refX={6} refY={3} orient="auto" markerUnits="strokeWidth">
 								<path d="M0,0 L6,3 L0,6 Z" className="pipeline-arrowfill" />
+							</marker>
+							{/* The fired branch's arrowhead lights with its line — a
+							    marker cannot inherit the path's stroke, so the fired
+							    edge points at its own success-filled def. */}
+							<marker id="pipeline-arrow-fired" markerWidth={8} markerHeight={8} refX={6} refY={3} orient="auto" markerUnits="strokeWidth">
+								<path d="M0,0 L6,3 L0,6 Z" className="pipeline-arrowfill-fired" />
 							</marker>
 						</defs>
 						{edges}

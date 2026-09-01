@@ -26,7 +26,7 @@
 	max-height: 160px;
 	overflow: auto;
 }
-.pipeline-result-warn { font-size: 11px; color: var(--dsw-alias-state-warning-primary); }
+.pipeline-result-warn { font-size: 11px; color: var(--dsw-alias-state-warning-primary, #f59e0b); }
 .pipeline-result-error { font-size: 11px; color: var(--dsw-alias-state-error-primary); }
 .pipeline-runs {
 	display: flex;
@@ -38,7 +38,7 @@
 .pipeline-run-row { display: flex; align-items: center; gap: 8px; font-size: 11px; min-height: 20px; }
 .pipeline-run-row .run-name { font-weight: 600; flex-shrink: 0; }
 .pipeline-run-row .run-status { color: var(--dsw-alias-label-secondary); flex-shrink: 0; }
-.pipeline-run-row .run-status.warn { color: var(--dsw-alias-state-warning-primary); }
+.pipeline-run-row .run-status.warn { color: var(--dsw-alias-state-warning-primary, #f59e0b); }
 .pipeline-run-row .run-error {
 	color: var(--dsw-alias-state-error-primary);
 	overflow: hidden;

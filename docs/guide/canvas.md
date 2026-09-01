@@ -54,6 +54,15 @@ edits in one are visible in the other.
   [pause-on-output breakpoint](running-pipelines.md#breakpoints-grouped-pause-the-queue-resume--rerun--steer--abort).
   Nodes carry no edit button: editing an agent goes through its right-click
   context menu (**Edit agent**), an If control's through **Edit branches**.
+- A run paints each agent's state **on the node**: the border, a faint
+  matching tint, and a **bottom-right badge** — a pulsing dot while
+  **running**, pause bars when **paused** at its breakpoint, a check when
+  **done**, a stop square when the run was **aborted**, a cross on **error**
+  (the tooltip names it; `pending` renders nothing). The mark is
+  shape-coded, so the state never rides color alone, and everything paints
+  inside the node box — ports and wires stay clear. The If control's derived
+  run state is described
+  [below](#the-if-control--the-fork-as-a-node).
 
 **Node context menu.** Right-click a node to select it and open a small
 per-node menu (the browser's native menu is suppressed on nodes only — the
@@ -238,12 +247,15 @@ something you can see and point at:
   kernel starts — an if-graph runs exactly like the hand-authored bindings
   form ([the lowering
   contract](../reference/graph-and-execution.md#the-if-control-honest-graph-lowered-execution)).
-  On the canvas the diamond shows a status chip derived from the feeding
-  agent's latest firing — **idle** (the run has not reached the fork),
-  **armed** (the firing has not reached emission), **fired** (the tooltip
-  names the chosen branches, and the chosen branch's edge lights success
-  green), **quiet** (the result matched no branch — nothing downstream of
-  the if ran, and the untouched branch edges dim). Deleting an agent
+  On the canvas the diamond renders no run word — its **border** carries the
+  derived state of the feeding agent's latest firing: at rest until the run
+  reaches the fork, **armed** brand while the firing has not reached
+  emission, **fired** success green once the decision landed, **quiet**
+  warning amber when the result matched no branch — nothing downstream of
+  the if ran. The **branch edges** carry the decision: the chosen branch's
+  edge — and its arrowhead — light success green, and the unchosen branches
+  dim to dashed gray. Hovering the diamond tooltips the state and the
+  chosen branches. Deleting an agent
   cascade-deletes any control it feeds and that control's edges; **Clear**
   empties controls too.
 
