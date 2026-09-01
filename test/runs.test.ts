@@ -49,11 +49,16 @@
 // (`latestRunForCwd`) pins the remount path that restores the canvas's Result
 // view: the newest record of any state wins (a stale running entry sweeps to
 // aborted first), a live executor preempts the disk scan, and a settled run is
-// served from disk.
+// served from disk. The if-control cases (C3) pin the run experience over an
+// if-authored HONEST graph (controls in the snapshot, lowered at run()): only
+// the chosen branch fires with `emittedTo` naming it, the catch-all catches
+// the no-match case, a no-match without a catch-all starves downstream and
+// reports, and a breakpointed source (no structured result) leaves every
+// branch quiet.
 import { RunRegistry, type RunRegistryServices } from "../lib/runs.js";
 import { validateGraph } from "../lib/graph.js";
 import { projectNodes } from "../lib/projection.js";
-import type { LegacyRunRecord, RunRecord } from "../lib/types.js";
+import type { LegacyRunRecord, PipelineGraph, RunRecord } from "../lib/types.js";
 import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2382,6 +2387,115 @@ await withTempDir(async (cwd) => {
 		done.state === "completed" && done.firings.length === 7 && done.firings.every((f) => f.status === "done"));
 	okCheck("default-cap: the record carries the resolved default", done.maxInFlight === 4);
 });
+
+// --- C3 (if-control): the run experience over an if-authored HONEST graph —
+// the controls-bearing snapshot runs exactly as its lowered twin: only the
+// chosen branch fires (the Router firing's `emittedTo` records the branch),
+// the catch-all catches the no-match case, a no-match without a catch-all
+// starves downstream and reports, and a breakpointed source (a continuable
+// child has no structured result) leaves every branch quiet ---------------------
+{
+	const connPorts = (id: string, source: string, target: string, sourcePort?: string, targetPort?: string) => ({
+		id, source, target,
+		...(sourcePort !== undefined ? { sourcePort } : {}),
+		...(targetPort !== undefined ? { targetPort } : {}),
+	});
+	const ifGraph = (branches: unknown[], source: Record<string, unknown> = {}): PipelineGraph => ({
+		agents: [
+			{ ...agent("n", "Router", "Route."), settings: { outputSchema: { type: "object" } }, ...source },
+			agent("m", "Billing", "B."),
+			agent("g", "General", "G."),
+		],
+		connections: [
+			connPorts("c0", "n", "if-1", "n:out"), // the control's single unnamed input (no targetPort)
+			connPorts("c1", "if-1", "m", "if-1:billing", "m:in"),
+			connPorts("c2", "if-1", "g", "if-1:other", "g:in"),
+		],
+		controls: [{ id: "if-1", kind: "if", branches, x: 50, y: 60 }],
+	} as unknown as PipelineGraph);
+	const ifTwoBranches = [
+		{ name: "billing", field: "action", value: "billing", side: "top" },
+		{ name: "other", field: "action" }, // the catch-all
+	];
+	const ifValuedOnly = [
+		{ name: "billing", field: "action", value: "billing" },
+		{ name: "other", field: "action", value: "other" },
+	];
+
+	// an if-graph run fires only the selected branch
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph: ifGraph(ifTwoBranches), input: "q" });
+		if (!started.ok) { okCheck("if-emit: start ok", false); return; }
+		await waitFor("n started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<out:n>", "completed", { action: "billing" });
+		await waitFor("the billing branch started", () => harness.starts.length === 2);
+		okCheck("if-emit: only the chosen branch starts (no model call on the other)", harness.starts[1].label === "Billing");
+		const mid = await registry.getRun(started.runId, cwd) as RunRecord;
+		okCheck("if-emit: the Router firing recorded emittedTo [billing]", mid.firings[0].emittedTo?.join() === "billing");
+		okCheck("if-emit: the record's snapshot carries the honest controls", mid.graph.controls?.length === 1);
+		harness.resolveOneshot(harness.starts[1].childId, "<out:billing>");
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("if-emit: completes with two done firings; General never fired",
+			done.state === "completed" && done.firings.length === 2 && done.firings.every((f) => f.status === "done")
+			&& done.firings.every((f) => f.nodeId !== "g"));
+	});
+
+	// the catch-all catches the no-match case
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph: ifGraph(ifTwoBranches), input: "q" });
+		if (!started.ok) { okCheck("if-catchall: start ok", false); return; }
+		await waitFor("n started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<out:n>", "completed", { action: "archive" });
+		await waitFor("the catch-all branch started", () => harness.starts.length === 2);
+		okCheck("if-catchall: the no-match result fell to the catch-all branch", harness.starts[1].label === "General");
+		harness.resolveOneshot(harness.starts[1].childId, "<out:general>");
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("if-catchall: completes with the catch-all branch done, billing quiet",
+			done.state === "completed" && done.firings.length === 2
+			&& done.firings[0].emittedTo?.join() === "other" && done.firings.every((f) => f.nodeId !== "m"));
+	});
+
+	// no-match without a catch-all starves downstream and reports
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph: ifGraph(ifValuedOnly), input: "q" });
+		if (!started.ok) { okCheck("if-quiet: start ok", false); return; }
+		await waitFor("n started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<out:n>", "completed", { action: "archive" });
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("if-quiet: the run completes with the Router done and no branch started",
+			done.state === "completed" && done.firings.length === 1 && done.firings[0].status === "done"
+			&& harness.starts.length === 1);
+		okCheck("if-quiet: the empty selection is recorded on the firing", done.firings[0].emittedTo?.length === 0);
+		okCheck("if-quiet: both starved branches are reported",
+			harness.warnings.some((w) => w.includes("waiting nodes: g, m")));
+	});
+
+	// a breakpointed source leaves every branch quiet
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness();
+		const registry = new RunRegistry(harness.services);
+		const started = await registry.startRun({
+			sessionId: "sess", cwd, graph: ifGraph(ifTwoBranches, { breakpoint: true }), input: "q",
+		});
+		if (!started.ok) { okCheck("if-bp: start ok", false); return; }
+		await waitFor("the Router started as continuable", () => harness.starts.length === 1 && harness.starts[0].kind === "continuable");
+		harness.settle(harness.starts[0].childId, "<out:n>");
+		const parked = await waitPausedAt(registry, started.runId, cwd, "n");
+		okCheck("if-bp: the run parks at the breakpointed Router", parked.state === "paused");
+		await registry.control(started.runId, { action: "resume" }, cwd);
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("if-bp: resuming completes with every branch quiet — no downstream start",
+			done.state === "completed" && harness.starts.length === 1
+			&& done.firings.length === 1 && done.firings[0].emittedTo?.length === 0);
+		okCheck("if-bp: the starved branches are reported", harness.warnings.some((w) => w.includes("waiting nodes: g, m")));
+	});
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

@@ -20,6 +20,11 @@
 //     runs, at the top of RunExecutor.run(). The kernel never learns controls
 //     exist; the lowered graph is never persisted (the record's snapshot
 //     carries the honest controls, and a resumed run re-lowers on re-entry).
+//   - firedBranches — the run view's one derivation: maps a feeding-agent
+//     firing's `emittedTo` (the P7 kernel's emission record) back to the
+//     branches it chose, so the canvas can light the chosen branch edge. A
+//     control itself never appears in firings, nodes, or results — its run
+//     state is always DERIVED, never stored.
 //
 // Lowering is TOTAL over malformed records — a hand-edited control normalizes
 // or skips, never throws — because the resurrection path re-enters run()
@@ -422,4 +427,30 @@ export function lowerControls(graph: PipelineGraph | null | undefined): Pipeline
 	}
 
 	return { agents: agents as PipelineGraph["agents"], connections };
+}
+
+/**
+ * The branches one source-agent firing CHOSE, from the firing's `emittedTo`
+ * (the P7 kernel's emission record). Lowering maps each branch onto an output
+ * port of the SAME name, so `emittedTo`'s port names are the branch names;
+ * intersecting with the declared branches keeps a drifted or hand-edited graph
+ * honest — a port the control never declared reports no branch. Returns the
+ * chosen names in declaration order. Total over malformed input, and `[]` is
+ * also the no-selection answer: the caller distinguishes "decided quiet" from
+ * "not yet decided" by whether the firing carries an `emittedTo` at all, not
+ * by this return value.
+ */
+export function firedBranches(
+	branches: readonly IfBranch[] | undefined | null,
+	emittedTo: readonly unknown[] | undefined | null,
+): string[] {
+	if (!Array.isArray(emittedTo)) return [];
+	const chosen = new Set(emittedTo.map(argStr).filter((name) => name.length > 0));
+	if (chosen.size === 0) return [];
+	const declared = Array.isArray(branches)
+		? branches
+			.map((branch) => (branch != null && typeof branch === "object" ? argStr((branch as IfBranch).name) : ""))
+			.filter((name) => name.length > 0)
+		: [];
+	return declared.filter((name) => chosen.has(name));
 }

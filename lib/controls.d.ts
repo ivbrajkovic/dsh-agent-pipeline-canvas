@@ -1,4 +1,4 @@
-import type { PipelineGraph, ValidationError } from "./types.ts";
+import type { IfBranch, PipelineGraph, ValidationError } from "./types.ts";
 /** What the shared graph rules need to know about a graph's controls. */
 export interface ControlAnalysis {
     /**
@@ -55,4 +55,16 @@ export declare function validateControls(graph: {
  * A graph without controls lowers to itself.
  */
 export declare function lowerControls(graph: PipelineGraph | null | undefined): PipelineGraph;
+/**
+ * The branches one source-agent firing CHOSE, from the firing's `emittedTo`
+ * (the P7 kernel's emission record). Lowering maps each branch onto an output
+ * port of the SAME name, so `emittedTo`'s port names are the branch names;
+ * intersecting with the declared branches keeps a drifted or hand-edited graph
+ * honest — a port the control never declared reports no branch. Returns the
+ * chosen names in declaration order. Total over malformed input, and `[]` is
+ * also the no-selection answer: the caller distinguishes "decided quiet" from
+ * "not yet decided" by whether the firing carries an `emittedTo` at all, not
+ * by this return value.
+ */
+export declare function firedBranches(branches: readonly IfBranch[] | undefined | null, emittedTo: readonly unknown[] | undefined | null): string[];
 //# sourceMappingURL=controls.d.ts.map

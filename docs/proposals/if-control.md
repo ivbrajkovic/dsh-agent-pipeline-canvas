@@ -312,6 +312,15 @@ control's warning surface.
 
 *(append only on material divergence)*
 
+- **C3**: the chip vocabulary gained a fourth word: **quiet**. The plan pinned
+  chips (idle/armed/fired), but a decided-empty selection (`emittedTo: []` —
+  no catch-all and no match, or a breakpointed source) rendering as "fired"
+  would claim a branch fired when none did, and rendering as "armed" would
+  claim the decision is still pending. Quiet is the honest third outcome of
+  the same decision landing, not a new state machine — branch-edge dimming
+  (the plan's quiet-branch rendering) and the C4 docs' chip list must describe
+  all four words.
+
 ## C4 — Docs, samples, scrutiny
 
 **Goal.** The guides describe the if control as shipped behavior, the
