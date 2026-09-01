@@ -185,11 +185,19 @@ check("control-targeted edge without a target port stays valid", {
 	connections: [controlConn("c1", "a", "if-1", "a:out")],
 	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1" }, { name: "y" }] }],
 }, true, []);
-check("unknown control source id reports the missing source, not a control rule", {
-	agents: [agent("a")],
-	connections: [controlConn("c1", "zzz", "if-1", "zzz:out")],
-	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1" }, { name: "y" }] }],
-}, false, ["connection-source-missing"]);
+{
+	// Exact codes: an unknown feeder is the connection rule's finding — a
+	// regression adding if-source-invalid here must fail, not hide in the
+	// subset matcher the check() helper uses.
+	const result = validateGraph({
+		agents: [agent("a")],
+		connections: [controlConn("c1", "zzz", "if-1", "zzz:out")],
+		controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "f", value: "1" }, { name: "y" }] }],
+	});
+	deepStrictEqual(result.errors.map((e) => e.code), ["connection-source-missing"], "unknown control source reports only the missing source");
+	passed++;
+	console.log("ok    unknown control source reports only connection-source-missing");
+}
 check("control-sourced unknown branch skips the agent-port rule", {
 	agents: [agent("a"), agent("b")],
 	connections: [controlConn("c1", "a", "if-1", "a:out"), controlConn("c2", "if-1", "b", "if-1:zzz")],
