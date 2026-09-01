@@ -24,7 +24,8 @@ kernel dispatches ready agents concurrently as harness `subagents` children
 (bounded by a max-in-flight cap), outputs flow downstream as messages, loops
 end when a port goes quiet, and the durable run record — a per-firing log —
 finalizes with `{ outputs: { [terminalId]: output } }`. The graph persists
-per repository.
+per session — forked from the repository's shared file on the session's
+first edit.
 
 <p align="center">
   <img alt="The Pipelines canvas: three agents wired as a chain, with a Valid chip in the toolbar and breakpoint dots on two nodes" src="docs/assets/canvas.png" width="840" />
@@ -43,7 +44,8 @@ per repository.
 - **Concurrent durable runs** — a run executes in the Host process as a
   firing log: ready agents run concurrently (capped), fail-fast errors end
   the run, and everything survives page reloads and profile restarts over
-  SSE; one run is active per workspace.
+  SSE; one run is active per session, and different sessions in one
+  workspace run concurrently.
 - **Breakpoints** — pause any agent after its output settles (the whole
   parallel section parks; in-flight agents finish and hold), then inspect
   and **resume**, **rerun** from the original input, **steer** the same

@@ -1,11 +1,11 @@
 # Per-session pipelines — every session owns its graph
 
-**Status: Planned** — four phases (S1 Host storage, S2 Host run keying,
-S3 client keying + browser verification, S4 docs + status flip). Reviewed
-via the scrutinize pass before implementation (verdict: fix-then-ship;
-findings applied — the S3 session-switch reset, the session-id wording, the
-S2 control-read gate, and the sweep pattern). The living
-phase-delta handoff lives in
+**Status: Built** — all four phases shipped (S1 host storage, S2 host run
+keying, S3 client keying + browser verification, S4 docs + status flip).
+Reviewed via the scrutinize pass before implementation (verdict:
+fix-then-ship; findings applied — the S3 session-switch reset, the
+session-id wording, the S2 control-read gate, and the sweep pattern). The
+living phase-delta handoff lives in
 [per-session-pipelines.handoff.md](per-session-pipelines.handoff.md).
 
 Today every session in a workspace shares ONE pipeline: the graph lives at

@@ -17,7 +17,7 @@ The canvas is available in every session in two forms:
   works even on a brand-new session, where the harness shows no view tabs at
   all. The panel binds to the CURRENT session.
 
-Both surfaces are the same component bound to the same per-repository graph —
+Both surfaces are the same component bound to the same per-session graph —
 edits in one are visible in the other.
 
 ## Nodes, ports, and connections
@@ -182,19 +182,34 @@ Short sample graphs for each pattern live in
 
 ## Persistence
 
-The graph persists **per repository** at
-`<workspace>/.agent-pipeline/pipeline.json`:
+The graph persists **per session** at
+`<workspace>/.agent-pipeline/pipelines/<sessionId>.json` — but a session
+owns a file only from its first edit:
 
-- The view loads the file from the session's workspace root on mount and
-  writes it back (debounced) after every change — add, connect, move, delete,
-  clear, or edit an agent's configuration. This is what survives the view-tab
-  switch that would otherwise drop component-local React state.
-- The browser loads/saves through a same-origin Host route; the Host resolves
-  the file under the project root and writes it **atomically** (temp file +
-  rename). A relative or empty `cwd` is refused, so the file can only land
-  under a real project directory.
+- The view loads the session's file from the session's workspace root on
+  mount and writes it back (debounced) after every change — add, connect,
+  move, delete, clear, or edit an agent's configuration. This is what
+  survives the view-tab switch that would otherwise drop component-local
+  React state.
+- **Copy-on-write fork.** While a session has no file of its own, it reads
+  through to the workspace's shared legacy graph
+  (`.agent-pipeline/pipeline.json`) — merely opening the canvas never
+  writes anything. The first edit in the session forks: that save writes
+  the session's own file, and from then on the session reads and writes it,
+  leaving the legacy file untouched (it keeps serving sessions that have
+  not forked, and the legacy cwd-only requests). Sessions are never
+  backfilled — an old session that never edits keeps the read-through
+  forever.
+- The browser loads/saves through a same-origin Host route; the Host
+  resolves the file under the project root and writes it **atomically**
+  (temp file + rename). A relative or empty `cwd` is refused and the
+  session key is validated (alphanumerics, `_`, `-` — no separators), so
+  the file can only land under a real project directory.
 - Because the storage path is the session's workspace directory, different
-  repositories get independent pipelines.
+  repositories get independent pipelines — and within one repository,
+  different sessions do too.
+- **Known limit:** a deleted session leaves its
+  `pipelines/<sessionId>.json` behind as an orphan; nothing cleans it up.
 
 The same storage protocol backs the run records written during execution —
 see [running-pipelines.md](running-pipelines.md).

@@ -170,7 +170,7 @@ canvas-generated agent id (`agent-N`; ids are not user-editable in the UI).
 
 ## The run record: a firing log
 
-A run persists per workspace as
+A run persists as
 `.agent-pipeline/runs/<runId>.json` (`recordVersion: 2`), rewritten
 atomically on every transition. The log is the run's truth — there is no
 parallel per-node status bookkeeping; the per-node view is computed by

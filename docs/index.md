@@ -11,8 +11,8 @@ that match what you need — nothing requires reading everything.
 
 | Document | What it covers |
 |----------|----------------|
-| [guide/canvas.md](guide/canvas.md) | Building a pipeline on the canvas: the palette, nodes and ports, connecting and editing, live validation, the agent configuration panel (system prompt + settings + the port surface), and per-repository persistence. |
-| [guide/running-pipelines.md](guide/running-pipelines.md) | The run dialog and input composition, the firing-kernel execution model (concurrent dispatch, fail-fast, quiescence), durable runs (the firing-log record, SSE, the single-active-run rule), grouped pause and the pending-pause queue, breakpoints (pause / inspect / resume / rerun / steer / abort), restart durability and degradation, and the result modal's continue routes. |
+| [guide/canvas.md](guide/canvas.md) | Building a pipeline on the canvas: the palette, nodes and ports, connecting and editing, live validation, the agent configuration panel (system prompt + settings + the port surface), and per-session persistence (a copy-on-write fork of the workspace's shared graph). |
+| [guide/running-pipelines.md](guide/running-pipelines.md) | The run dialog and input composition, the firing-kernel execution model (concurrent dispatch, fail-fast, quiescence), durable runs (the firing-log record, SSE, the per-session single-active-run rule), grouped pause and the pending-pause queue, breakpoints (pause / inspect / resume / rerun / steer / abort), restart durability and degradation, and the result modal's continue routes. |
 | [guide/pipeline-samples.md](guide/pipeline-samples.md) | Short sample graphs: sequential chains, concurrent fan-out/fan-in, any-of joins, conditional routers via output bindings, feedback loops with a bound, and steering at breakpoints. |
 | [guide/deployment.md](guide/deployment.md) | Installing into the DSH Web profile, the one-command sync loop, client-vs-host change handling, route verification, and the development scripts and change discipline. |
 
@@ -40,7 +40,7 @@ documents remain the design record.
 | [proposals/node-context-menu.md](proposals/node-context-menu.md) | **Built.** The node context menu — right-click on an agent node for **Go to transcript** (the projected child session) plus the node actions, on the harness `Menu` primitive. Phased plan; living phase-delta handoff alongside. |
 | [proposals/edge-routing.md](proposals/edge-routing.md) | **Built.** Readable connection lines, two iterations: per-port ticks with sides on any node edge (a loop's ports on one vertical edge arc over or under the band), tangent-aware edge paths, and the one-per-side cap as a non-fatal warning. |
 | [proposals/run-operations.md](proposals/run-operations.md) | Designed, not built: run reuse (rerun from node X), a run history browser, per-firing token accounting, and per-node timeouts — plus recorded known limits. The firing log is the foundation this builds on. |
-| [proposals/per-session-pipelines.md](proposals/per-session-pipelines.md) | **Planned.** Per-session pipelines — each session owns its graph via a copy-on-write fork of the legacy workspace file, session-scoped run discovery and the single-active-run rule, and per-session load/save in the view. Phased plan; living phase-delta handoff alongside. |
+| [proposals/per-session-pipelines.md](proposals/per-session-pipelines.md) | **Built.** Per-session pipelines — each session owns its graph via a copy-on-write fork of the legacy workspace file, session-scoped run discovery and the single-active-run rule, and per-session load/save in the view. Phased plan; living phase-delta handoff alongside. |
 | [proposals/implementation-plan.md](proposals/implementation-plan.md) | The phased build plan for the stream executor — each phase's gate, plus the append-only phase-deltas log recording where implementation met constraints. |
 
 Suggested reading order for a new contributor:

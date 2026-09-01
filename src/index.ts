@@ -1,8 +1,9 @@
 // dsh-agent-pipeline-canvas — Host half.
 //
 // The canvas is a browser-side feature (see ./client.tsx); the Host half exists
-// so the graph can be made durable per repository — and, once a session forks
-// it, per session — and pipelines can RUN durably. It registers exact routes
+// so the graph can be made durable — the shared workspace file first, per
+// session from the session's first edit (the fork) — and pipelines can RUN
+// durably. It registers exact routes
 // on the existing `webServer` service (the browser HTTP carrier, row
 // `webserver`); the browser half fetch()es them same-origin:
 //
