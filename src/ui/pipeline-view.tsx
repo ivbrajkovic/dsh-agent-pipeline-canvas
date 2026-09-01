@@ -1,6 +1,6 @@
 // The Pipelines canvas view: the whole node workspace — a palette with a
-// draggable Agent and an If control, a canvas, node move/select, the node edit
-// button, the breakpoint toggle, output→input connections with directed edges
+// draggable Agent and an If control, a canvas, node move/select, the
+// breakpoint toggle, output→input connections with directed edges
 // (an If's branch ticks are the labeled sources; the if takes one unnamed
 // input and owns its feeding agent's whole emission surface), the toolbar
 // (add/delete/JSON/clear/run/abort), load/save through the Host routes, the
@@ -1192,23 +1192,23 @@ function PipelineView({
 		if (!src || !tgt) return null;
 		const sourceName = c.sourcePort ?? "out";
 		const targetName = c.targetPort ?? "in";
-		const srcIsControl = "branches" in src;
 		const s = outputAnchorOf(src, sourceName);
 		const t = inputAnchorOf(tgt, targetName);
 		// A non-default port name is labeled at the edge midpoint — the canvas
 		// shows the real dataflow (design principle 2). A quiet port (its
 		// binding simply never matched) needs no extra rendering: an edge is
 		// only labeled wiring, never a promise the message arrived. A
-		// control-sourced edge labels just the branch — the decision's name is
-		// the whole story of that wire.
-		const labeled = sourceName !== "out" || targetName !== "in";
+		// control-sourced edge stays unlabeled: its branch name already rides
+		// the branch tick at the decision point, and an edge label would
+		// repeat it verbatim.
+		const labeled = !("branches" in src) && (sourceName !== "out" || targetName !== "in");
 		const geo = edgeGeometry(s, t);
 		return (
 			<g key={c.id}>
 				<path d={geo.d} className="pipeline-edge" markerEnd="url(#pipeline-arrow)" />
 				{labeled ? (
 					<text x={geo.mx} y={geo.my} className="pipeline-edge-label" textAnchor="middle">
-						{srcIsControl ? sourceName : sourceName + " → " + targetName}
+						{sourceName + " → " + targetName}
 					</text>
 				) : null}
 			</g>
@@ -1257,21 +1257,6 @@ function PipelineView({
 				>
 					<svg width={10} height={10} viewBox="0 0 24 24" aria-hidden="true">
 						<circle cx={12} cy={12} r={8} fill="currentColor" />
-					</svg>
-				</button>
-				<button
-					className="node-edit"
-					title="Edit agent"
-					aria-label={"Edit agent " + agent.name}
-					// Keep the button's pointer events off the node's drag handler.
-					onPointerDown={(e) => { e.stopPropagation(); }}
-					onClick={(e) => { e.stopPropagation(); setConfigAgentId(agent.id); }}
-				>
-					<svg width={10} height={10} viewBox="0 0 24 24" aria-hidden="true">
-						<path
-							d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"
-							fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"
-						/>
 					</svg>
 				</button>
 				<div className="node-name">{agent.name}</div>
