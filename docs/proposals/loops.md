@@ -527,3 +527,35 @@ restatements of the diff.
   shape): L3's cycle-closing helper is pinned to reuse the lifted machinery,
   and reuse means calling this over `lowerControls(honest + prospective
   connection)` rather than re-deriving an adjacency.
+
+### L3
+
+- **The cycle-closing test is participation-exact, not the after-graph walk.**
+  The L2 pin above (call `walkCycles` over `lowerControls(honest +
+  prospective)`) answers "does the graph have a cycle", not "does THIS drop
+  close one" — in an already-cyclic graph (the multi-loop canvases this phase
+  enables) it would flip the entry policy of unrelated wires. The shipped
+  helper (`cycleClosingFlip`, src/graph.ts) instead asks whether the drop's
+  target reaches its source on the LOWERED BEFORE graph — self-hops (a branch
+  wired back to its own feeder) close trivially — reusing lowerControls so no
+  second control-unioned adjacency exists; walkCycles remains the
+  validateGraph walk's machinery, not the assist's. Two consequences L4's
+  docs must respect: a control-TARGETED drop (the feeding edge) lowers away
+  and reports no close — its target is a control with no input port, and the
+  entry warning speaks for the honest cycle such a drop completes; and the
+  flip never consults the port's source count (a single-source any-of entry
+  behaves identically to all-of, so declaring early is free).
+- **The editor's shadowing diagnosis is keyed by BRANCH NAME, not row
+  index** (`rowWarnings` prop, computed in pipeline-view from the SAVED
+  graph's `cycleNodeIds` — also exported from src/graph.ts): the editor's
+  local reordering keeps each warning on its row, and rows renamed or added
+  in the draft simply carry none. The warning fires only for the shadowing
+  shape (a loop-wired row above a valued `$count` row); the aims-back-into-
+  the-loop shape is left to cycle-unguarded's strip entry.
+- **All FOUR connection commit sites share one `commitConnection`**
+  (pipeline-view.tsx): the direct single-port drop, the picker's confirm,
+  the owner-handoff landing, and the clean agent→control drop. The plan
+  named two; the other two exist in the tree and route through the same
+  assist (control targets simply never flip). `moveEmissionInto` forwards
+  `op` alongside value/side — a moved hand-authored `>=` loop must not lose
+  its guard.

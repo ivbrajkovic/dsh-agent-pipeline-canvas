@@ -12,7 +12,7 @@
 // without a `controls` key, and the canvas-authored Billing/General sample
 // validating and serializing to exactly its hand-authored ports+bindings twin.
 import { buildGraph, loadControls, type CanvasAgent, type CanvasConnection, type CanvasControl } from "../src/ui/shared.ts";
-import { validateGraph } from "../lib/graph.js";
+import { cycleClosingFlip, validateGraph } from "../lib/graph.js";
 import { lowerControls } from "../lib/controls.js";
 import { deepStrictEqual, ok } from "node:assert";
 
@@ -156,6 +156,164 @@ attempt("a control with no feed is honest invalid wiring (the validator reports 
 	const built = buildGraph(twinAgents, twinConnections, ifControls);
 	deepStrictEqual(validateGraph(built).ok, false);
 	ok(validateGraph(built).errors.some((e) => e.code === "if-source-invalid"));
+});
+
+// ---- the `op` round-trip (docs/proposals/loops.md L3: View JSON carries op
+// only when ">="; $count rows serialize like any row) ------------------------
+{
+	const countControls: CanvasControl[] = [
+		{ id: "if-1", kind: "if", x: 0, y: 0, branches: [
+			{ name: "done", field: "$count", value: "3", op: ">=" },
+			{ name: "retry", field: "verdict", value: "fix", side: "top" },
+			{ name: "else", field: "" },
+		] },
+	];
+	attempt("op serializes only when >= and round-trips through a load", () => {
+		const built = buildGraph(ifAgents, ifConnections, countControls);
+		const branches = (built.controls as Array<{ branches: Array<Record<string, unknown>> }>)[0].branches;
+		deepStrictEqual(branches[0], { name: "done", field: "$count", value: "3", op: ">=" });
+		// An explicit "==" (or the absent default) drops the key — the canvas
+		// state holds op only for the non-default.
+		const builtExplicit = buildGraph(ifAgents, ifConnections, [{
+			id: "if-1", kind: "if", x: 0, y: 0,
+			branches: [{ name: "retry", field: "verdict", value: "fix", op: "==", side: "top" }],
+		}]);
+		deepStrictEqual((builtExplicit.controls as Array<{ branches: Array<Record<string, unknown>> }>)[0].branches,
+			[{ name: "retry", field: "verdict", value: "fix", side: "top" }]);
+		const loaded = loadControls(JSON.parse(JSON.stringify(built.controls)));
+		deepStrictEqual(loaded, countControls);
+		deepStrictEqual(buildGraph(ifAgents, ifConnections, loaded), built);
+	});
+	attempt("loadControls normalizes an unknown op away (validation reports it from the file)", () => {
+		const loaded = loadControls([{ id: "if-1", kind: "if", branches: [{ name: "done", field: "$count", value: "3", op: "<" }] }]);
+		deepStrictEqual(loaded, [{ id: "if-1", kind: "if", x: 0, y: 0, branches: [{ name: "done", field: "$count", value: "3" }] }]);
+	});
+}
+
+// ---- the backward-edge assist: cycleClosingFlip -----------------------------
+// The persisted-shape helpers the matrix builds on (the helper takes the
+// honest graph and the prospective connection as the View JSON carries them —
+// wire-id ports, control endpoints by the control rules).
+const node = (id: string, extra: Record<string, unknown> = {}) => ({
+	id, name: id, description: "", instructions: "", x: 0, y: 0, input: id + ":in", output: id + ":out", ...extra,
+});
+const wire = (id: string, source: string, target: string, sourcePort?: string, targetPort?: string) => ({
+	id, source, target,
+	...(sourcePort !== undefined ? { sourcePort } : {}),
+	...(targetPort !== undefined ? { targetPort } : {}),
+});
+
+attempt("a back edge into an unwired default entry closes a cycle and declares it any-of", () => {
+	const graph = { agents: [node("a"), node("b")], connections: [wire("c1", "a", "b", "a:out", "b:in")] };
+	deepStrictEqual(cycleClosingFlip(graph, wire("c2", "b", "a", "b:out", "a:in")), {
+		closesCycle: true,
+		inputPorts: [{ name: "in", policy: "any-of" }],
+	});
+});
+
+attempt("a forward edge closes nothing and flips nothing", () => {
+	const graph = { agents: [node("a"), node("b"), node("c")], connections: [wire("c1", "a", "b", "a:out", "b:in")] };
+	deepStrictEqual(cycleClosingFlip(graph, wire("c2", "a", "c", "a:out", "c:in")), { closesCycle: false });
+});
+
+attempt("an unrelated edge into an already-cyclic graph closes nothing (participation, not presence)", () => {
+	const graph = {
+		agents: [node("a"), node("b"), node("x"), node("y")],
+		connections: [wire("c1", "a", "b", "a:out", "b:in"), wire("c2", "b", "a", "b:out", "a:in"), wire("c5", "x", "y", "x:out", "y:in")],
+	};
+	deepStrictEqual(cycleClosingFlip(graph, wire("c3", "b", "y", "b:out", "y:in")), { closesCycle: false });
+	// ...while a SECOND loop's back edge, in the same graph, still closes.
+	deepStrictEqual(cycleClosingFlip(graph, wire("c4", "y", "x", "y:out", "x:in")), {
+		closesCycle: true,
+		inputPorts: [{ name: "in", policy: "any-of" }],
+	});
+});
+
+attempt("the flip rewrites only the entered declared port, preserving bound and side", () => {
+	const graph = {
+		agents: [
+			node("m"),
+			node("c", { inputPorts: [{ name: "in" }, { name: "feedback", policy: "all-of", bound: 3, side: "bottom" }] }),
+		],
+		connections: [wire("c1", "m", "c", "m:out", "c:in"), wire("c2", "c", "m", "c:out", "m:in")],
+	};
+	deepStrictEqual(cycleClosingFlip(graph, wire("c3", "m", "c", "m:out", "c:feedback")), {
+		closesCycle: true,
+		inputPorts: [{ name: "in" }, { name: "feedback", policy: "any-of", bound: 3, side: "bottom" }],
+	});
+});
+
+attempt("an already any-of entry needs no flip", () => {
+	const graph = {
+		agents: [
+			node("m"),
+			node("c", { inputPorts: [{ name: "in" }, { name: "feedback", policy: "any-of", bound: 3 }] }),
+		],
+		connections: [wire("c1", "m", "c", "m:out", "c:in"), wire("c2", "c", "m", "c:out", "m:in")],
+	};
+	deepStrictEqual(cycleClosingFlip(graph, wire("c3", "m", "c", "m:out", "c:feedback")), { closesCycle: true });
+});
+
+attempt("a control-sourced branch edge closing the loop flips the targeted agent's entry", () => {
+	const graph = {
+		agents: [node("k"), node("r"), node("t")],
+		connections: [
+			wire("c1", "k", "r", "k:out", "r:in"),
+			wire("c2", "r", "if-1", "r:out"),
+			wire("c3", "if-1", "t", "if-1:done", "t:in"),
+		],
+		controls: [{ id: "if-1", kind: "if", x: 0, y: 0, branches: [
+			{ name: "done", field: "$count", value: "3", op: ">=" },
+			{ name: "retry" },
+		] }],
+	};
+	const verdict = cycleClosingFlip(graph, wire("c4", "if-1", "r", "if-1:retry", "r:in"));
+	deepStrictEqual(verdict, { closesCycle: true, inputPorts: [{ name: "in", policy: "any-of" }] });
+	// Composite: with the flip applied, the seed-once warning never appears and
+	// the graph stays valid — the count row is the guard.
+	const flipped = {
+		...graph,
+		agents: graph.agents.map((a) => (a.id === "r" ? { ...a, inputPorts: verdict.inputPorts } : a)),
+		connections: [...graph.connections, wire("c4", "if-1", "r", "if-1:retry", "r:in")],
+	};
+	const result = validateGraph(flipped);
+	deepStrictEqual(result.ok, true);
+	ok((result.warnings ?? []).some((w) => w.code === "cycle-present"));
+	ok(!(result.warnings ?? []).some((w) => w.code === "cycle-entry-all-of"));
+});
+
+attempt("a control-targeted feeding edge gives the assist nothing to act on", () => {
+	// The feeding edge lowers away — the control owns no input port to flip;
+	// the starved entry (if any) speaks through cycle-entry-all-of.
+	const graph = {
+		agents: [node("k"), node("r")],
+		connections: [wire("c1", "k", "r", "k:out", "r:in"), wire("c2", "if-1", "r", "if-1:retry", "r:in")],
+		controls: [{ id: "if-1", kind: "if", x: 0, y: 0, branches: [{ name: "retry" }] }],
+	};
+	deepStrictEqual(cycleClosingFlip(graph, wire("c3", "r", "if-1", "r:out")), { closesCycle: false });
+});
+
+attempt("a hand-edited legacy input wire is not flipped (declaring would orphan it)", () => {
+	const graph = {
+		agents: [node("a"), node("b", { input: "b:custom-in" })],
+		connections: [wire("c1", "b", "a", "b:custom-in", "a:in")],
+	};
+	deepStrictEqual(cycleClosingFlip(graph, wire("c2", "a", "b", "a:out", "b:custom-in")), { closesCycle: true });
+});
+
+attempt("a wire naming an unknown input port closes but flips nothing", () => {
+	const graph = {
+		agents: [node("m"), node("c", { inputPorts: [{ name: "in" }] })],
+		connections: [wire("c1", "c", "m", "c:out", "m:in")],
+	};
+	deepStrictEqual(cycleClosingFlip(graph, wire("c2", "m", "c", "m:out", "c:feedback")), { closesCycle: true });
+});
+
+attempt("the helper is total over malformed input", () => {
+	deepStrictEqual(cycleClosingFlip(null, wire("c1", "a", "b")), { closesCycle: false });
+	deepStrictEqual(cycleClosingFlip({ agents: [node("a")], connections: [] }, null), { closesCycle: false });
+	deepStrictEqual(cycleClosingFlip({ agents: [node("a")], connections: [] }, { id: "", source: "a", target: "a" }), { closesCycle: false });
+	deepStrictEqual(cycleClosingFlip({ agents: [node("a")], connections: [] }, wire("c1", "a", "ghost", "a:out", "ghost:in")), { closesCycle: false });
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

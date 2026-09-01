@@ -36,9 +36,9 @@
 // closed (the user closed it before leaving).
 import * as React from "react";
 import type { MenuEntry } from "@deepseek-ai/dsh-client-ui-primitives";
-import { validateGraph } from "../graph.ts";
+import { validateGraph, cycleClosingFlip, cycleNodeIds } from "../graph.ts";
 import { firedBranches, lowerControls } from "../controls.ts";
-import { classifyGraph, topoOrder } from "../execution.ts";
+import { classifyGraph, topoOrder, COUNT_KEY } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
 import type { IfBranch, PortSide, RunFiringStatus, ValidationError, ValidationResult } from "../types.ts";
@@ -443,6 +443,29 @@ function PipelineView({
 		c.cursor = p;
 		setConnectCursor({ x: p.x, y: p.y });
 	}
+	// The one connection commit, shared by every path that lands an edge (the
+	// direct single-port drop, the picker's confirm, the owner handoff): adds
+	// the edge and — the backward-edge assist (docs/proposals/loops.md L3) —
+	// when the drop closes a cycle, rewrites the target's entry-port
+	// declaration to any-of in the SAME update (one commit, one debounced
+	// persist). The verdict is computed on the honest graph in its persisted
+	// shape (wire-id ports), so a control-sourced drop answers through its
+	// owner exactly as the kernel will run it. A control target owns no input
+	// port; the helper answers and the flip simply never fires there.
+	function commitConnection(conn: CanvasConnection) {
+		const targetIsControl = controls.some((k) => k.id === conn.target);
+		const verdict = cycleClosingFlip(buildGraph(agents, connections, controls), {
+			id: conn.id,
+			source: conn.source,
+			target: conn.target,
+			sourcePort: conn.source + ":" + (conn.sourcePort ?? "out"),
+			...(targetIsControl ? {} : { targetPort: conn.target + ":" + (conn.targetPort ?? "in") }),
+		});
+		if (verdict.inputPorts !== undefined) {
+			setAgents((prev) => prev.map((a) => (a.id === conn.target ? { ...a, inputPorts: verdict.inputPorts } : a)));
+		}
+		setConnections((prev) => prev.concat([conn]));
+	}
 	function onContainerPointerUp() {
 		const c = connectRef.current;
 		if (!c) return;
@@ -480,7 +503,7 @@ function PipelineView({
 					if (source !== undefined && (source.outputPorts !== undefined || source.bindings !== undefined)) {
 						setOwnerHandoff({ conn, control: targetControl });
 					} else {
-						setConnections((prev) => prev.concat([conn]));
+						commitConnection(conn);
 					}
 				} else {
 					// Agent → agent. Named ports (P7): when either endpoint
@@ -493,11 +516,11 @@ function PipelineView({
 					if (srcPorts.length > 1 || tgtPorts.length > 1) {
 						setEdgeDraft({ ...conn, sourcePort, targetPort });
 					} else {
-						setConnections((prev) => prev.concat([{
+						commitConnection({
 							...conn,
 							...(sourcePort !== "out" ? { sourcePort } : {}),
 							...(targetPort !== "in" ? { targetPort } : {}),
-						}]));
+						});
 					}
 				}
 			}
@@ -940,20 +963,22 @@ function PipelineView({
 		const d = edgeDraft;
 		if (!d) return;
 		setEdgeDraft(null);
-		setConnections((prev) => prev.concat([{
+		commitConnection({
 			id: d.id,
 			source: d.source,
 			target: d.target,
 			// Default names stay unwritten — buildGraph composes the same wire id.
 			...(d.sourcePort !== "out" ? { sourcePort: d.sourcePort } : {}),
 			...(d.targetPort !== "in" ? { targetPort: d.targetPort } : {}),
-		}]));
+		});
 	}
 
 	// The owner handoff's Move: the agent's emission config folds into branch
 	// rules — the bindings first (they carry the decision, in evaluation
 	// order), then any declared output port no binding covered. A ""/absent
-	// binding value stays a catch-all; sides follow the port.
+	// binding value stays a catch-all; sides follow the port; a ">=" op
+	// forwards (the counter row must survive the move — it may be the loop's
+	// guard).
 	function moveEmissionInto(source: CanvasAgent): IfBranch[] {
 		const branches: IfBranch[] = [];
 		const seen = new Set<string>();
@@ -967,6 +992,7 @@ function PipelineView({
 				name: port,
 				field: typeof b?.field === "string" ? b.field : "",
 				...(b?.value !== undefined && b.value !== "" ? { value: String(b.value) } : {}),
+				...(b?.op === ">=" ? { op: ">=" } : {}),
 				...(side !== undefined && side !== "right" ? { side } : {}),
 			});
 		}
@@ -1012,7 +1038,7 @@ function PipelineView({
 			}
 			setAgents((prev) => prev.map(strip));
 		}
-		setConnections((prev) => prev.concat([handoff.conn]));
+		commitConnection(handoff.conn);
 	}
 	const continueText = runResult && runResult.ok ? finalOutputText(runResult.outputs || {}, nameOf) : "";
 
@@ -1545,6 +1571,32 @@ function PipelineView({
 		return (validation.warnings ?? []).filter((w) => w.message.indexOf('"' + control.id + '"') !== -1);
 	}
 
+	// The branch editor's per-row shadowing diagnosis (docs/proposals/loops.md
+	// L3): for each VALUED $count row, the first row above it whose branch
+	// wiring enters a cycle node — the arrangement that makes the count row no
+	// guard, worded like cycle-unguarded's row finding. Computed here, where
+	// the graph lives (the editor sees only its draft rows); keyed by branch
+	// name so the editor's local reordering keeps each warning on its row.
+	function branchShadowWarnings(control: CanvasControl): Record<string, string> {
+		const onCycle = cycleNodeIds(graphData);
+		const out: Record<string, string> = {};
+		control.branches.forEach((row, index) => {
+			if (row.field !== COUNT_KEY) return;
+			if (row.value === undefined || row.value === "") return;
+			const rowName = String(row.name ?? "");
+			for (let above = 0; above < index; above++) {
+				const name = String(control.branches[above].name ?? "");
+				if (name.length === 0) continue;
+				const wiresIntoLoop = connections.some((c) => c.source === control.id && c.sourcePort === name && onCycle.has(c.target));
+				if (wiresIntoLoop) {
+					out[rowName] = `the $count row "${rowName}" sits below row "${name}", which wires back into the loop and shadows it`;
+					break;
+				}
+			}
+		});
+		return out;
+	}
+
 	// The control nodes: the flowchart DECISION shape — a diamond — one
 	// unnamed input tick on the left vertex, one labeled tick per branch on
 	// its declared edge's vertex (stacking when branches share a side) — the
@@ -1818,6 +1870,7 @@ function PipelineView({
 					key={configControl.id}
 					control={configControl}
 					warnings={controlWarnings(configControl)}
+					rowWarnings={branchShadowWarnings(configControl)}
 					onSave={(branches) => {
 						setControls((prev) => prev.map((k) => (k.id === configControl.id ? { ...k, branches } : k)));
 						setConfigControlId(null);

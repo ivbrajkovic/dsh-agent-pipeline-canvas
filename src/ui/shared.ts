@@ -282,8 +282,9 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 			...(controlIds.has(c.target) ? {} : { targetPort: c.target + ":" + (c.targetPort ?? "in") }),
 		})) as Connection[],
 		// Branch rules serialize minimal: an empty field/value pair drops both
-		// keys (a catch-all), and a default side drops `side` — the same
-		// non-default-sides-only convention the port editor uses.
+		// keys (a catch-all), a default side drops `side`, and a `==` op drops
+		// `op` (present only when ">=") — the same non-default-sides-only
+		// convention the port editor uses.
 		...(controls.length > 0 ? {
 			controls: controls.map((k) => ({
 				id: k.id,
@@ -292,6 +293,7 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 					name: b.name,
 					...(typeof b.field === "string" && b.field.length > 0 ? { field: b.field } : {}),
 					...(b.value !== undefined && b.value !== "" ? { value: b.value } : {}),
+					...(b.op === ">=" ? { op: b.op } : {}),
 					...(b.side !== undefined && b.side !== "right" ? { side: b.side } : {}),
 				})) as IfBranch[],
 				x: Math.round(k.x),
@@ -374,12 +376,16 @@ export function loadControls(raw: unknown): CanvasControl[] {
 		if (id.length === 0) continue;
 		const branches = Array.isArray(rec.branches) ? rec.branches.map((b: unknown): IfBranch | null => {
 			if (b == null || typeof b !== "object" || Array.isArray(b)) return null;
-			const br = b as { name?: unknown; field?: unknown; value?: unknown; side?: unknown };
+			const br = b as { name?: unknown; field?: unknown; value?: unknown; op?: unknown; side?: unknown };
 			const side = br.side === "left" || br.side === "right" || br.side === "top" || br.side === "bottom" ? br.side : undefined;
 			return {
 				name: br.name == null ? "" : String(br.name),
 				field: typeof br.field === "string" ? br.field : "",
 				...(br.value === undefined ? {} : { value: String(br.value) }),
+				// The op normalizes to the default: only ">=" survives (an unknown
+				// op is validation's finding from the file; the next save
+				// canonicalizes the graph to what the canvas holds).
+				...(br.op === ">=" ? { op: ">=" as const } : {}),
 				...(side !== undefined ? { side } : {}),
 			};
 		}).filter((b): b is IfBranch => b !== null) : [];
