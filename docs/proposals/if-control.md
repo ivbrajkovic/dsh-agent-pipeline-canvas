@@ -63,6 +63,18 @@ ordinary connections to ordinary downstream agents.
   browser instance. `pnpm build` remounts the bundle in the active DSH Web
   profile; host-side changes need a web-profile host restart, client-only
   changes a hard refresh (`docs/guide/deployment.md`).
+- **Recently built surface this plan integrates with** (shipped behavior —
+  see the guides): **edge routing** — every declared port renders as its
+  own tick anchored on one of the node's four sides (`PortSide` via
+  `InputPortSpec.side` / `outputPortSides`; at most one port per side,
+  stacking warns `agent-port-side-conflict`-style; the edit panel's ports
+  are rows with a side select); the **node context menu** — right-click a
+  node for Edit / breakpoint / Delete / Go to transcript on the harness
+  `Menu` primitive, with primary-button guards on the node and port
+  gestures; **per-session pipelines** — the first edit in a session forks
+  `pipelines/<sessionId>.json` from the legacy workspace `pipeline.json`
+  (read-through until then), and the single-active-run rule binds to
+  (workspace, session).
 - **Additive schema** (house convention, `implementation-plan.md`): old
   pipelines load and run unchanged. A graph without `controls` is exactly
   today's graph; hand-authored ports+bindings keep working — the if control
@@ -75,7 +87,8 @@ interface IfBranch {
     name: string;    // the branch/output-port name ("billing")
     field: string;   // structured-output field to compare ("action")
     value?: string;  // required equality; absent/"" = catch-all (else)
-}
+    side?: PortSide; // node edge the branch tick renders on; absent = "right"
+}                    // (geometry only — the executor never reads it)
 interface ControlNode {
     id: string;              // "if-N" — separate id space from agent-N
     kind: "if";
@@ -87,13 +100,16 @@ interface ControlNode {
 
 - **Lowering** (pure, host run path): for control `K` with source agent `A` —
   `A` gains `outputPorts = K.branches[].name` and `bindings` mapped from the
-  branch rules; every connection `K:<branch> → T:<port>` becomes
-  `A:<branch> → T:<port>`; `K` is dropped. The lowered graph is exactly what
-  a hand-authored P7 graph would be — the equivalence is a test. The
-  lowered graph is **never persisted**: `record.graph` carries the honest
-  graph **including `controls`** — required, because a resumed run re-enters
-  `run()` and re-lowers from the snapshot. Controls appear in the record
-  only there; firings, nodes, and results name agents only.
+  branch rules; branch `side`s forward into `A`'s `outputPortSides` (the
+  kernel never reads geometry, but forwarding keeps the lowered graph
+  honestly equivalent to its hand-authored twin); every connection
+  `K:<branch> → T:<port>` becomes `A:<branch> → T:<port>`; `K` is dropped.
+  The lowered graph is exactly what a hand-authored P7 graph would be — the
+  equivalence is a test. The lowered graph is **never persisted**:
+  `record.graph` carries the honest graph **including `controls`** —
+  required, because a resumed run re-enters `run()` and re-lowers from the
+  snapshot. Controls appear in the record only there; firings, nodes, and
+  results name agents only.
 - **Decision semantics are the bindings semantics**: first match wins,
   catch-all last, no match (or no structured result — e.g. a breakpointed
   source cannot produce one) emits on no branch; the quiet branch never
@@ -111,7 +127,15 @@ interface ControlNode {
 - `if-branch-invalid` — at least one branch; unique non-empty **branch
   names**; every valued branch carries a non-empty `field` — branches may
   test the same field with different values (the canonical router shape)
-  or mix fields; at most one catch-all and only as the last branch.
+  or mix fields; at most one catch-all and only as the last branch; an
+  unknown `side` on any branch.
+- `control-invalid` — a malformed control record: `controls` present but
+  not an array, an entry not an object, blank or missing `id`/`kind`;
+  also duplicate control ids, and control ids colliding with agent ids
+  (hand-edited files) — endpoint resolution must stay unambiguous.
+- warning (non-fatal, cycle-style) `if-side-conflict` — two or more
+  branches of one control resolve to the same node side; the control
+  renders the stack, mirroring `agent-port-side-conflict`.
 - `control-invalid` — a malformed control record: `controls` present but
   not an array, an entry not an object, blank or missing `id`/`kind`;
   also duplicate control ids, and control ids colliding with agent ids
@@ -175,32 +199,44 @@ opening any panel; the persisted file is the honest graph.
 **Work items.**
 
 - `src/ui/pipeline-view.tsx` — control node rendering (kind-styled, one
-  labeled output dot per branch, single input dot, breakpoint-independent);
-  drag gestures: branch dot → agent input opens the port picker with the
-  branch list; agent output dot → control opens the owner handoff (the
-  agent must not carry its own emission config — offer to move/clear it,
-  else surface `if-owner-conflict`); Delete/Clear/select cover controls.
-- New `src/ui/control-config.tsx` — the branch editor (rows of
-  `name | field == value → branch`, reorder, add/remove, catch-all-last
-  constraint), reusing the bindings-table pattern from
-  `src/ui/agent-config.tsx`; warnings from the validation rules rendered
-  on the node and in the panel.
-- `src/ui/shared.ts` — `CanvasControl` state type; `buildGraph` emits
-  `controls`; load path restores them.
+  labeled tick per branch on the control's four edges — the same
+  port-anchor model as agents, positioned by the branch `side`, stacking
+  when two branches share a side; single input tick); drag gestures:
+  branch tick → agent input opens the port picker with the branch list;
+  agent output tick → control opens the owner handoff (the agent must not
+  carry its own emission config — offer to move/clear it, else surface
+  `if-owner-conflict`); the primary-button gesture guards cover control
+  ticks too; Delete/Clear/select cover controls.
+- The right-click **node context menu** gains control entries — Edit
+  branches, Delete control (no breakpoint or transcript rows: a control
+  never fires a child session). This generalizes `NodeMenuTarget.agentId`
+  to a node id and routes the action dispatcher by node kind; dismissal,
+  clamping, and close-on-activation stay the wrapper's.
+- New `src/ui/control-config.tsx` — the branch editor: rows of
+  `name | field == value → branch` with a **side select**, reusing the
+  port-row pattern (name + side) edge routing introduced in
+  `src/ui/agent-config.tsx`; reorder, add/remove, catch-all-last
+  constraint; warnings from the validation rules rendered on the node and
+  in the panel.
+- `src/ui/shared.ts` — `CanvasControl` state type (branch sides included);
+  `buildGraph` emits `controls`; load path restores them.
 - Pinned UI semantics: deleting an agent cascade-deletes any control it
   feeds and that control's edges (a control never outlives its source);
   **Clear** resets controls state and the `if-N` counter; the existing
   duplicate-connection guard stays port-blind for v1 — two branches of one
   if to the same target are UI-blocked even though the validator would
   allow them (distinct `sourcePort`s).
-- Persistence needs **no Host change** (the file is written as the client
-  composes it) — client-only phase.
+- Persistence needs **no Host change** — the session-scoped route stores
+  the client-composed graph verbatim, and the copy-on-write fork carries
+  `controls` untouched; a virgin session reads through the legacy
+  workspace graph (controls included) — client-only phase.
 
 **Verification gate.** Unit: buildGraph/load round-trip with controls.
 E2E (chrome-devtools, attached): author the Billing/General sample entirely
-through the if brick — palette drag, branch editor, branch-dot wiring;
+through the if brick — palette drag, branch editor, branch-tick wiring;
 View JSON shows the honest `controls` record; reload the tab — the graph
-restores identically; `pnpm test` green.
+restores identically from the session's own forked file; the node context
+menu opens on a control with its two entries; `pnpm test` green.
 
 ### Delta — C2
 
@@ -249,7 +285,8 @@ passes. Shippable.
 - `docs/guide/canvas.md` — "The if control" section (palette, branch
   editor, ownership rule, warnings); `docs/guide/pipeline-samples.md` —
   the conditional-router sample rewritten in the if form (the
-  direct ports+bindings form stays documented as the hand-edit variant).
+  direct ports+bindings form stays documented as the hand-edit variant),
+  following the samples doc's per-session save-and-reload instructions.
 - `docs/reference/graph-and-execution.md` — `ControlNode` schema, the
   validation rules, the lowering contract (record/report show agents only).
 - `docs/index.md` — flip the already-added proposals row's status to built;
