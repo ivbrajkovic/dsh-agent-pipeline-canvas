@@ -20,7 +20,10 @@
 //     runs, at the top of RunExecutor.run(). The kernel never learns controls
 //     exist; the lowered graph is never persisted (the record's snapshot
 //     carries the honest controls, and a resumed run re-lowers on re-entry).
-//   - firedBranches / countThreshold — the run view's derivations:
+//   - branchRows / firedBranches / countThreshold — the row and run views:
+//     branchRows is the one reader of a branch's condition rows (the legacy
+//     flat form and the multi-condition `conditions` list both normalize
+//     through it — every consumer below reads rows, never the branch shape);
 //     firedBranches maps a feeding-agent firing's `emittedTo` (the P7
 //     kernel's emission record) back to the branches it chose, so the canvas
 //     can light the chosen branch edge; countThreshold parses the loop budget
@@ -60,6 +63,41 @@ export interface ControlAnalysis {
 
 function argStr(value: unknown): string {
 	return value == null ? "" : String(value);
+}
+
+/** One condition row of a branch, as branchRows reads it (values unvalidated). */
+export interface BranchConditionRow {
+	field?: unknown;
+	value?: unknown;
+	op?: unknown;
+}
+
+/**
+ * The condition rows one branch tests, in evaluation order. THE one reader of
+ * the branch shape — validation, lowering, and the run-view derivations all
+ * consume rows, never the branch, so the two persisted forms cannot diverge:
+ * a `conditions` list (the multi-condition gate) IS the row list when present;
+ * otherwise the legacy flat keys (field/value/op) are the single row, and a
+ * branch carrying none of them is the bare catch-all (no rows). A present
+ * `conditions` list supersedes flat keys entirely (the editor never writes
+ * both). Total over malformed input: junk entries are skipped, never thrown —
+ * and silently: validation reads rows through this helper too, so a filtered
+ * row draws no finding and vanishes at the next save.
+ */
+export function branchRows(branch: unknown): BranchConditionRow[] {
+	if (branch == null || typeof branch !== "object") return [];
+	const rec = branch as { field?: unknown; value?: unknown; op?: unknown; conditions?: unknown };
+	if (Array.isArray(rec.conditions)) {
+		return rec.conditions.filter((c): c is BranchConditionRow => c != null && typeof c === "object" && !Array.isArray(c));
+	}
+	if (rec.field === undefined && rec.value === undefined && rec.op === undefined) return [];
+	return [
+		{
+			...(rec.field !== undefined ? { field: rec.field } : {}),
+			...(rec.value !== undefined ? { value: rec.value } : {}),
+			...(rec.op !== undefined ? { op: rec.op } : {}),
+		},
+	];
 }
 
 /**
@@ -178,11 +216,13 @@ export function validateControls(
 
 /**
  * One control's branch rules: at least one branch; unique non-empty names;
- * every valued branch carries a non-empty `field`; at most one catch-all and
- * only as the last branch; a known side; a known op (`==`/`>=` — a `>=` row's
- * value must coerce to a finite number). Returns the declared branch names —
- * reported even on a branch that failed another rule, so a connection naming
- * it is not double-reported.
+ * every valued condition row carries a non-empty `field`; a known side per
+ * branch; a known op (`==`/`>=` — a `>=` row's value must coerce to a finite
+ * number) per row; at most one catch-all and only as the very end — either a
+ * bare branch (no rows) or a valueless row, each allowed only as the final
+ * branch's final condition. Returns the declared branch names — reported even
+ * on a branch that failed another rule, so a connection naming it is not
+ * double-reported.
  */
 function validateBranches(controlId: string, branches: unknown, errors: ValidationError[]): string[] {
 	if (!Array.isArray(branches) || branches.length === 0) {
@@ -191,6 +231,7 @@ function validateBranches(controlId: string, branches: unknown, errors: Validati
 	}
 	const names: string[] = [];
 	const seen = new Set<string>();
+	let catchAllSeen = false;
 	branches.forEach((entry, index) => {
 		if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
 			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch #${index + 1} is not an object` });
@@ -207,21 +248,39 @@ function validateBranches(controlId: string, branches: unknown, errors: Validati
 			seen.add(name);
 			names.push(name);
 		}
-		if (isValuedRow(branch) && (typeof branch.field !== "string" || branch.field.length === 0)) {
-			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} compares a value but names no field` });
-		}
-		if (!isValuedRow(branch) && index < branches.length - 1) {
-			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} is a catch-all but not last — the catch-all must be the final branch` });
-		}
 		if (branch.side !== undefined && !(PORT_SIDES as readonly unknown[]).includes(branch.side)) {
 			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} has an unknown side "${argStr(branch.side)}" (expected "left", "right", "top" or "bottom")` });
 		}
-		if (branch.op !== undefined && !(BRANCH_OPS as readonly unknown[]).includes(branch.op)) {
-			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} has an unknown op "${argStr(branch.op)}" (expected "==" or ">=")` });
+		const rows = branchRows(branch);
+		const isLastBranch = index === branches.length - 1;
+		if (rows.length === 0) {
+			// The bare catch-all branch: matches any structured result.
+			if (!isLastBranch) {
+				errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} is a catch-all but not last — the catch-all must be the final branch` });
+			}
+			return;
 		}
-		if (branch.op === ">=" && !Number.isFinite(Number(branch.value))) {
-			errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label} compares with ">=" but its value is not a finite number` });
-		}
+		rows.forEach((row, rowAt) => {
+			const rowLabel = rows.length > 1 ? ` condition #${rowAt + 1}` : "";
+			const valued = isValuedRow(row);
+			if (valued && (typeof row.field !== "string" || row.field.length === 0)) {
+				errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label}${rowLabel} compares a value but names no field` });
+			}
+			if (row.op !== undefined && !(BRANCH_OPS as readonly unknown[]).includes(row.op)) {
+				errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label}${rowLabel} has an unknown op "${argStr(row.op)}" (expected "==" or ">=")` });
+			}
+			if (row.op === ">=" && !Number.isFinite(Number(row.value))) {
+				errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label}${rowLabel} compares with ">=" but its value is not a finite number` });
+			}
+			if (!valued) {
+				// A valueless row is the catch-all — it shadows every later
+				// row, so it may sit only at the very end of the final branch.
+				if (catchAllSeen || !(isLastBranch && rowAt === rows.length - 1)) {
+					errors.push({ code: "if-branch-invalid", message: `control "${controlId}" branch ${label}${rowLabel} is a catch-all but not last — the catch-all must be the final condition of the final branch` });
+				}
+				catchAllSeen = true;
+			}
+		});
 	});
 	return names;
 }
@@ -266,16 +325,17 @@ function warnUnreachable(controlId: string, sourceId: string, owner: Record<stri
 	}
 }
 
-/** True when at least one branch is valued and every valued branch tests `$count`. */
+/** True when at least one condition row is valued and every valued row tests `$count`. */
 function countsOnly(branches: unknown): boolean {
 	if (!Array.isArray(branches)) return false;
 	let valued = 0;
 	for (const entry of branches) {
 		if (entry == null || typeof entry !== "object") continue;
-		const branch = entry as IfBranch;
-		if (!isValuedRow(branch)) continue;
-		valued += 1;
-		if (branch.field !== COUNT_KEY) return false;
+		for (const row of branchRows(entry)) {
+			if (!isValuedRow(row)) continue;
+			valued += 1;
+			if (row.field !== COUNT_KEY) return false;
+		}
 	}
 	return valued > 0;
 }
@@ -317,16 +377,18 @@ type AgentLike = Record<string, unknown>;
 /**
  * Lower an honest graph (controls as nodes) onto the port/binding mechanics
  * the kernel already runs: for control `K` with source agent `A`, `A` gains
- * `K.branches[].name` as its `outputPorts` and the branch rules as its
- * `bindings`, every connection `K:<branch> → T:<port>` becomes
- * `A:<branch> → T:<port>` (the sourcePort wire id re-prefixed), and `K` —
- * with its feeding edge — is dropped. The result is exactly the graph a
- * hand-authored ports+bindings twin would be:
+ * `K.branches[].name` as its `outputPorts` and the branch rows as its
+ * `bindings` — a multi-condition gate flattens to one binding per condition,
+ * in order, so the kernel's first-match walk reads the gate as OR — and every
+ * connection `K:<branch> → T:<port>` becomes `A:<branch> → T:<port>` (the
+ * sourcePort wire id re-prefixed), and `K` — with its feeding edge — is
+ * dropped. The result is exactly the graph a hand-authored ports+bindings
+ * twin would be:
  *
- *   - a branch authored `value: ""` lowers to a binding with NO `value` key
+ *   - a row authored `value: ""` lowers to a binding with NO `value` key
  *     (the executor's catch-all test is `value === undefined`, so a literal
  *     empty string would compare against "" and never catch);
- *   - a `>=` branch forwards its `op` into the binding (the key drops for
+ *   - a `>=` row forwards its `op` into the binding (the key drops for
  *     `==`/absent — the house convention for non-defaults; `$count` fields
  *     pass through untouched);
  *   - non-default branch sides forward into `A`'s `outputPortSides`, the map
@@ -397,22 +459,30 @@ export function lowerControls(graph: PipelineGraph | null | undefined): Pipeline
 			const name = argStr(spec.name);
 			if (name.length === 0) continue;
 			outputPorts.push(name);
-			// A valueless branch (absent or "") lowers to the CATCH-ALL: no
-			// `value` key — the executor's test is `value === undefined`. The
-			// field carries when the branch authored one; only a hand-edited
-			// fieldless branch lowers without it (the cast covers that case —
-			// OutputBinding types the authoring shape, which always has one).
-			const branchValue = spec.value;
-			const valued = isValuedRow(spec);
-			const field = typeof spec.field === "string" && spec.field.length > 0 ? spec.field : null;
-			// `op` forwards only when it means something (">=") — the same
-			// non-defaults discipline as `side`, so the lowered graph stays
-			// byte-identical to what a hand author would write.
-			const op = spec.op === ">=" ? { op: spec.op } : {};
-			const binding = field !== null
-				? (valued ? { field, port: name, value: branchValue, ...op } : { field, port: name, ...op })
-				: (valued ? { port: name, value: branchValue, ...op } : { port: name, ...op });
-			bindings.push(binding as OutputBinding);
+			// The branch's condition rows lower to bindings on the branch's
+			// port, in order — a multi-condition gate flattens to consecutive
+			// rows, which the kernel's first-match walk reads as OR. A branch
+			// with no rows lowers to the single catch-all binding. A valueless
+			// row (absent or "") keeps the CATCH-ALL shape: no `value` key —
+			// the executor's test is `value === undefined`. The field carries
+			// when the row authored one; only a hand-edited fieldless row
+			// lowers without it. `op` forwards only when it means something
+			// (">=") — the same non-defaults discipline as `side`, so the
+			// lowered graph stays byte-identical to what a hand author writes.
+			const rows = branchRows(spec);
+			if (rows.length === 0) {
+				bindings.push({ port: name } as OutputBinding);
+			}
+			for (const row of rows) {
+				const rowValue = row.value;
+				const valued = isValuedRow(row);
+				const field = typeof row.field === "string" && row.field.length > 0 ? row.field : null;
+				const op = row.op === ">=" ? { op: row.op } : {};
+				const binding = field !== null
+					? (valued ? { field, port: name, value: rowValue, ...op } : { field, port: name, ...op })
+					: (valued ? { port: name, value: rowValue, ...op } : { port: name, ...op });
+				bindings.push(binding as OutputBinding);
+			}
 			if (spec.side !== undefined && (PORT_SIDES as readonly unknown[]).includes(spec.side) && spec.side !== DEFAULT_BRANCH_SIDE) {
 				sides[name] = spec.side;
 			}
@@ -493,7 +563,8 @@ export function firedBranches(
 
 /**
  * The loop budget a control's branches declare, for the run view's iteration
- * display (docs/proposals/loops.md L4): the first valued `$count >=` row
+ * display (docs/proposals/loops.md L4): the first valued `$count >=` row —
+ * across branches and each branch's condition rows, in declaration order —
  * whose value coerces to a finite number. `==` count rows are deliberately
  * not read as a budget (guard analysis is shape-only — whether a row matches
  * a run is data, not shape), a valueless row is the catch-all rather than a
@@ -505,10 +576,11 @@ export function countThreshold(branches: readonly IfBranch[] | undefined | null)
 	if (!Array.isArray(branches)) return null;
 	for (const entry of branches) {
 		if (entry == null || typeof entry !== "object") continue;
-		const row = entry as IfBranch;
-		if (row.field !== COUNT_KEY || row.op !== ">=" || !isValuedRow(row)) continue;
-		const threshold = Number(row.value);
-		if (Number.isFinite(threshold)) return threshold;
+		for (const row of branchRows(entry)) {
+			if (row.field !== COUNT_KEY || row.op !== ">=" || !isValuedRow(row)) continue;
+			const threshold = Number(row.value);
+			if (Number.isFinite(threshold)) return threshold;
+		}
 	}
 	return null;
 }

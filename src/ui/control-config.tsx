@@ -1,26 +1,35 @@
-// The if-control configuration modal: the branch editor. One row per branch —
-// `name | field <op> value` with the node edge (side) the branch tick renders
-// on — reusing the port-row pattern (name + side) the edge-routing ports
-// editor introduced in agent-config.tsx (the .pipeline-config classes come
-// from there). The op picker carries the loop vocabulary (docs/proposals/
-// loops.md): `==` is the default equality, `>=` compares numerically, and the
-// field input suggests the reserved `$count` — the iteration counter whose
-// rows fire even without a structured result. Branches evaluate top to
-// bottom, first match wins, and the catch-all (empty value) must stay last —
-// the editor enforces that ordering constraint live and blocks Save on a
-// broken shape (the same discipline as the agent panel's output-schema
-// check), while run-time matchability stays with validateGraph's warnings,
-// rendered here as passed in by the view (`warnings` under the rows,
-// `rowWarnings` — the shadowing diagnosis computed against the graph — inline
-// on the offending row).
-// Opened from the control node's context menu (nodes carry no edit buttons);
-// local state is seeded from the control on mount (keyed by control id
-// upstream). Saving
-// replaces the control's branches and lets the debounced persist write the
-// honest graph back.
+// The if-control configuration modal: the branch editor. Two levels — a
+// GATE per branch (`name` + the node edge (side) its tick renders on) with
+// any number of CONDITION rows beneath it (`field <op> value`), reusing the
+// port-row pattern (name + side) the edge-routing ports editor introduced in
+// agent-config.tsx (the .pipeline-config classes come from there). A gate
+// fires when ANY of its conditions matches — OR — so "verdict == approve, or
+// the count passed three" is one gate with two conditions and ONE tick on the
+// canvas; the old shape (two branches stacked on one edge) is no longer
+// needed. The op picker carries the loop vocabulary (docs/proposals/
+// loops.md): `==` is the default equality, `>=` compares numerically. The
+// field inputs suggest the reserved `$count` — the ONLY built-in field, the
+// iteration counter whose rows fire even without a structured result — plus
+// the feeding agent's output-schema properties (`fieldOptions`, passed in by
+// the view), so the fields a gate may test are visible, not guessed. Gates
+// evaluate top to bottom against the feeding agent's structured output,
+// first MATCHING gate wins; the catch-all — a gate with no conditions, or a
+// final condition with an empty value — must stay last. The editor enforces
+// that ordering constraint live and blocks Save on a broken shape (the same
+// discipline as the agent panel's output-schema check), while run-time
+// matchability stays with validateGraph's warnings, rendered here as passed
+// in by the view (`warnings` under the rows, `rowWarnings` — the shadowing
+// diagnosis computed against the graph — inline on the offending gate).
+// Opened from the control node's context menu or a double-click (nodes carry
+// no edit buttons); local state is seeded from the control on mount (keyed by
+// control id upstream). Saving replaces the control's display name (empty
+// falls back to the kind) and its branches — a single-condition gate
+// serializes the legacy flat keys, a multi-condition gate the `conditions`
+// list — and lets the debounced persist write the honest graph back.
 import * as React from 'react';
 import type { IfBranch, PortSide, ValidationError } from '../types.ts';
 import { COUNT_KEY } from '../execution.ts';
+import { branchRows } from '../controls.ts';
 import type { CanvasControl } from './shared.ts';
 import './agent-config.css';
 
@@ -32,7 +41,7 @@ const PORT_SIDES: Array<{ value: PortSide; label: string }> = [
   { value: 'bottom', label: 'bottom' },
 ];
 
-/** The comparison ops a branch row may declare; `==` is the default. */
+/** The comparison ops a condition row may declare; `==` is the default. */
 const BRANCH_OPS: Array<{ value: '==' | '>='; label: string }> = [
   { value: '==', label: '==' },
   { value: '>=', label: '>=' },
@@ -44,19 +53,25 @@ function asSide(value: unknown): PortSide | null {
     : null;
 }
 
-/** One editable branch row (`value` empty = the catch-all). */
-interface BranchRow {
-  name: string;
+/** One editable condition row (`value` empty = the catch-all row). */
+interface ConditionDraft {
   field: string;
   op: '==' | '>=';
   value: string;
+}
+
+/** One editable gate: the branch name + side and its condition rows. */
+interface BranchDraft {
+  name: string;
   side: PortSide;
+  conditions: ConditionDraft[];
 }
 
 function ControlConfigPanel({
   control,
   warnings,
   rowWarnings,
+  fieldOptions,
   onSave,
   onClose,
 }: {
@@ -65,30 +80,55 @@ function ControlConfigPanel({
    * side stacking) — surfaced under the rows. */
   warnings: readonly ValidationError[];
   /** The view-computed shadowing diagnosis (docs/proposals/loops.md L3),
-   * keyed by branch name: a row wired back into the loop sitting ABOVE a
-   * $count row shadows it — worded like cycle-unguarded's finding. */
+   * keyed by branch name: a condition wired back into the loop sitting ABOVE
+   * a $count row shadows it — worded like cycle-unguarded's finding. */
   rowWarnings?: Record<string, string>;
-  onSave: (branches: IfBranch[]) => void;
+  /** Candidate fields from the feeding agent's output schema (top-level
+   * property names), for the field inputs' suggestions; empty when the
+   * source declares no schema. */
+  fieldOptions?: readonly string[];
+  onSave: (name: string, branches: IfBranch[]) => void;
   onClose: () => void;
 }) {
-  const [rows, setRows] = React.useState<BranchRow[]>(
+  const [name, setName] = React.useState(control.name ?? '');
+  const [gates, setGates] = React.useState<BranchDraft[]>(
     control.branches.map((b) => ({
       name: b.name,
-      field: typeof b.field === 'string' ? b.field : '',
-      op: b.op === '>=' ? '>=' : '==',
-      value: b.value === undefined ? '' : String(b.value),
       side: asSide(b.side) ?? 'right',
+      conditions: branchRows(b).map((row) => ({
+        field: typeof row.field === 'string' ? row.field : '',
+        op: row.op === '>=' ? '>=' : '==',
+        value: row.value === undefined ? '' : String(row.value),
+      })),
     })),
   );
   function stopKey(e: React.KeyboardEvent) {
     e.stopPropagation();
     if (e.key === 'Escape') onClose();
   }
-  function setRow(index: number, patch: Partial<BranchRow>) {
-    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  function setGate(index: number, patch: Partial<BranchDraft>) {
+    setGates((prev) => prev.map((g, i) => (i === index ? { ...g, ...patch } : g)));
+  }
+  function setCondition(gateIndex: number, condIndex: number, patch: Partial<ConditionDraft>) {
+    setGates((prev) => prev.map((g, i) => (
+      i !== gateIndex ? g : { ...g, conditions: g.conditions.map((c, j) => (j === condIndex ? { ...c, ...patch } : c)) }
+    )));
+  }
+  function addCondition(gateIndex: number) {
+    setGates((prev) => prev.map((g, i) => (
+      i !== gateIndex ? g : { ...g, conditions: g.conditions.concat([{ field: '', op: '==', value: '' }]) }
+    )));
+  }
+  function removeCondition(gateIndex: number, condIndex: number) {
+    setGates((prev) => prev.map((g, i) => (
+      i !== gateIndex ? g : { ...g, conditions: g.conditions.filter((_, j) => j !== condIndex) }
+    )));
+  }
+  function removeGate(index: number) {
+    setGates((prev) => prev.filter((_, i) => i !== index));
   }
   function move(index: number, delta: -1 | 1) {
-    setRows((prev) => {
+    setGates((prev) => {
       const next = prev.slice();
       const other = index + delta;
       if (other < 0 || other >= next.length) return prev;
@@ -99,61 +139,92 @@ function ControlConfigPanel({
     });
   }
 
-  // Live shape check over the rows that carry content (a wholly empty row is
-  // dropped at save, never an error): every kept row needs a name, valued
-  // rows need a field, names stay unique, a ">=" row's value must coerce to a
-  // finite number (a valueless ">=" row is malformed, not a catch-all — the
-  // same rule validateBranches applies), and the catch-all — empty value —
-  // is only allowed last.
+  // What saves: wholly empty condition rows drop, then a gate left with no
+  // name AND no conditions drops. Everything else must pass the live shape
+  // check below — the same rules validateBranches applies to the file.
+  function kept(): BranchDraft[] {
+    return gates
+      .map((g) => ({ ...g, conditions: g.conditions.filter((c) => c.field.trim().length > 0 || c.value.trim().length > 0) }))
+      .filter((g) => g.name.trim().length > 0 || g.conditions.length > 0);
+  }
+
+  // Live shape check over the gates that carry content: every kept gate needs
+  // a name, names stay unique, a valued condition needs a field, a ">="
+  // condition's value must coerce to a finite number (a valueless ">="
+  // condition is malformed, not a catch-all), and the catch-all — a gate
+  // with no conditions, or an empty-value condition — is only allowed at the
+  // very end (the final condition of the final gate).
   let shapeError: string | null = null;
   const seenNames = new Set<string>();
-  rows.forEach((row, index) => {
+  const keptGates = kept();
+  keptGates.forEach((gate, gateIndex) => {
     if (shapeError !== null) return;
-    const name = row.name.trim();
-    const field = row.field.trim();
-    const value = row.value.trim();
-    if (name.length === 0 && field.length === 0 && value.length === 0) return;
-    if (name.length === 0) {
-      shapeError = `Branch #${index + 1} has no name.`;
+    const gateName = gate.name.trim();
+    const gateLabel = gateName.length > 0 ? `"${gateName}"` : `#${gateIndex + 1}`;
+    if (gateName.length === 0) {
+      shapeError = `Branch #${gateIndex + 1} has no name.`;
       return;
     }
-    if (seenNames.has(name)) {
-      shapeError = `Branch "${name}" is declared more than once.`;
+    if (seenNames.has(gateName)) {
+      shapeError = `Branch "${gateName}" is declared more than once.`;
       return;
     }
-    seenNames.add(name);
-    if (value.length > 0 && field.length === 0) {
-      shapeError = `Branch "${name}" compares a value but names no field.`;
+    seenNames.add(gateName);
+    if (gate.conditions.length === 0) {
+      if (gateIndex < keptGates.length - 1) {
+        shapeError = `Branch ${gateLabel} is a catch-all (no conditions) — it must stay the last branch.`;
+      }
       return;
     }
-    if (row.op === '>=' && !(value.length > 0 && Number.isFinite(Number(value)))) {
-      shapeError = `Branch "${name}" compares with ">=" but its value is not a finite number.`;
-      return;
-    }
-    if (value.length === 0 && index < rows.length - 1) {
-      shapeError = `Branch "${name}" is a catch-all (empty value) — it must stay the last branch.`;
-    }
+    gate.conditions.forEach((cond, condIndex) => {
+      if (shapeError !== null) return;
+      const field = cond.field.trim();
+      const value = cond.value.trim();
+      const rowLabel = gate.conditions.length > 1 ? ` condition #${condIndex + 1}` : '';
+      if (value.length > 0 && field.length === 0) {
+        shapeError = `Branch ${gateLabel}${rowLabel} compares a value but names no field.`;
+        return;
+      }
+      if (cond.op === '>=' && !(value.length > 0 && Number.isFinite(Number(value)))) {
+        shapeError = `Branch ${gateLabel}${rowLabel} compares with ">=" but its value is not a finite number.`;
+        return;
+      }
+      if (value.length === 0 && !(gateIndex === keptGates.length - 1 && condIndex === gate.conditions.length - 1)) {
+        shapeError = `Branch ${gateLabel}${rowLabel} is a catch-all (empty value) — it must stay the last condition of the last branch.`;
+      }
+    });
   });
+  // Removing every gate leaves a control with no branches — the broken shape
+  // validation refuses ("has no branches"), so the editor refuses it too.
+  if (shapeError === null && keptGates.length === 0) {
+    shapeError = 'Add at least one branch.';
+  }
 
-  // Assemble the persisted branches: wholly empty rows drop; the empty value
-  // drops its key (the catch-all shape), a "==" op drops `op`, and a default
-  // side drops `side` — buildGraph re-applies the same normalization.
+  // Assemble the persisted branches: a single-condition gate serializes the
+  // legacy flat keys (byte-identical to the pre-conditions shape), a
+  // multi-condition gate the `conditions` list; the empty value drops its
+  // key (the catch-all shape), a "==" op drops `op`, and a default side
+  // drops `side` — buildGraph re-applies the same normalization.
   function assemble(): IfBranch[] {
-    return rows
-      .filter((r) => r.name.trim().length > 0 || r.field.trim().length > 0 || r.value.trim().length > 0)
-      .map((r) => {
-        const name = r.name.trim();
-        const field = r.field.trim();
-        const value = r.value.trim();
+    return keptGates.map((gate) => {
+      const gateName = gate.name.trim();
+      const side = gate.side !== 'right' ? { side: gate.side } : {};
+      if (gate.conditions.length === 0) return { name: gateName, ...side };
+      const conditions = gate.conditions.map((cond) => {
+        const field = cond.field.trim();
+        const value = cond.value.trim();
         return {
-          name,
           field,
           ...(value.length > 0 ? { value } : {}),
-          ...(r.op === '>=' ? { op: '>=' as const } : {}),
-          ...(r.side !== 'right' ? { side: r.side } : {}),
+          ...(cond.op === '>=' ? { op: '>=' as const } : {}),
         };
       });
+      if (conditions.length === 1) return { name: gateName, ...conditions[0], ...side };
+      return { name: gateName, conditions, ...side };
+    });
   }
+
+  const fieldList = ['' + COUNT_KEY].concat(fieldOptions ?? []);
 
   return (
     <div
@@ -164,83 +235,68 @@ function ControlConfigPanel({
     >
       <div className='pipeline-config control-config'>
         <h3>Configure If</h3>
+        <div className='config-row'>
+          <label>Name</label>
+          <input
+            value={name}
+            placeholder='if'
+            title='Display name on the canvas — empty shows the kind ("if"). The id (used by wires and the executor) never changes.'
+            onChange={(e) => {
+              setName(e.target.value);
+            }}
+            onKeyDown={stopKey}
+          />
+        </div>
         <div className='config-hint'>
           Branches evaluate top to bottom on the feeding agent's structured
-          output — first match wins. The op picker carries the loop vocabulary:
-          <code> &gt;= </code>compares numerically, and the reserved{' '}
-          <code>$count</code> field tests the iteration count (it matches even
-          without a structured result). The catch-all (empty value) must stay
-          last. Wire each branch tick to the agent that handles it.
+          output — the first MATCHING branch wins, and a branch fires when ANY
+          of its conditions matches (so one gate can carry several: a verdict
+          check and a count check together). The op picker carries the loop
+          vocabulary: <code>&gt;=</code> compares numerically. The catch-all —
+          a branch with no conditions, or a last condition with an empty value
+          — must stay last. Wire each branch tick to the agent that handles it.
         </div>
         <div className='config-row'>
           <label>Branches</label>
+          <div className='config-hint'>
+            {'Built-in fields: '}
+            <code>$count</code>
+            {' — the feeding agent\'s firing count for this firing (1-based; matches even without a structured result). It is the only built-in. Other fields come from the feeding agent\'s output schema'}
+            {fieldOptions !== undefined && fieldOptions.length > 0 ? ': ' + fieldOptions.join(', ') : ' — none declared yet.'}
+          </div>
           <datalist id='pipeline-branch-fields'>
-            <option value={COUNT_KEY}>iteration count</option>
-          </datalist>
-          {rows.map((row, index) => (
-            <React.Fragment key={index}>
-              <div
-                className='config-mini-row'
+            {fieldList.map((field) => (
+              <option
+                key={field}
+                value={field}
               >
+                {field === COUNT_KEY ? 'iteration count (built-in)' : field}
+              </option>
+            ))}
+          </datalist>
+          {gates.map((gate, gateIndex) => (
+            <div
+              className='config-branch'
+              key={gateIndex}
+            >
+              <div className='config-mini-row'>
                 <input
-                  value={row.name}
+                  value={gate.name}
                   placeholder='branch name'
                   title='Branch name — also the output port name connections leave "<controlId>:<branch>"'
-                  style={{ flex: '1 1 26%' }}
+                  style={{ flex: '1 1 40%' }}
                   onChange={(e) => {
-                    setRow(index, { name: e.target.value });
-                  }}
-                  onKeyDown={stopKey}
-                />
-                <input
-                  value={row.field}
-                  placeholder='field'
-                  list='pipeline-branch-fields'
-                  title='Structured-output field to compare — the reserved "$count" tests the firing sequence of the feeding agent for this firing (the iteration number at a loop tail)'
-                  style={{ flex: '1 1 22%' }}
-                  onChange={(e) => {
-                    setRow(index, { field: e.target.value });
+                    setGate(gateIndex, { name: e.target.value });
                   }}
                   onKeyDown={stopKey}
                 />
                 <select
-                  value={row.op}
-                  title='Comparison — == matches the value against the field as text; >= compares numerically (Number both sides, finite required)'
-                  aria-label='Branch comparison operator'
-                  style={{ flex: '0 0 auto', width: 'auto' }}
-                  onChange={(e) => {
-                    setRow(index, { op: e.target.value === '>=' ? '>=' : '==' });
-                  }}
-                  onKeyDown={stopKey}
-                >
-                  {BRANCH_OPS.map((o) => (
-                    <option
-                      key={o.value}
-                      value={o.value}
-                    >
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  value={row.value}
-                  placeholder={row.field.trim() === COUNT_KEY ? 'iterations — e.g. 3' : 'value — empty = catch-all'}
-                  title={row.field.trim() === COUNT_KEY
-                    ? 'The iteration threshold — with >= the row matches from this firing number on'
-                    : 'Value the field must equal (compared as text). Empty matches any structured result — the catch-all, kept last.'}
-                  style={{ flex: '1 1 26%' }}
-                  onChange={(e) => {
-                    setRow(index, { value: e.target.value });
-                  }}
-                  onKeyDown={stopKey}
-                />
-                <select
-                  value={row.side}
+                  value={gate.side}
                   title='Node edge this branch tick renders on'
                   aria-label='Branch side'
                   style={{ flex: '0 0 auto', width: 'auto' }}
                   onChange={(e) => {
-                    setRow(index, { side: asSide(e.target.value) ?? 'right' });
+                    setGate(gateIndex, { side: asSide(e.target.value) ?? 'right' });
                   }}
                   onKeyDown={stopKey}
                 >
@@ -256,46 +312,115 @@ function ControlConfigPanel({
                 <button
                   className='pipeline-btn config-mini-btn'
                   title='Move this branch up (earlier in the evaluation order)'
-                  aria-label={'Move branch ' + (row.name || String(index + 1)) + ' up'}
-                  disabled={index === 0}
+                  aria-label={'Move branch ' + (gate.name || String(gateIndex + 1)) + ' up'}
+                  disabled={gateIndex === 0}
                   onClick={() => {
-                    move(index, -1);
+                    move(gateIndex, -1);
                   }}
                 >↑</button>
                 <button
                   className='pipeline-btn config-mini-btn'
                   title='Move this branch down (later in the evaluation order)'
-                  aria-label={'Move branch ' + (row.name || String(index + 1)) + ' down'}
-                  disabled={index === rows.length - 1}
+                  aria-label={'Move branch ' + (gate.name || String(gateIndex + 1)) + ' down'}
+                  disabled={gateIndex === gates.length - 1}
                   onClick={() => {
-                    move(index, 1);
+                    move(gateIndex, 1);
                   }}
                 >↓</button>
                 <button
                   className='pipeline-btn config-mini-btn'
-                  title='Remove this branch'
-                  aria-label={'Remove branch ' + (row.name || String(index + 1))}
+                  title='Remove this branch (with its conditions)'
+                  aria-label={'Remove branch ' + (gate.name || String(gateIndex + 1))}
                   onClick={() => {
-                    setRows((prev) => prev.filter((_, i) => i !== index));
+                    removeGate(gateIndex);
                   }}
                 >×</button>
               </div>
-              {row.field.trim() === COUNT_KEY ? (
-                <div className='config-hint'>
-                  {"count " + row.op + " " + (row.value.trim().length > 0 ? row.value.trim() : "…") + " → " + (row.name.trim().length > 0 ? row.name.trim() : "…")}
-                  {" — iteration count: the feeding agent's firing sequence for this firing (1-based); with >= it escapes the loop from the threshold on"}
+              {gate.conditions.length === 0 ? (
+                <div className='config-hint config-branch-else'>
+                  catch-all — matches any structured result (fires only if no
+                  branch above matched)
                 </div>
               ) : null}
-              {rowWarnings !== undefined && rowWarnings[row.name.trim()] ? (
-                <div className='config-warning'>{rowWarnings[row.name.trim()]}</div>
+              {gate.conditions.map((cond, condIndex) => (
+                <React.Fragment key={condIndex}>
+                  <div className='config-mini-row config-condition'>
+                    <input
+                      value={cond.field}
+                      placeholder='field'
+                      list='pipeline-branch-fields'
+                      title={'Structured-output field to compare — the reserved "$count" tests the firing sequence of the feeding agent for this firing (the iteration number at a loop tail); other suggestions come from the feeding agent\'s output schema'}
+                      style={{ flex: '1 1 32%' }}
+                      onChange={(e) => {
+                        setCondition(gateIndex, condIndex, { field: e.target.value });
+                      }}
+                      onKeyDown={stopKey}
+                    />
+                    <select
+                      value={cond.op}
+                      title='Comparison — == matches the value against the field as text; >= compares numerically (Number both sides, finite required)'
+                      aria-label='Condition comparison operator'
+                      style={{ flex: '0 0 auto', width: 'auto' }}
+                      onChange={(e) => {
+                        setCondition(gateIndex, condIndex, { op: e.target.value === '>=' ? '>=' : '==' });
+                      }}
+                      onKeyDown={stopKey}
+                    >
+                      {BRANCH_OPS.map((o) => (
+                        <option
+                          key={o.value}
+                          value={o.value}
+                        >
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      value={cond.value}
+                      placeholder={cond.field.trim() === COUNT_KEY ? 'iterations — e.g. 3' : 'value — empty = catch-all'}
+                      title={cond.field.trim() === COUNT_KEY
+                        ? 'The iteration threshold — with >= the row matches from this firing number on'
+                        : 'Value the field must equal (compared as text). Empty matches any structured result — the catch-all, kept last.'}
+                      style={{ flex: '1 1 32%' }}
+                      onChange={(e) => {
+                        setCondition(gateIndex, condIndex, { value: e.target.value });
+                      }}
+                      onKeyDown={stopKey}
+                    />
+                    <button
+                      className='pipeline-btn config-mini-btn'
+                      title='Remove this condition'
+                      aria-label={'Remove condition ' + (condIndex + 1) + ' of branch ' + (gate.name || String(gateIndex + 1))}
+                      onClick={() => {
+                        removeCondition(gateIndex, condIndex);
+                      }}
+                    >×</button>
+                  </div>
+                  {cond.field.trim() === COUNT_KEY ? (
+                    <div className='config-hint'>
+                      {"count " + cond.op + " " + (cond.value.trim().length > 0 ? cond.value.trim() : "…") + " → " + (gate.name.trim().length > 0 ? gate.name.trim() : "…")}
+                      {" — iteration count: the feeding agent's firing sequence for this firing (1-based); with >= it escapes the loop from the threshold on"}
+                    </div>
+                  ) : null}
+                </React.Fragment>
+              ))}
+              <button
+                className='pipeline-btn config-mini-btn config-add-condition'
+                title='Add another condition to this branch — it fires when ANY condition matches'
+                onClick={() => {
+                  addCondition(gateIndex);
+                }}
+              >+ condition</button>
+              {rowWarnings !== undefined && rowWarnings[gate.name.trim()] ? (
+                <div className='config-warning'>{rowWarnings[gate.name.trim()]}</div>
               ) : null}
-            </React.Fragment>
+            </div>
           ))}
           <button
             className='pipeline-btn config-mini-btn'
             title='Add a branch rule'
             onClick={() => {
-              setRows((prev) => prev.concat([{ name: '', field: '', op: '==', value: '', side: 'right' }]));
+              setGates((prev) => prev.concat([{ name: '', side: 'right', conditions: [{ field: '', op: '==', value: '' }] }]));
             }}
           >+ Add branch</button>
           {shapeError !== null ? (
@@ -320,7 +445,7 @@ function ControlConfigPanel({
             disabled={shapeError !== null}
             title={shapeError ?? undefined}
             onClick={() => {
-              onSave(assemble());
+              onSave(name.trim(), assemble());
             }}
           >
             Save

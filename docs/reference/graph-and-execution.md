@@ -21,8 +21,10 @@ The pipeline is a directed graph over two arrays:
   "connections": [ { "id", "source", "target",
                      "sourcePort": "<source>:<outputPort>",
                      "targetPort": "<target>:<inputPort>" } ],
-  "controls"?:   [ { "id": "if-N", "kind": "if",
-                     "branches": [ { "name", "field", "value"?, "op"?, "side"? } ],
+  "controls"?:   [ { "id": "if-N", "name"?, "kind": "if",
+                     "branches": [ { "name", "side"?,
+                                     "field"?, "value"?, "op"?,          // the single-condition form
+                                     "conditions"?: [ { "field", "value"?, "op"? } ] } ],
                      "x", "y" } ]
 }
 ```
@@ -75,24 +77,39 @@ The pipeline is a directed graph over two arrays:
   tests the firing's own per-node sequence (1-based — the same `seq` the
   firing log records) instead of the structured record: at a loop tail the
   feeder fires once per iteration, so `$count` is the iteration number, and
-  it matches even when the firing produced no structured output. Only VALUED
+  it matches even when the firing produced no structured output. It is the
+  ONLY built-in field — every other field names a top-level property of the
+  structured result, and the editors suggest the feeding agent's schema
+  properties alongside it. Only VALUED
   `$count` rows bypass the no-structured-result quiet — a catch-all (a
   valueless row, whatever its field) still requires a structured result. A
   `">="` row whose value is not a finite number is MALFORMED: validation
   reports it and refuses the graph, so the executor's catch-all reading of a
   valueless row never comes into play in a run. Disjunction is written as
   rows: `A || B → done` is two rows over
-  the same target; declaration order is the disjunction; no `&&`, `||`, `!`,
+  the same target — inside a control, the two rows can be the conditions of
+  ONE gate (one tick; flattening lowers them in order) or two branches on
+  distinct sides; declaration order is the disjunction; no `&&`, `||`, `!`,
   or grouping enters the schema.
 - **Controls** (additive — a graph without `controls` is exactly the
   pre-control graph): first-class decision nodes, one kind in v1 — `if`. An
+  optional `name` is the canvas display name (absent → the canvas shows the
+  kind); purely presentational — ids stay the identity every wire, warning,
+  and executor path addresses. An
   if control owns its feeding agent's whole emission surface: the agent
   declares only its **output schema** (the structured result shape belongs
   to the model call), and the control's branches are the decision —
   `field == value → name` against the firing's structured result (or the
   reserved `$count`, above), evaluated in declaration order, first match
-  wins. An absent **or empty-string** `value` is the catch-all and belongs
-  last; `side` is where the branch tick renders on the control (default
+  wins. A branch may carry **several conditions** (`conditions`, OR): the
+  gate fires when ANY of its rows matches, so `verdict == approve` and
+  `$count >= 3` can share one gate and one tick — flattening writes exactly
+  the rows a hand author would; a present `conditions` list supersedes the
+  flat keys (the editor never writes both, a single-condition branch
+  serializes flat). An absent **or empty-string** `value` is the catch-all
+  and belongs at the very end — the final condition of the final branch (a
+  bare `{ name }` branch is the catch-all too); `side` is where the branch
+  tick renders on the control (default
   `"right"` — geometry only, the executor never reads it). The canvas
   serializes by pinned conventions: a control-sourced connection always
   names its branch as `sourcePort` (`"if-1:billing"`), a control-targeted
@@ -143,10 +160,10 @@ non-empty and never affects `ok`:
 | `control-invalid` | A malformed control record: `controls` present but not an array, an entry that is not an object, a blank or missing `id`/`kind`, a duplicate control id, or a control id colliding with an agent id (control ids live in their own space — endpoint resolution must stay unambiguous). |
 | `if-source-invalid` | The control does not have exactly one incoming connection, or its feeder is another control (no control-to-control chaining). |
 | `if-owner-conflict` | The feeding agent declares its own `outputPorts`/`bindings`, or has other outgoing connections — an if owns its source's whole emission surface. |
-| `if-branch-invalid` | A branch rule is broken: no branches at all, an unnamed or duplicated branch name, a valued branch without a `field`, a catch-all that is not the last branch, an unknown `side`, an unknown `op` (expected `"=="` or `">="`), or a `">="` whose value is not a finite number. |
+| `if-branch-invalid` | A branch rule is broken: no branches at all, an unnamed or duplicated branch name, a valued branch or condition row without a `field`, a catch-all that is not at the very end (the final condition of the final branch — a bare branch or a valueless row), an unknown `side`, an unknown `op` on a branch or condition row (expected `"=="` or `">="`), or a `">="` whose value is not a finite number. Row-level messages name the branch and, when the gate carries several conditions, the condition number. |
 | `if-edge-port-unknown` | A control-sourced connection's `sourcePort` names no declared branch, or a control-targeted connection names a `targetPort`. |
 | `if-side-conflict` *(warning)* | Two or more branches of one control resolve to the same node edge — they render stacked; assign distinct sides (mirrors `agent-port-side-conflict`). |
-| `if-source-no-schema` *(warning)* | The feeding agent has no `settings.outputSchema` — the branches compare a structured result, so they can never fire. Suppressed when every valued branch is a `$count` row (counter rows test the firing's sequence, not the record, so they fire without a schema); at least one valued branch is required for the suppression — a control with only a bare catch-all still warns. |
+| `if-source-no-schema` *(warning)* | The feeding agent has no `settings.outputSchema` — the branches compare a structured result, so they can never fire. Suppressed when every valued condition row is a `$count` row (counter rows test the firing's sequence, not the record, so they fire without a schema); at least one valued row is required for the suppression — a control with only a bare catch-all still warns. |
 | `if-source-breakpointed` *(warning)* | The feeding agent is breakpointed — a continuable child cannot produce structured output, so its branches that compare a structured result can never fire. Accurate for content rows; the `$count`-era exception: a VALUED `$count` row tests the firing's own sequence and CAN fire when a released breakpointed firing re-emits (resume/rerun), so the warning over-states for counter rows and stays anyway. |
 | `connection-invalid` | A connection entry is not an object. |
 | `connection-missing-source` / `connection-missing-target` | The connection names no source/target agent. |
@@ -187,7 +204,11 @@ under `connection-self` and is not a cycle of the walk.
   edge caps nothing, and a bound on a chord that is not a hop of the cycle
   caps nothing either.
 - **A `$count` escape.** A VALUED `$count` row on a cycle node whose port
-  wires NOWHERE ON the cycle, positioned before every row that does. The
+  wires NOWHERE ON the cycle, positioned before every row that does. (The
+  rows are the flattened bindings — a gate's conditions lower in order, so
+  the analysis reads a multi-condition gate row by row, and a count
+  condition inside a gate whose OTHER conditions or sibling gates wire back
+  into the loop is shadowed exactly like any row above it.) The
   port may wire off the cycle (the normal shape) or nowhere at all — the
   degenerate but real shape where the matching count row simply blocks the
   loop rows below it from ever firing again (first match wins). Both
@@ -286,7 +307,9 @@ The control is a persisted node that never runs. The run path's one
 insertion sits at the top of `RunExecutor.run()` (`src/runs.ts`):
 `lowerControls` (`src/controls.ts`) rewrites the honest graph onto the
 port/binding mechanics — the feeding agent gains the branch names as its
-`outputPorts` and the branch rules as its `bindings`, every
+`outputPorts` and the branch rows as its `bindings` (a multi-condition gate
+flattens to one binding per condition, in order, so the kernel's
+first-match walk reads the gate as OR), every
 `K:<branch> → T:<port>` connection re-prefixes to `A:<branch> → T:<port>`,
 non-default branch sides forward into the agent's `outputPortSides` (the map
 omitted when it would be empty), a `">="` branch forwards its `op` into the

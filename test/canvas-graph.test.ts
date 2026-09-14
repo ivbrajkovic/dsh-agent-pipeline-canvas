@@ -136,7 +136,7 @@ attempt("loadControls is total over malformed records", () => {
 	deepStrictEqual(loadControls([7, null, { branches: [] }, { id: "if-2", kind: "if", branches: [7, { name: "x" }], x: "5" }]), [
 		// A nameless control entry is skipped; a nameless branch survives with
 		// an empty name (validation reports it from the file until re-saved).
-		{ id: "if-2", kind: "if", x: 5, y: 0, branches: [{ name: "x", field: "" }] },
+		{ id: "if-2", kind: "if", x: 5, y: 0, branches: [{ name: "x" }] },
 	]);
 });
 
@@ -165,7 +165,7 @@ attempt("a control with no feed is honest invalid wiring (the validator reports 
 		{ id: "if-1", kind: "if", x: 0, y: 0, branches: [
 			{ name: "done", field: "$count", value: "3", op: ">=" },
 			{ name: "retry", field: "verdict", value: "fix", side: "top" },
-			{ name: "else", field: "" },
+			{ name: "else" },
 		] },
 	];
 	attempt("op serializes only when >= and round-trips through a load", () => {
@@ -187,6 +187,106 @@ attempt("a control with no feed is honest invalid wiring (the validator reports 
 	attempt("loadControls normalizes an unknown op away (validation reports it from the file)", () => {
 		const loaded = loadControls([{ id: "if-1", kind: "if", branches: [{ name: "done", field: "$count", value: "3", op: "<" }] }]);
 		deepStrictEqual(loaded, [{ id: "if-1", kind: "if", x: 0, y: 0, branches: [{ name: "done", field: "$count", value: "3" }] }]);
+	});
+}
+
+// ---- the control `name` round-trip (the canvas draws display names only —
+// an if's name serializes only when authored; the id stays the wire identity) --
+{
+	const namedControls: CanvasControl[] = [
+		{ id: "if-1", name: "Reviewer gate", kind: "if", x: 0, y: 0, branches: [{ name: "else" }] },
+	];
+	attempt("a control name serializes when authored and round-trips through a load", () => {
+		const built = buildGraph(ifAgents, ifConnections, namedControls);
+		deepStrictEqual((built.controls as Array<Record<string, unknown>>)[0].name, "Reviewer gate");
+		const loaded = loadControls(JSON.parse(JSON.stringify(built.controls)));
+		deepStrictEqual(loaded, namedControls);
+		deepStrictEqual(buildGraph(ifAgents, ifConnections, loaded), built);
+	});
+	attempt("an empty name serializes as absent (the canvas falls back to the kind)", () => {
+		const built = buildGraph(ifAgents, ifConnections, [
+			{ id: "if-1", name: "", kind: "if", x: 0, y: 0, branches: [{ name: "else" }] },
+		]);
+		deepStrictEqual("name" in (built.controls as Array<Record<string, unknown>>)[0], false);
+	});
+	attempt("loadControls normalizes a non-string name away", () => {
+		const loaded = loadControls([{ id: "if-1", kind: "if", name: 7, branches: [{ name: "else" }] }]);
+		deepStrictEqual(loaded, [{ id: "if-1", kind: "if", x: 0, y: 0, branches: [{ name: "else" }] }]);
+	});
+}
+
+// ---- the multi-condition gate round-trip (conditions per branch, OR) --------
+// A gate with several conditions serializes `conditions` (no flat keys beside
+// them), stays stable across a load, and serializes the legacy flat keys again
+// when edited down to one condition — the minimal form, both directions.
+{
+	const mergedControls: CanvasControl[] = [
+		{ id: "if-1", kind: "if", x: 0, y: 0, branches: [
+			{ name: "done", side: "top", conditions: [
+				{ field: "verdict", value: "approve" },
+				{ field: "$count", value: "3", op: ">=" },
+			] },
+			{ name: "retry" },
+		] },
+	];
+	attempt("a multi-condition gate serializes conditions and round-trips through a load", () => {
+		// The wiring matches the merged gates: done → Billing, retry → General.
+		const mergedConnections: CanvasConnection[] = [
+			{ id: "conn-1", source: "agent-1", target: "if-1" },
+			{ id: "conn-2", source: "if-1", target: "agent-2", sourcePort: "done" },
+			{ id: "conn-3", source: "if-1", target: "agent-3", sourcePort: "retry" },
+		];
+		const built = buildGraph(ifAgents, mergedConnections, mergedControls);
+		deepStrictEqual((built.controls as Array<{ branches: Array<Record<string, unknown>> }>)[0].branches, [
+			{ name: "done", side: "top", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "3", op: ">=" }] },
+			{ name: "retry" },
+		]);
+		const loaded = loadControls(JSON.parse(JSON.stringify(built.controls)));
+		deepStrictEqual(loaded, mergedControls);
+		deepStrictEqual(buildGraph(ifAgents, mergedConnections, loaded), built);
+		// And the honest file still lowers to exactly the hand-authored twin:
+		// one tick, one binding per condition, in order.
+		deepStrictEqual(lowerControls(built as never), {
+			agents: [
+				{
+					...ifAgents[0], input: "agent-1:in", output: "agent-1:out",
+					outputPorts: ["done", "retry"], outputPortSides: { done: "top" },
+					bindings: [
+						{ field: "verdict", value: "approve", port: "done" },
+						{ field: "$count", value: "3", op: ">=", port: "done" },
+						{ port: "retry" },
+					],
+				},
+				{ ...ifAgents[1], input: "agent-2:in", output: "agent-2:out" },
+				{ ...ifAgents[2], input: "agent-3:in", output: "agent-3:out" },
+			].map((a) => ({ ...a, x: Math.round(a.x), y: Math.round(a.y) })),
+			connections: [
+				// K:<branch> → T:<port> became A:<branch> → T:<port>; the control's
+				// feeding edge is gone with the control.
+				{ id: "conn-2", source: "agent-1", target: "agent-2", sourcePort: "agent-1:done", targetPort: "agent-2:in" },
+				{ id: "conn-3", source: "agent-1", target: "agent-3", sourcePort: "agent-1:retry", targetPort: "agent-3:in" },
+			],
+		});
+	});
+	attempt("a gate edited down to one condition serializes the flat keys again", () => {
+		const built = buildGraph(ifAgents, ifConnections, [{
+			id: "if-1", kind: "if", x: 0, y: 0,
+			branches: [{ name: "done", conditions: [{ field: "verdict", value: "approve" }] }, { name: "retry" }],
+		}]);
+		deepStrictEqual((built.controls as Array<{ branches: Array<Record<string, unknown>> }>)[0].branches, [
+			{ name: "done", field: "verdict", value: "approve" },
+			{ name: "retry" },
+		]);
+	});
+	attempt("loadControls normalizes junk rows away inside a conditions list", () => {
+		const loaded = loadControls([{
+			id: "if-1", kind: "if",
+			branches: [{ name: "done", conditions: [7, { field: "verdict", value: "approve", op: "<" }, { field: "$count", value: "3", op: ">=" }] }, { name: "retry" }],
+		}]);
+		deepStrictEqual(loaded, [{
+			id: "if-1", kind: "if", x: 0, y: 0,
+			branches: [{ name: "done", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "3", op: ">=" }] }, { name: "retry" }],
+		}]);
 	});
 }
 

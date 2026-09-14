@@ -31,6 +31,7 @@
 // visible and savable; any failure just shrinks the lists.
 import * as React from 'react';
 import type { AgentSettings, InputPortSpec, OutputBinding, PortSide } from '../types.ts';
+import { COUNT_KEY } from '../execution.ts';
 import { ENDPOINT, type CanvasAgent } from './shared.ts';
 import './agent-config.css';
 
@@ -410,6 +411,18 @@ function AgentConfigPanel({
   // The schema that WILL save (parseable object text) — bindings evaluate
   // against it; without one a bound node emits on no port (honest quiet).
   const schemaWillSave = schemaTrimmed.length > 0 && schemaError === null;
+  // The binding fields a rule may test: the schema's top-level property
+  // names (when it declares any) plus the reserved $count — the ONLY
+  // built-in field, the firing's per-node sequence (1-based). Offered as the
+  // field inputs' suggestions so the vocabulary is visible, not guessed.
+  const schemaProps = (() => {
+    if (!schemaWillSave) return [];
+    const props = (JSON.parse(schemaTrimmed) as { properties?: unknown }).properties;
+    return props != null && typeof props === 'object' && !Array.isArray(props)
+      ? Object.keys(props).filter((k) => k.length > 0 && k !== COUNT_KEY)
+      : [];
+  })();
+  const bindingFields = ['' + COUNT_KEY].concat(schemaProps);
   // The binding port picker offers the declared output ports; undeclared,
   // the node's single default port is "out". A saved port missing from the
   // list stays visible as an extra option (stale-safe, like provider/model).
@@ -781,11 +794,23 @@ function AgentConfigPanel({
             </div>
             <div className='config-row'>
               <label>Output bindings</label>
+              <datalist id='pipeline-binding-fields'>
+                {bindingFields.map((field) => (
+                  <option
+                    key={field}
+                    value={field}
+                  >
+                    {field === COUNT_KEY ? 'iteration count (built-in)' : field}
+                  </option>
+                ))}
+              </datalist>
               {bindingRows.length === 0 ? (
                 <div className='config-hint'>
                   Without bindings a firing emits on every output port. Add
                   rules to route the structured output — first match wins; an
-                  empty value is the catch-all, keep it last.
+                  empty value is the catch-all, keep it last. The field may be
+                  a schema property or the reserved <code>$count</code> (the
+                  firing's 1-based sequence — the only built-in).
                 </div>
               ) : (
                 bindingRows.map((row, index) => (
@@ -796,7 +821,8 @@ function AgentConfigPanel({
                     <input
                       value={row.field}
                       placeholder='field'
-                      title='Structured-output field to compare'
+                      list='pipeline-binding-fields'
+                      title={'Structured-output field to compare — a schema property, or the reserved "$count" (the firing\'s 1-based sequence, the only built-in)'}
                       style={{ flex: '1 1 28%' }}
                       onChange={(e) => {
                         setBindingRows((prev) =>

@@ -193,23 +193,52 @@ export interface Connection {
     targetPort: string;
 }
 /**
- * One branch rule of an if control (`docs/proposals/if-control.md`): the
- * decision `field == value → branch`, evaluated in declaration order, first
- * match wins. A branch without `value` — or authored `value: ""`, which
- * normalizes to absent on lowering — is the CATCH-ALL: it matches any
- * structured result and belongs last. Decision semantics ARE the executor's
- * binding semantics (see OutputBinding); the control only owns the authoring.
+ * One condition of a branch (see IfBranch.conditions): the decision row
+ * `field <op> value`, the same predicate language an OutputBinding speaks.
+ */
+export interface IfBranchCondition {
+    /**
+     * The field to compare ("action"); required on valued rows. The
+     * executor-reserved `$count` — the only built-in field — turns the row
+     * into a counter test: the feeding agent's firing sequence for this firing
+     * (1-based), matchable even when the firing produced no structured result.
+     */
+    field: string;
+    /** The value the field must equal; absent (or "") = the catch-all (else). */
+    value?: string;
+    /**
+     * The comparison operator; see OutputBinding.op. Absent (or "==") is the
+     * default equality; ">=" compares numerically and is the only other value.
+     */
+    op?: "==" | ">=";
+}
+/**
+ * One branch rule — one GATE — of an if control
+ * (`docs/proposals/if-control.md`): the decision "any condition matches →
+ * this branch", evaluated in declaration order, first MATCHING BRANCH wins.
+ * A branch may carry several conditions (OR — "verdict == approve, or the
+ * count passed three"): the conditions evaluate in order and the branch fires
+ * on the first match, so one gate renders one tick no matter how many
+ * conditions it carries. A branch without `value`-carrying conditions — a
+ * bare `{ name }`, or a final condition with no value (authored `value: ""`,
+ * which normalizes to absent on lowering) — is the CATCH-ALL: it matches any
+ * structured result and belongs last (the final condition of the final
+ * branch). Decision semantics ARE the executor's binding semantics (see
+ * OutputBinding); the control only owns the authoring.
  */
 export interface IfBranch {
     /** The branch/output-port name ("billing"); unique non-empty within the control. */
     name: string;
     /**
-     * The field to compare ("action"); required on valued branches. The
-     * executor-reserved `$count` turns the row into a counter test — the
-     * feeding agent's firing sequence for this firing (1-based), matchable
-     * even when the firing produced no structured result.
+     * The conditions this gate tests, in order — ANY match fires the branch
+     * (OR). Supersedes the flat single-condition keys below when present; the
+     * two forms are never written together (a single-condition branch
+     * serializes flat, several serialize here — the minimal form).
      */
-    field: string;
+    conditions?: IfBranchCondition[];
+    /** The single-condition legacy form (row one of one). Read everywhere;
+     * superseded by `conditions` when that list is present. */
+    field?: string;
     /** The value the field must equal; absent (or "") = the catch-all (else). */
     value?: string;
     /**
@@ -237,6 +266,12 @@ export interface IfBranch {
 export interface ControlNode {
     /** "if-N" — a separate id space from agent-N (validation flags collisions). */
     id: string;
+    /**
+     * Custom display name (authored in the branch editor). Optional — absent
+     * means the canvas shows the kind ("if"); purely presentational, the
+     * executor and validation always address the control by its id.
+     */
+    name?: string;
     /** Control kind; "if" is the only kind in v1 (future controls extend the shape). */
     kind: "if";
     /** Branch rules; evaluation order = declaration order, catch-all last. */

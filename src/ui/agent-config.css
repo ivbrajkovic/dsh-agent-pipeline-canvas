@@ -174,5 +174,28 @@
   font-size: 11px;
   color: var(--dsw-alias-label-secondary);
 }
+/* The if editor's two-level rows: each branch (gate) is a bordered group —
+   header row (name + side + branch buttons), then its condition rows
+   indented beneath it, then the + condition affordance. One gate, several
+   conditions, one tick on the canvas. */
+.pipeline-config .config-branch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+}
+.pipeline-config .config-condition {
+  padding-left: 10px;
+  border-left: 2px solid var(--dsw-alias-border-l2);
+}
+.pipeline-config .config-branch-else {
+  padding-left: 10px;
+  border-left: 2px solid var(--dsw-alias-border-l2);
+}
+.pipeline-config .config-add-condition {
+  align-self: flex-start;
+}
 
 

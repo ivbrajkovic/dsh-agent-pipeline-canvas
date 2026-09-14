@@ -322,6 +322,14 @@ check("a count row aimed back into the loop is no guard (row named)", ifLoop([
 	{ name: "retry", field: "$count", value: "3", op: ">=", side: "top" },
 	{ name: "done" },
 ]), false, ["cycle-unguarded"], ["cycle-present"]);
+check("the MERGED gate guards: verdict approve or count exhausted on one branch", ifLoop([
+	{ name: "done", side: "top", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "3", op: ">=" }] },
+	{ name: "retry" },
+]), true, [], ["cycle-present"]);
+check("an in-branch shadow refuses: a loop-wired gate's condition above its count row", ifLoop([
+	{ name: "retry", side: "top", conditions: [{ field: "verdict", value: "fix" }, { field: "$count", value: "3", op: ">=" }] },
+	{ name: "done" },
+]), false, ["cycle-unguarded"], ["cycle-present"]);
 {
 	const result = validateGraph(ifLoop([
 		{ name: "retry", field: "$count", value: "3", op: ">=", side: "top" },

@@ -12,6 +12,25 @@ export interface ControlAnalysis {
     /** control id -> declared branch names (a control-sourced edge's sourcePort must name one). */
     branchNames: ReadonlyMap<string, readonly string[]>;
 }
+/** One condition row of a branch, as branchRows reads it (values unvalidated). */
+export interface BranchConditionRow {
+    field?: unknown;
+    value?: unknown;
+    op?: unknown;
+}
+/**
+ * The condition rows one branch tests, in evaluation order. THE one reader of
+ * the branch shape — validation, lowering, and the run-view derivations all
+ * consume rows, never the branch, so the two persisted forms cannot diverge:
+ * a `conditions` list (the multi-condition gate) IS the row list when present;
+ * otherwise the legacy flat keys (field/value/op) are the single row, and a
+ * branch carrying none of them is the bare catch-all (no rows). A present
+ * `conditions` list supersedes flat keys entirely (the editor never writes
+ * both). Total over malformed input: junk entries are skipped, never thrown —
+ * and silently: validation reads rows through this helper too, so a filtered
+ * row draws no finding and vanishes at the next save.
+ */
+export declare function branchRows(branch: unknown): BranchConditionRow[];
 /**
  * The control-aware validation rules, run by validateGraph after the agents
  * pass and before the connections pass (which consumes the returned
@@ -37,16 +56,18 @@ export declare function validateControls(graph: {
 /**
  * Lower an honest graph (controls as nodes) onto the port/binding mechanics
  * the kernel already runs: for control `K` with source agent `A`, `A` gains
- * `K.branches[].name` as its `outputPorts` and the branch rules as its
- * `bindings`, every connection `K:<branch> → T:<port>` becomes
- * `A:<branch> → T:<port>` (the sourcePort wire id re-prefixed), and `K` —
- * with its feeding edge — is dropped. The result is exactly the graph a
- * hand-authored ports+bindings twin would be:
+ * `K.branches[].name` as its `outputPorts` and the branch rows as its
+ * `bindings` — a multi-condition gate flattens to one binding per condition,
+ * in order, so the kernel's first-match walk reads the gate as OR — and every
+ * connection `K:<branch> → T:<port>` becomes `A:<branch> → T:<port>` (the
+ * sourcePort wire id re-prefixed), and `K` — with its feeding edge — is
+ * dropped. The result is exactly the graph a hand-authored ports+bindings
+ * twin would be:
  *
- *   - a branch authored `value: ""` lowers to a binding with NO `value` key
+ *   - a row authored `value: ""` lowers to a binding with NO `value` key
  *     (the executor's catch-all test is `value === undefined`, so a literal
  *     empty string would compare against "" and never catch);
- *   - a `>=` branch forwards its `op` into the binding (the key drops for
+ *   - a `>=` row forwards its `op` into the binding (the key drops for
  *     `==`/absent — the house convention for non-defaults; `$count` fields
  *     pass through untouched);
  *   - non-default branch sides forward into `A`'s `outputPortSides`, the map
@@ -72,7 +93,8 @@ export declare function lowerControls(graph: PipelineGraph | null | undefined): 
 export declare function firedBranches(branches: readonly IfBranch[] | undefined | null, emittedTo: readonly unknown[] | undefined | null): string[];
 /**
  * The loop budget a control's branches declare, for the run view's iteration
- * display (docs/proposals/loops.md L4): the first valued `$count >=` row
+ * display (docs/proposals/loops.md L4): the first valued `$count >=` row —
+ * across branches and each branch's condition rows, in declaration order —
  * whose value coerces to a finite number. `==` count rows are deliberately
  * not read as a budget (guard analysis is shape-only — whether a row matches
  * a run is data, not shape), a valueless row is the catch-all rather than a

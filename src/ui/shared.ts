@@ -9,6 +9,7 @@
 // services, and nested Remote namespaces need their own dotted entry.
 
 import type { AgentSettings, Connection, ControlNode, IfBranch, InputPortSpec, OutputBinding, PipelineGraph, PortSide, RunFiring } from "../types.ts";
+import { branchRows } from "../controls.ts";
 
 export const ENDPOINT = "/dsh-agent-pipeline";
 export const SAVE_DEBOUNCE_MS = 250;
@@ -65,6 +66,12 @@ export interface CanvasAgent {
  */
 export interface CanvasControl {
 	id: string;
+	/**
+	 * Custom display name; absent means the canvas shows the kind ("if").
+	 * Purely presentational — ids stay the identity the executor, validation,
+	 * and wire ids address.
+	 */
+	name?: string;
 	kind: string;
 	branches: IfBranch[];
 	x: number;
@@ -281,21 +288,33 @@ export function buildGraph(agents: CanvasAgent[], connections: CanvasConnection[
 			sourcePort: c.source + ":" + (c.sourcePort ?? "out"),
 			...(controlIds.has(c.target) ? {} : { targetPort: c.target + ":" + (c.targetPort ?? "in") }),
 		})) as Connection[],
-		// Branch rules serialize minimal: an empty field/value pair drops both
-		// keys (a catch-all), a default side drops `side`, and a `==` op drops
+		// Branch rules serialize minimal, through the one row reader: a branch
+		// with no rows stays bare `{ name }` (the catch-all), a SINGLE row
+		// serializes the legacy flat keys (field/value/op) so one-condition
+		// graphs stay byte-identical to the pre-conditions shape, and a
+		// multi-condition gate serializes `conditions` (no flat keys beside
+		// it). Within a row an empty field/value pair drops both keys (a
+		// catch-all row), a default side drops `side`, and a `==` op drops
 		// `op` (present only when ">=") — the same non-default-sides-only
 		// convention the port editor uses.
 		...(controls.length > 0 ? {
 			controls: controls.map((k) => ({
 				id: k.id,
+				// The display name serializes only when authored (non-empty) — the
+				// same non-default-sides-only convention the branches use.
+				...(typeof k.name === "string" && k.name.length > 0 ? { name: k.name } : {}),
 				kind: k.kind,
-				branches: k.branches.map((b) => ({
-					name: b.name,
-					...(typeof b.field === "string" && b.field.length > 0 ? { field: b.field } : {}),
-					...(b.value !== undefined && b.value !== "" ? { value: b.value } : {}),
-					...(b.op === ">=" ? { op: b.op } : {}),
-					...(b.side !== undefined && b.side !== "right" ? { side: b.side } : {}),
-				})) as IfBranch[],
+				branches: k.branches.map((b) => {
+					const side = b.side !== undefined && b.side !== "right" ? { side: b.side } : {};
+					const rows = branchRows(b).map((row) => ({
+						...(typeof row.field === "string" && row.field.length > 0 ? { field: row.field } : {}),
+						...(row.value !== undefined && row.value !== "" ? { value: row.value } : {}),
+						...(row.op === ">=" ? { op: row.op } : {}),
+					}));
+					if (rows.length === 0) return { name: b.name, ...side };
+					if (rows.length === 1) return { name: b.name, ...rows[0], ...side };
+					return { name: b.name, conditions: rows, ...side };
+				}) as IfBranch[],
 				x: Math.round(k.x),
 				y: Math.round(k.y),
 			})) as ControlNode[],
@@ -360,37 +379,50 @@ export function loadAgent(raw: unknown): {
 
 /**
  * Read the persisted controls back into React state: object entries with a
- * non-empty id survive, branches normalize to the editor's row shape (a
- * missing field becomes "", an unknown side falls back to the default) so the
- * canvas state is always clean. Malformed entries are skipped — validation
- * reports them from the persisted file, and the next save canonicalizes the
- * graph to what the canvas holds.
+ * non-empty id survive, branches normalize through the one row reader
+ * (branchRows) to the canonical state shape — a bare `{ name }` catch-all, a
+ * single-row branch in the legacy flat keys (a missing field becomes "", an
+ * unknown side or op falls back to the default), and a multi-condition gate
+ * as `conditions` — so the canvas state is always clean and the next save
+ * re-serializes it minimally. Malformed entries are skipped — validation
+ * reports the skipped control and branch entries from the persisted file
+ * (junk rows INSIDE a `conditions` list are the exception: branchRows drops
+ * them silently, so they vanish at the next save with no finding), and the
+ * next save canonicalizes the graph to what the canvas holds.
  */
 export function loadControls(raw: unknown): CanvasControl[] {
 	if (!Array.isArray(raw)) return [];
 	const out: CanvasControl[] = [];
 	for (const entry of raw) {
 		if (entry == null || typeof entry !== "object" || Array.isArray(entry)) continue;
-		const rec = entry as { id?: unknown; kind?: unknown; branches?: unknown; x?: unknown; y?: unknown };
+		const rec = entry as { id?: unknown; name?: unknown; kind?: unknown; branches?: unknown; x?: unknown; y?: unknown };
 		const id = rec.id == null ? "" : String(rec.id);
 		if (id.length === 0) continue;
 		const branches = Array.isArray(rec.branches) ? rec.branches.map((b: unknown): IfBranch | null => {
 			if (b == null || typeof b !== "object" || Array.isArray(b)) return null;
-			const br = b as { name?: unknown; field?: unknown; value?: unknown; op?: unknown; side?: unknown };
-			const side = br.side === "left" || br.side === "right" || br.side === "top" || br.side === "bottom" ? br.side : undefined;
-			return {
-				name: br.name == null ? "" : String(br.name),
-				field: typeof br.field === "string" ? br.field : "",
-				...(br.value === undefined ? {} : { value: String(br.value) }),
-				// The op normalizes to the default: only ">=" survives (an unknown
-				// op is validation's finding from the file; the next save
-				// canonicalizes the graph to what the canvas holds).
-				...(br.op === ">=" ? { op: ">=" as const } : {}),
-				...(side !== undefined ? { side } : {}),
-			};
+			const br = b as { name?: unknown; side?: unknown };
+			const side = br.side === "left" || br.side === "right" || br.side === "top" || br.side === "bottom"
+				? br.side as PortSide
+				: undefined;
+			// Each condition row normalizes like the flat form always has: the
+			// field to a string ("" when missing), the value stringified when
+			// present ("" stays — the editor's catch-all), and only ">="
+			// survives as the op (an unknown op is validation's finding from
+			// the file; the next save canonicalizes the graph to what the
+			// canvas holds).
+			const rows = branchRows(b).map((row) => ({
+				field: typeof row.field === "string" ? row.field : "",
+				...(row.value === undefined ? {} : { value: String(row.value) }),
+				...(row.op === ">=" ? { op: ">=" as const } : {}),
+			}));
+			const base = { name: br.name == null ? "" : String(br.name), ...(side !== undefined ? { side } : {}) };
+			if (rows.length === 0) return base;
+			if (rows.length === 1) return { ...base, ...rows[0] };
+			return { ...base, conditions: rows };
 		}).filter((b): b is IfBranch => b !== null) : [];
 		out.push({
 			id,
+			...(typeof rec.name === "string" && rec.name.length > 0 ? { name: rec.name } : {}),
 			kind: rec.kind == null ? "if" : String(rec.kind),
 			branches,
 			x: Number(rec.x) || 0,

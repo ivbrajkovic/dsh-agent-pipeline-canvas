@@ -239,6 +239,15 @@ the Coder is `any-of` because it receives the seed AND the loop-back — under
 the default `all-of` the consumed seed would starve the body
 (`cycle-entry-all-of` warns; the assist prevents).
 
+**Merged gates.** A branch may carry several conditions (`conditions` — the
+gate fires when ANY matches), so the two escape conditions can share one
+gate: `done` with conditions `verdict == approve` and `$count >= 3`, wired
+once to `Polish`. One tick, one edge, and the loop still escapes on either
+condition — the count row inside the gate guards exactly as before (its port
+wires off the cycle, and the `verdict` row above it shares that port, so it
+shadows nothing). The three-branch shape above stays when you want the
+exhaust case to land somewhere else.
+
 ### The ports+bindings twin (the power path)
 
 The same loop without a control — the decision lives on the Reviewer as

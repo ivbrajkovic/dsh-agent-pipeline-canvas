@@ -2700,6 +2700,54 @@ await withTempDir(async (cwd) => {
 			&& done.firings.find((f) => f.nodeId === "r" && f.seq === 2)?.emittedTo?.join() === "approve");
 	});
 
+	// the MERGED gate (conditions per branch): the approve branch carries BOTH
+	// the verdict check and the count check — one tick, two conditions, OR —
+	// so the never-approve reviewer still escapes at the threshold, and the
+	// firing records the BRANCH name (the conditions are never seen downstream).
+	await withTempDir(async (cwd) => {
+		const harness = makeHarness({ holdOneshots: true });
+		const registry = new RunRegistry(harness.services);
+		const graph = {
+			agents: [
+				agent("k", "Task", "Task."),
+				{ ...agent("c", "Coder", "Code."), inputPorts: [{ name: "in", policy: "any-of" }] },
+				{ ...agent("r", "Review", "Review."), settings: { outputSchema: { type: "object" } } },
+				agent("t", "Terminal", "T."),
+			],
+			connections: [
+				connP("c0", "k", "k:out", "c", "c:in"),
+				connP("c1", "c", "c:out", "r", "r:in"),
+				{ id: "c2", source: "r", target: "if-1", sourcePort: "r:out" }, // the control's unnamed input
+				{ id: "c3", source: "if-1", target: "t", sourcePort: "if-1:approve", targetPort: "t:in" },
+				{ id: "c4", source: "if-1", target: "c", sourcePort: "if-1:retry", targetPort: "c:in" }, // the back edge
+			],
+			controls: [{
+				id: "if-1", kind: "if", x: 50, y: 60,
+				branches: [
+					{ name: "approve", side: "top", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "3", op: ">=" }] },
+					{ name: "retry" }, // the catch-all loops
+				],
+			}],
+		} as unknown as PipelineGraph;
+		const started = await registry.startRun({ sessionId: "sess", cwd, graph, input: "build" });
+		if (!started.ok) { okCheck("merged: start ok", false); return; }
+		await waitFor("task started", () => harness.starts.length === 1);
+		harness.resolveOneshot(harness.starts[0].childId, "<task:1>");
+		for (let round = 1; round <= 3; round++) {
+			await waitFor("coder round " + round, () => harness.starts.length === 2 + (round - 1) * 2);
+			harness.resolveOneshot(harness.starts[1 + (round - 1) * 2].childId, "<code:" + round + ">");
+			await waitFor("review round " + round, () => harness.starts.length === 3 + (round - 1) * 2);
+			harness.resolveOneshot(harness.starts[2 + (round - 1) * 2].childId, "<review:" + round + ">", "completed", { verdict: "fix" });
+		}
+		await waitFor("the terminal started via the count condition in the approve gate", () => harness.starts.length === 8);
+		okCheck("merged: the terminal fired off the approve branch", harness.starts[7].label === "Terminal");
+		harness.resolveOneshot(harness.starts[7].childId, "<final>");
+		const done = await waitTerminal(registry, started.runId, cwd);
+		okCheck("merged: the never-approve loop escaped at 3 through the merged gate",
+			done.state === "completed"
+			&& done.firings.filter((f) => f.nodeId === "r").map((f) => f.emittedTo?.join()).join() === "retry,retry,approve");
+	});
+
 	// the release path: a released breakpointed firing has no structured
 	// result — a plain catch-all emits nowhere (the honest quiet), but a
 	// valued $count row fires once the rerun ladder reaches its threshold.

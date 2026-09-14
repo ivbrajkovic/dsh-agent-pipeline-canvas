@@ -8,7 +8,7 @@
 // to exactly its hand-authored ports+bindings twin), the ""-value catch-all
 // normalization, and lowering's totality over malformed records.
 import { validateGraph } from "../lib/graph.js";
-import { countThreshold, firedBranches, lowerControls } from "../lib/controls.js";
+import { branchRows, countThreshold, firedBranches, lowerControls } from "../lib/controls.js";
 import { deepStrictEqual } from "node:assert";
 
 let passed = 0;
@@ -207,6 +207,100 @@ check("a >= branch over $count with a numeric value validates", {
 	controls: [{ id: "if-1", kind: "if", branches: [{ name: "x", field: "$count", value: "3", op: ">=", side: "top" }, { name: "y" }] }],
 }, true, []);
 
+// --- multi-condition gates (conditions per branch, OR) -------------------
+// One gate may carry several condition rows; the branch fires when ANY
+// matches. The flat keys above are the single-row form; `conditions` is the
+// multi-row form — the same rules apply per ROW.
+check("a multi-condition gate validates (the merged done gate: verdict or count)", {
+	agents: [agent("a", { settings: { outputSchema: { type: "object" } } })],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{
+		id: "if-1", kind: "if", x: 0, y: 0,
+		branches: [
+			{ name: "done", side: "top", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "3", op: ">=" }] },
+			{ name: "retry" },
+		],
+	}],
+}, true, []);
+{
+	// The row-level message names the branch AND the condition number (rows
+	// beyond the first only — a single-row gate reads like the flat form).
+	const result = validateGraph({
+		agents: [agent("a")],
+		connections: [conn("c1", "a", "if-1", "a:out")],
+		controls: [{
+			id: "if-1", kind: "if", x: 0, y: 0,
+			branches: [
+				{ name: "done", conditions: [{ field: "verdict", value: "approve" }, { value: "x" }] },
+				{ name: "retry" },
+			],
+		}],
+	});
+	const message = result.errors.find((e) => e.code === "if-branch-invalid")?.message ?? "";
+	if (message.includes('"done"') && message.includes("condition #2")) {
+		passed++;
+		console.log("ok    a valued condition without a field reports the branch and its condition number");
+	} else {
+		failed++;
+		console.error(`FAIL  the condition-number message — got: ${JSON.stringify(result.errors.map((e) => e.message))}`);
+	}
+}
+check("an unknown op on a mid-gate condition reports per row", {
+	agents: [agent("a")],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{
+		id: "if-1", kind: "if", x: 0, y: 0,
+		branches: [
+			{ name: "done", conditions: [{ field: "verdict", value: "approve" }, { field: "f", value: "1", op: "<" }] },
+			{ name: "retry" },
+		],
+	}],
+}, false, ["if-branch-invalid"]);
+check("a >= condition with a non-finite value reports per row", {
+	agents: [agent("a")],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{
+		id: "if-1", kind: "if", x: 0, y: 0,
+		branches: [
+			{ name: "done", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "soon", op: ">=" }] },
+			{ name: "retry" },
+		],
+	}],
+}, false, ["if-branch-invalid"]);
+check("a valueless condition mid-gate is a misplaced catch-all (it shadows the rows below)", {
+	agents: [agent("a")],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{
+		id: "if-1", kind: "if", x: 0, y: 0,
+		branches: [
+			{ name: "done", conditions: [{ field: "f" }, { field: "verdict", value: "approve" }] },
+			{ name: "retry" },
+		],
+	}],
+}, false, ["if-branch-invalid"]);
+check("a bare catch-all branch before a later valued branch reports", {
+	agents: [agent("a")],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{
+		id: "if-1", kind: "if", x: 0, y: 0,
+		branches: [
+			{ name: "x" },
+			{ name: "done", conditions: [{ field: "verdict", value: "approve" }] },
+		],
+	}],
+}, false, ["if-branch-invalid"]);
+check("two catch-alls report twice (the row rule and the branch rule stack)", {
+	agents: [agent("a")],
+	connections: [conn("c1", "a", "if-1", "a:out")],
+	controls: [{
+		id: "if-1", kind: "if", x: 0, y: 0,
+		branches: [
+			{ name: "x", field: "f" },
+			{ name: "done", conditions: [{ field: "verdict", value: "approve" }, { field: "g" }] },
+		],
+	}],
+}, false, ["if-branch-invalid"]);
+
 // --- non-fatal findings --------------------------------------------------
 check("two default-side branches stack with a warning", {
 	agents: [agent("a")],
@@ -392,6 +486,45 @@ check("a future control kind validates as a plain endpoint", {
 		deepStrictEqual(lowerControls(loopAuthored as never), twin);
 		deepStrictEqual(validateGraph(lowerControls(loopAuthored as never)).ok, true, "the lowered twin validates");
 	});
+	attempt("a multi-condition gate flattens to one binding per condition, in order (OR)", () => {
+		const lowered = lowerControls({
+			agents: [agent("a")],
+			connections: [conn("c1", "a", "if-1", "a:out")],
+			controls: [{
+				id: "if-1", kind: "if", x: 0, y: 0,
+				branches: [
+					{ name: "done", side: "top", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "3", op: ">=" }] },
+					{ name: "retry" },
+				],
+			}],
+		} as never) as { agents: Array<{ outputPorts?: string[]; bindings?: Array<Record<string, unknown>>; outputPortSides?: Record<string, string> }> };
+		// The merged gate: one tick, two rows — the kernel's first-match walk
+		// fires `done` on EITHER condition. Exactly the hand-authored twin.
+		deepStrictEqual(lowered.agents[0].outputPorts, ["done", "retry"]);
+		deepStrictEqual(lowered.agents[0].bindings, [
+			{ field: "verdict", port: "done", value: "approve" },
+			{ field: "$count", port: "done", value: "3", op: ">=" },
+			{ port: "retry" },
+		]);
+		deepStrictEqual(lowered.agents[0].outputPortSides, { done: "top" });
+	});
+	attempt("conditions supersede the flat keys when a hand-edit carries both", () => {
+		const lowered = lowerControls({
+			agents: [agent("a")],
+			connections: [conn("c1", "a", "if-1", "a:out")],
+			controls: [{
+				id: "if-1", kind: "if", x: 0, y: 0,
+				branches: [
+					{ name: "done", field: "ignored", value: "junk", conditions: [{ field: "verdict", value: "approve" }] },
+					{ name: "retry" },
+				],
+			}],
+		} as never) as { agents: Array<{ bindings?: Array<Record<string, unknown>> }> };
+		deepStrictEqual(lowered.agents[0].bindings, [
+			{ field: "verdict", port: "done", value: "approve" },
+			{ port: "retry" },
+		]);
+	});
 	attempt("total over malformed records: normalize or skip, never throw", () => {
 		// A control with no feed is skipped whole; its edges vanish with it.
 		const skipped = lowerControls({
@@ -409,6 +542,49 @@ check("a future control kind validates as a plain endpoint", {
 		deepStrictEqual(branchless.agents[0].outputPorts, ["x"]);
 		deepStrictEqual(branchless.agents[0].bindings, [{ port: "x" }]);
 		deepStrictEqual((branchless as { connections: unknown[] }).connections.length, 1, "the control's feeding edge is gone");
+	});
+}
+
+// --- the one row reader: branchRows (the two persisted forms normalize here) --
+{
+	let ok = true;
+	const attempt = (name: string, run: () => void) => {
+		try {
+			run();
+			passed++;
+			console.log(`ok    ${name}`);
+		} catch (error) {
+			ok = false;
+			failed++;
+			console.error(`FAIL  ${name} — ${error && (error as Error).message}`);
+		}
+	};
+	attempt("the flat keys read as the single row", () => {
+		deepStrictEqual(branchRows({ name: "done", field: "verdict", value: "approve", op: ">=" }), [
+			{ field: "verdict", value: "approve", op: ">=" },
+		]);
+	});
+	attempt("a bare name is the catch-all branch (no rows)", () => {
+		deepStrictEqual(branchRows({ name: "retry" }), []);
+	});
+	attempt("a conditions list reads as its rows, in order", () => {
+		deepStrictEqual(branchRows({ name: "done", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "3", op: ">=" }] }), [
+			{ field: "verdict", value: "approve" },
+			{ field: "$count", value: "3", op: ">=" },
+		]);
+	});
+	attempt("conditions supersede flat keys (the editor never writes both)", () => {
+		deepStrictEqual(branchRows({ name: "done", field: "ignored", conditions: [{ field: "v", value: "1" }] }), [
+			{ field: "v", value: "1" },
+		]);
+	});
+	attempt("total over malformed input, never throws", () => {
+		deepStrictEqual(branchRows(null), []);
+		deepStrictEqual(branchRows(undefined), []);
+		deepStrictEqual(branchRows("nope"), []);
+		deepStrictEqual(branchRows({ name: "x", conditions: "nope" }), []);
+		deepStrictEqual(branchRows({ name: "x", conditions: [] }), []);
+		deepStrictEqual(branchRows({ name: "x", conditions: [7, null, { field: "v", value: "1" }] }), [{ field: "v", value: "1" }]);
 	});
 }
 
@@ -485,6 +661,16 @@ check("a future control kind validates as a plain endpoint", {
 	});
 	attempt("a >= row whose value is not a finite number parses to nothing (validation reports it)", () => {
 		deepStrictEqual(countThreshold([{ name: "done", field: "$count", value: "abc", op: ">=" }]), null);
+	});
+	attempt("the budget reads across a multi-condition gate's rows and later branches", () => {
+		deepStrictEqual(countThreshold([
+			{ name: "done", conditions: [{ field: "verdict", value: "approve" }, { field: "$count", value: "5", op: ">=" }] },
+			{ name: "retry" },
+		]), 5);
+		// An == count row inside a gate is still not a budget.
+		deepStrictEqual(countThreshold([
+			{ name: "done", conditions: [{ field: "$count", value: "2" }] },
+		]), null);
 	});
 	attempt("content rows and branch-less inputs give no budget", () => {
 		deepStrictEqual(countThreshold([{ name: "billing", field: "action", value: "billing" }]), null);

@@ -225,7 +225,6 @@
 }
 .pipeline-node.selected { border-color: var(--dsw-alias-brand-primary); box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary); }
 .pipeline-node .node-name { font-size: 13px; font-weight: 600; }
-.pipeline-node .node-sub { font-size: 10px; color: var(--dsw-alias-label-secondary); margin-top: 3px; }
 .pipeline-node .node-breakpoint {
 	position: absolute;
 	top: 3px;
@@ -395,9 +394,15 @@
 .pipeline-node.control.control-quiet .control-shape { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 60%, transparent)); }
 /* The shape layer is absolutely positioned, which paints it over the static
    text — lift the labels into the positioned layer (they come later in the
-   DOM, so this alone puts them back on top). */
-.pipeline-node.control .node-name,
-.pipeline-node.control .node-sub { position: relative; }
+   DOM, so this alone puts them back on top). The diamond's readable interior
+   is narrower than the 150px node box, so the authored display name wraps
+   inside the shape instead of painting past its edges. */
+.pipeline-node.control .node-name {
+	position: relative;
+	max-width: 112px;
+	text-align: center;
+	overflow-wrap: break-word;
+}
 /* One labeled tick per branch: the WRAPPER is dot-sized and centered on the
    vertex, so the dot sits exactly on it (straddling the corner, like an
    agent's tick on its node edge); the label hangs on a small base-colored
@@ -432,8 +437,9 @@
    the diamond's bottom vertex — a control has no status badge (its run state
    rides the border). A bottom-side branch tick anchors on that same vertex;
    the chip's base overlay keeps both readable when they coexist. The run
-   view's iteration chip (.node-iter below) mirrors it on the top vertex, so
-   the two slots never collide. */
+   view's iteration chip (.node-iter below) lives INSIDE the diamond instead
+   — every vertex is a tick or a label slot, and a chip parked on one was
+   painted over the moment hover revealed that tick. */
 .pipeline-node .node-warn {
 	position: absolute;
 	bottom: -8px;
@@ -447,18 +453,18 @@
 	border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warning-primary, #f59e0b) 50%, transparent);
 	color: var(--dsw-alias-state-warning-primary, #f59e0b);
 }
-/* The loop-iteration chip (the run view, loops L4): on a cycle the diamond's
-   top vertex carries `iter N`, promoted to `iter N/M` when a `$count >= M`
-   row parses off the branches — the count is derived from the record's
-   firings, never stored. Neutral colors: it is run information, not a
-   warning (the border keeps the fired/quiet vocabulary); a top-side branch
-   tick anchors on the same vertex, and the DOM order (chips render before
-   the ticks) keeps the tick the live pointer target. */
-.pipeline-node .node-iter {
-	position: absolute;
-	top: -8px;
-	left: 50%;
-	transform: translateX(-50%);
+/* The loop-iteration chip (the run view, loops L4): a small pill inside the
+   diamond under the name — the interior is the one
+   spot no tick, branch label, or open point ever occupies (they all live
+   on the vertices and edges), so hover can never cover the count.
+   `iter N`, promoted to `iter N/M` when a `$count >= M` row parses off the
+   branches — the count is derived from the record's firings, never stored.
+   Neutral colors: it is run information, not a warning (the border keeps
+   the fired/quiet vocabulary). position:relative lifts the pill above the
+   shape's SVG layer, same as the name/sub labels. */
+.pipeline-node.control .node-iter {
+	position: relative;
+	margin-top: 3px;
 	font-size: 9px;
 	line-height: 1;
 	padding: 2px 7px;

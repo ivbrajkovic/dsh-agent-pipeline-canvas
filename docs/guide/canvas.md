@@ -92,7 +92,8 @@ edits in one are visible in the other.
 - Each agent carries a **breakpoint dot** (top-left) that arms the
   [pause-on-output breakpoint](running-pipelines.md#breakpoints-grouped-pause-the-queue-resume--rerun--steer--abort).
   Nodes carry no edit button: editing an agent goes through its right-click
-  context menu (**Edit agent**), an If control's through **Edit branches**.
+  context menu (**Edit agent**) or a double-click on the node, an If
+  control's through **Edit branches** (or a double-click on the diamond).
 - A run paints each agent's state **on the node**: the border, a faint
   matching tint, and a **bottom-right badge** — a pulsing dot while
   **running**, pause bars when **paused** at its breakpoint, a check when
@@ -122,7 +123,11 @@ A control's menu carries **Edit branches** and **Delete control** (danger)
 only — a control never fires a child session. A **connection's** menu
 (right-click the wire) carries just **Delete connection** (danger); like the
 per-node menus it selects its target when it opens, and it closes if the
-wire vanishes before it is acted on.
+wire vanishes before it is acted on. A **double-click** on a node is the
+Edit shortcut: it selects the node and opens the same editor the menu's
+Edit row opens — an agent's config panel, a control's branch editor —
+without the menu (a breakpoint dot keeps its own double clicks; a wire drag
+keeps its pointer).
 
 ## Validation while editing
 
@@ -166,7 +171,8 @@ data — the exact shape the plugin persists and the runner consumes.
 ## The agent configuration panel
 
 Open an agent's configuration panel from its right-click context menu
-(**Edit agent**) — nodes carry no edit button. A wide two-column card shows
+(**Edit agent**) or by double-clicking the node — nodes carry no edit
+button. A wide two-column card shows
 everything visible; a plain click on the node still just selects it.
 
 ### Left column — behavior
@@ -269,7 +275,10 @@ something you can see and point at:
 
 - **Palette.** Drag an **If** from the palette onto the canvas like an agent
   (`if-1`, `if-2`, … — a separate id space from `agent-N`). The control
-  renders as a flowchart decision diamond: one unnamed input tick on the
+  renders as a flowchart decision diamond labeled with its **name** — `if`
+  until you rename it (the editor's **Name** field); the id itself is never
+  drawn, it stays the wire and executor identity (View JSON, validation
+  messages). The diamond carries one unnamed input tick on the
   left vertex, and one **labeled tick per branch** on the edge that branch's
   `side` picks (default right; two branches on one edge render stacked, same
   as ports). Like an agent's ticks, these hide at rest — the branch **name
@@ -286,18 +295,29 @@ something you can see and point at:
   trailing catch-all stays last), **Clear on the agent** drops them, and
   **Not now** lands the edge and leaves the conflict to the validation
   strip.
-- **Branches.** Right-click the control → **Edit branches** (nodes carry no
-  edit button; the menu is the only editor path). One row per branch —
-  `name | field op value | side` — with reorder, add, and remove. Each row
-  carries an **operator picker** (`==` the default, `>=` for a numeric
+- **Branches.** Right-click the control → **Edit branches**, or double-click
+  the diamond (nodes carry no
+  edit button; those are the two editor paths). The editor opens with a
+  **Name** field — the display name on the diamond, empty = `if` — above the
+  branch groups: one **gate** per branch — `name | side` — with any number
+  of **condition rows** (`field op value`) indented beneath it (**+
+  condition** adds one), plus reorder, add, and remove on the gate. A gate
+  fires when **any** of its conditions matches — so `verdict == approve`
+  and `$count >= 3` can share the "done" gate and its single tick, no
+  second branch stacked on the same edge. Each row carries an **operator
+  picker** (`==` the default, `>=` for a numeric
   at-least comparison), and the field input suggests the reserved
   **`$count`** — the feeding agent's firing sequence for this firing, the
-  iteration counter at a loop tail; a counter row reads as `count >= 3 →
-  name` on the row. Branches evaluate top to bottom: first match wins, and
-  the empty value is the catch-all and must stay last (the editor enforces
-  both live and blocks Save on a broken shape). Live row errors: a `>=`
+  iteration counter at a loop tail and the ONLY built-in field (the editor
+  says so above the rows) — plus the feeding agent's output-schema
+  properties, so the fields a gate may test are listed, not guessed; a
+  counter row reads as `count >= 3 →
+  name` on the row. Gates evaluate top to bottom: the first MATCHING gate
+  wins, and the catch-all — a gate with no conditions, or a final condition
+  with an empty value — must stay at the very end (the editor enforces
+  this live and blocks Save on a broken shape). Live row errors: a `>=`
   whose value is not a finite number is flagged on the row, and a valued
-  `$count` row that sits BELOW a row wiring back into the loop shows the
+  `$count` row that sits BELOW a condition wiring back into the loop shows the
   shadowing inline — that arrangement makes the count row no guard
   (`cycle-unguarded` names the same rows in the strip). A branch tick — or the
   control's open points — drags to the agent that handles it like any output
@@ -318,14 +338,17 @@ something you can see and point at:
   Without one, `cycle-unguarded` appears in the issue strip and the Run
   button stays disabled (see the issue strip above);
   with one, the loop just runs. During a run the loop's decision shows the
-  iteration: the diamond's top chip reads `iter 2` — the feeding agent's
+  iteration: a small `iter 2` pill inside the diamond, under
+  the name — the feeding agent's
   firing count (per node per run: a feeder fed from several contexts counts
   all of its firings; at a loop tail that is exactly the iteration number) —
   promoted to `iter 2/3` when a `$count >= 3` row parses off the branches.
   It is derived from the run record, never stored — it restores with the
   last run exactly like the node statuses — and it rides alongside the
   border's fired/quiet state and the ⚠ warning chip (which keeps the
-  diamond's bottom vertex).
+  diamond's bottom vertex). Inside is deliberate: every vertex is a tick or
+  label slot, so an outside chip was painted over the moment hover revealed
+  the tick it shared a vertex with.
 - **Warnings.** The control's ⚠ chip (and the same messages under the
   editor's rows) shows the non-fatal findings that name it: branches sharing
   one edge (`if-side-conflict`), and the never-fire cases — a source without

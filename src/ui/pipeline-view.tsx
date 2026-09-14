@@ -42,8 +42,8 @@
 import * as React from "react";
 import type { MenuEntry } from "@deepseek-ai/dsh-client-ui-primitives";
 import { validateGraph, cycleNodeIds, loopControlIds, inputPortOnSide, outputPortOnSide, resolveWireDrop, retractOrphanPorts, type PortPatch, type WireDropVerdict } from "../graph.ts";
-import { countThreshold, firedBranches, lowerControls } from "../controls.ts";
-import { classifyGraph, topoOrder, COUNT_KEY } from "../execution.ts";
+import { branchRows, countThreshold, firedBranches, lowerControls } from "../controls.ts";
+import { classifyGraph, topoOrder, COUNT_KEY, isValuedRow } from "../execution.ts";
 import { projectNodes, type ProjectedNode } from "../projection.ts";
 import { composePipelineInput, finalOutputText } from "../message.ts";
 import type { IfBranch, PortSide, RunFiringStatus, ValidationError, ValidationResult } from "../types.ts";
@@ -702,7 +702,8 @@ function PipelineView({
 	// never-fired node shows the row disabled, and disabled rows never
 	// dispatch). A control never fires a child session, so its menu carries
 	// only Edit branches and Delete control. A connection's menu (right-click
-	// the wire) carries just Delete connection.
+	// the wire) carries just Delete connection. A double-click is the Edit
+	// shortcut (onNodeDoubleClick below — same routing, no menu).
 	function onNodeContextMenu(e: React.MouseEvent, nodeId: string) {
 		e.preventDefault(); e.stopPropagation();
 		selectNode(nodeId);
@@ -734,6 +735,16 @@ function PipelineView({
 			{ type: "separator", id: "menu-sep-delete" },
 			{ id: "delete", label: "Delete agent", danger: true },
 		];
+	}
+	// Double-click opens the same editor the menu's Edit row opens — an agent
+	// gets its config panel, a control its branch editor (identical routing).
+	// A wire drag keeps its pointer: while one is in flight the second press
+	// is that drag's drop, never a click.
+	function onNodeDoubleClick(nodeId: string) {
+		if (connectRef.current) return;
+		selectNode(nodeId);
+		if (controls.some((k) => k.id === nodeId)) setConfigControlId(nodeId);
+		else setConfigAgentId(nodeId);
 	}
 	function runNodeMenuAction(id: string) {
 		if (nodeMenu === null) return;
@@ -1642,6 +1653,10 @@ function PipelineView({
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
 				onContextMenu={(e) => { onNodeContextMenu(e, agent.id); }}
+				onDoubleClick={() => { onNodeDoubleClick(agent.id); }}
+				// The tooltip carries the id: the issue strip addresses agents by id
+				// (cycle paths, port mismatches), and the canvas draws only names.
+				title={agent.id}
 			>
 				<button
 					className={"node-breakpoint" + (agent.breakpoint ? " armed" : "")}
@@ -1654,13 +1669,16 @@ function PipelineView({
 						e.stopPropagation();
 						setAgents((prev) => prev.map((a) => (a.id === agent.id ? { ...a, breakpoint: !a.breakpoint } : a)));
 					}}
+					// The button owns its own double clicks: two rapid presses are a
+					// double toggle (a no-op), and they must not also open the
+					// editor the node's double-click opens.
+					onDoubleClick={(e) => { e.stopPropagation(); }}
 				>
 					<svg width={10} height={10} viewBox="0 0 24 24" aria-hidden="true">
 						<circle cx={12} cy={12} r={8} fill="currentColor" />
 					</svg>
 				</button>
 				<div className="node-name">{agent.name}</div>
-				<div className="node-sub">{agent.id}</div>
 				{liveStatus !== null ? (
 					<div className={"node-badge status-" + liveStatus} title={RUN_STATUS_TITLE[liveStatus]} aria-label={agent.name + ": " + RUN_STATUS_TITLE[liveStatus]}>
 						{statusBadgeIcon(liveStatus)}
@@ -1726,29 +1744,50 @@ function PipelineView({
 	}
 
 	// The branch editor's per-row shadowing diagnosis (docs/proposals/loops.md
-	// L3): for each VALUED $count row, the first row above it whose branch
-	// wiring enters a cycle node — the arrangement that makes the count row no
-	// guard, worded like cycle-unguarded's row finding. Computed here, where
-	// the graph lives (the editor sees only its draft rows); keyed by branch
-	// name so the editor's local reordering keeps each warning on its row.
+	// L3): for each VALUED $count row, the first condition above it — in the
+	// same branch or any branch above — whose branch wiring enters a cycle
+	// node; the arrangement that makes the count row no guard, worded like
+	// cycle-unguarded's row finding (the lowered rows the guard walk reads are
+	// exactly this flattened order). Computed here, where the graph lives (the
+	// editor sees only its draft rows); keyed by branch name so the editor's
+	// local reordering keeps each warning on its row.
 	function branchShadowWarnings(control: CanvasControl): Record<string, string> {
 		const onCycle = cycleNodeIds(graphData);
 		const out: Record<string, string> = {};
-		control.branches.forEach((row, index) => {
-			if (row.field !== COUNT_KEY) return;
-			if (row.value === undefined || row.value === "") return;
-			const rowName = String(row.name ?? "");
+		const rows = control.branches.flatMap((branch) =>
+			branchRows(branch).map((row) => ({ name: String(branch.name ?? ""), row })));
+		rows.forEach((entry, index) => {
+			if (entry.row.field !== COUNT_KEY) return;
+			if (!isValuedRow(entry.row)) return;
+			if (entry.name.length === 0) return;
 			for (let above = 0; above < index; above++) {
-				const name = String(control.branches[above].name ?? "");
-				if (name.length === 0) continue;
-				const wiresIntoLoop = connections.some((c) => c.source === control.id && c.sourcePort === name && onCycle.has(c.target));
+				const prior = rows[above];
+				if (prior.name.length === 0) continue;
+				const wiresIntoLoop = connections.some((c) => c.source === control.id && c.sourcePort === prior.name && onCycle.has(c.target));
 				if (wiresIntoLoop) {
-					out[rowName] = `the $count row "${rowName}" sits below row "${name}", which wires back into the loop and shadows it`;
+					out[entry.name] = prior.name === entry.name
+						? `the $count row "${entry.name}" sits below an earlier condition of the same branch, which wires back into the loop and shadows it`
+						: `the $count row "${entry.name}" sits below row "${prior.name}", which wires back into the loop and shadows it`;
 					break;
 				}
 			}
 		});
 		return out;
+	}
+
+	// The feeding agent's output-schema property names — what a gate may test
+	// beyond the $count built-in, offered as the field inputs' suggestions so
+	// the fields are visible in the editor, not guessed.
+	function controlFieldOptions(control: CanvasControl): string[] {
+		const feeder = connections.find((c) => c.target === control.id)?.source;
+		const agent = agents.find((a) => a.id === feeder);
+		const schema = agent?.settings?.outputSchema;
+		const props = schema != null && typeof schema === "object" && !Array.isArray(schema)
+			? (schema as { properties?: unknown }).properties
+			: undefined;
+		return props != null && typeof props === "object" && !Array.isArray(props)
+			? Object.keys(props).filter((k) => k.length > 0 && k !== COUNT_KEY)
+			: [];
 	}
 
 	// The control nodes: the flowchart DECISION shape — a diamond — one
@@ -1761,8 +1800,9 @@ function PipelineView({
 	// armed/fired/quiet from the feeding agent's firing) and shows as the
 	// diamond's BORDER — armed brand, fired success, quiet warning; idle
 	// stays at rest — plus the branch-edge highlight and the hover tooltip;
-	// no run word is rendered. Editing is the context menu's Edit branches —
-	// nodes carry no edit button.
+	// no run word is rendered. Editing is the context menu's Edit branches,
+	// or a double-click on the diamond (the same routing) — nodes carry no
+	// edit button.
 	const controlNodes = controls.map((control) => {
 		const selected = control.id === selectedId;
 		const hoveredIn = hoverTarget === control.id && gesture;
@@ -1785,30 +1825,37 @@ function PipelineView({
 				style={{ left: control.x + "px", top: control.y + "px" }}
 				data-control-id={control.id}
 				data-control-run-state={runState?.state ?? ""}
-				title={runState !== null ? controlRunTitle(runState) : undefined}
+				// The tooltip carries the id: validation and the issue strip address
+				// controls and agents by id (if-source-invalid, cycle-present), and
+				// the canvas draws only display names — hover is where the two
+				// vocabularies meet.
+				title={(runState !== null ? controlRunTitle(runState) + " — " : "") + control.id}
 				onPointerDown={(e) => { onNodePointerDown(e, control.id, control.x, control.y, "control"); }}
 				onPointerEnter={(e) => { onNodePointerEnter(e, control.id); }}
 				onPointerLeave={(e) => { onNodePointerLeave(e, control.id); }}
 				onPointerMove={onNodePointerMove}
 				onPointerUp={onNodePointerUp}
 				onContextMenu={(e) => { onNodeContextMenu(e, control.id); }}
+				onDoubleClick={() => { onNodeDoubleClick(control.id); }}
 			>
 				<svg className="control-shape" viewBox={"0 0 " + CONTROL_W + " " + CONTROL_H} preserveAspectRatio="none" aria-hidden="true">
 					<polygon points={CONTROL_W / 2 + ",0 " + CONTROL_W + "," + CONTROL_H / 2 + " " + CONTROL_W / 2 + "," + CONTROL_H + " 0," + CONTROL_H / 2} />
 				</svg>
-				<div className="node-name">{isIf ? "if" : control.kind}</div>
-				<div className="node-sub">{control.id}</div>
-				{warnings.length > 0 ? (
-					<div className="node-warn" title={warnings.map((w) => w.message).join("\n")}>
-						{"⚠ " + warnings.length}
-					</div>
-				) : null}
+				{/* The display name: the authored name, else the kind. The id is
+				    deliberately not rendered — it stays the wire/executor identity
+				    (View JSON, validation messages) but the canvas is names only. */}
+				<div className="node-name">{control.name ?? (isIf ? "if" : control.kind)}</div>
 				{runState?.iter !== undefined ? (
 					<div
 						className="node-iter"
 						title={iterWords(runState.iter) + " — the feeding agent's firing count on this loop"}
 					>
 						{iterLabel(runState.iter)}
+					</div>
+				) : null}
+				{warnings.length > 0 ? (
+					<div className="node-warn" title={warnings.map((w) => w.message).join("\n")}>
+						{"⚠ " + warnings.length}
 					</div>
 				) : null}
 				<div
@@ -2045,8 +2092,9 @@ function PipelineView({
 					control={configControl}
 					warnings={controlWarnings(configControl)}
 					rowWarnings={branchShadowWarnings(configControl)}
-					onSave={(branches) => {
-						setControls((prev) => prev.map((k) => (k.id === configControl.id ? { ...k, branches } : k)));
+					fieldOptions={controlFieldOptions(configControl)}
+					onSave={(name, branches) => {
+						setControls((prev) => prev.map((k) => (k.id === configControl.id ? { ...k, branches, ...(name.length > 0 ? { name } : { name: undefined }) } : k)));
 						setConfigControlId(null);
 					}}
 					onClose={() => { setConfigControlId(null); }}
