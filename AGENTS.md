@@ -6,6 +6,10 @@ The relevant projects are indexed by Codebase Memory. Prefer its code graph for 
 
 Project documentation lives in `docs/` — start at `docs/index.md`. The README is a short overview; the guides (`docs/guide/`) and reference documents (`docs/reference/`) carry the details, so link to them instead of growing the README.
 
+## Commits
+
+Keep commit messages short: a conventional subject line (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:` — under 72 chars) plus at most a short body of a few lines saying what changed and why. Never narrate the session in a commit: decision rationale, review/scrutiny verdicts, test matrices, and E2E verification logs belong in `docs/` (or nowhere), not in the commit message. Every `git log` should stay cheap for humans and agents to read.
+
 ## Development
 
 The active DSH Web profile installs this checkout as a DSH bundle (pnpm `link:` — the profile serves these files directly), so publishing changes is:
